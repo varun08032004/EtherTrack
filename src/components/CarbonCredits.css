@@ -1,0 +1,326 @@
+/* Global Styling */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Roboto', sans-serif;
+    background-color: #f0f4f8;
+    color: #333;
+    line-height: 1.6;
+    padding: 20px;
+}
+
+h1 {
+    color: #000000e2; /* Keep this for h1 */
+    text-align: center;
+    font-weight: 700;
+}
+
+h2 {
+    color: #333; /* Keep this for h2 */
+    text-align: center;
+    font-weight: 700;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+/* Main layout */
+.carbon-credits-trading {
+    width: 100%;
+    background-color: #ffffff;
+    border-radius: 12px;
+    padding: 40px;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.1);
+    margin-bottom: 50px;
+    transition: all 0.3s ease;
+}
+
+.carbon-credits-trading:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 12px 24px rgba(0, 0, 0, 0.15);
+}
+
+/* Alerts Styling */
+.alerts {
+    margin-bottom: 20px;
+}
+
+.alert {
+    background-color: #ffef96;
+    color: #856404;
+    padding: 12px;
+    margin-bottom: 10px;
+    border-radius: 8px;
+    font-weight: bold;
+    text-align: center;
+    transition: all 0.3s ease;
+}
+
+.alert:hover {
+    background-color: #ffe066;
+}
+
+/* Trading Interface */
+.trading-interface {
+    width: 100%;
+    margin-bottom: 40px;
+}
+
+.trading-interface h2 {
+    font-size: 1.5em;
+    margin-bottom: 20px;
+    font-weight: 600;
+}
+
+.filter {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 20px;
+    padding: 10px 0;
+}
+
+.filter input {
+    width: 30%;
+    padding: 10px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    transition: border 0.3s, box-shadow 0.3s;
+}
+
+.filter input:focus {
+    border-color: #1a73e8;
+    box-shadow: 0 0 5px rgba(26, 115, 232, 0.5);
+    outline: none;
+}
+
+.filter input::placeholder {
+    color: #888;
+}
+
+/* Credits List */
+ul {
+    list-style: none;
+    padding: 0;
+}
+
+ul li {
+    background: linear-gradient(135deg, #e3f2fd, #bbdefb);
+    padding: 20px;
+    margin-bottom: 15px;
+    border-radius: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+    transition: background-color 0.3s, transform 0.3s;
+}
+
+ul li:hover {
+    background-color: #90caf9;
+    transform: scale(1.02);
+}
+
+ul li button {
+    padding: 10px 20px;
+    border: none;
+    background-color: #1a73e8;
+    color: #fff;
+    border-radius: 6px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: background-color 0.3s, box-shadow 0.3s;
+}
+
+ul li button:hover {
+    background-color: #0c58d8;
+    box-shadow: 0 4px 12px rgba(26, 115, 232, 0.4);
+}
+
+/* Transaction History */
+.transaction-history {
+    width: 100%;
+    margin-bottom: 40px;
+}
+
+.transaction-history h2 {
+    font-size: 1.5em;
+    margin-bottom: 20px;
+    font-weight: 600;
+}
+
+.transaction-history table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.transaction-history table th,
+.transaction-history table td {
+    padding: 15px;
+    text-align: left;
+    border-bottom: 1px solid #ddd;
+}
+
+.transaction-history table th {
+    background-color: #f0f4f8;
+    font-weight: 700;
+    color: #444;
+}
+
+.transaction-history table td {
+    background-color: #fff;
+    color: #555;
+    transition: background-color 0.3s;
+}
+
+.transaction-history table tr:hover td {
+    background-color: #e8f4fd;
+}
+
+/* Portfolio Summary */
+.portfolio-summary {
+    background-color: #e0f7fa;
+    padding: 15px;
+    margin-bottom: 20px;
+    border-radius: 12px;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+}
+
+.portfolio-summary h2 {
+    font-size: 1.5em;
+    font-weight: 600;
+    margin-bottom: 15px;
+}
+
+/* Leaderboard */
+.leaderboard {
+    background-color: #f0f4c3;
+    padding: 15px;
+    border-radius: 12px;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+    margin-bottom: 20px;
+}
+
+.leaderboard ul {
+    list-style: none;
+    padding-left: 0;
+}
+
+.leaderboard ul li {
+    background-color: #fafafa;
+    padding: 12px;
+    margin-bottom: 10px;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+    transition: background-color 0.3s ease, transform 0.3s ease;
+}
+
+.leaderboard ul li:hover {
+    background-color: #d4e157;
+    transform: translateY(-3px);
+}
+
+/* Wallet Integration */
+.wallet {
+    width: 100%;
+    margin-bottom: 40px;
+}
+
+.wallet h2 {
+    font-size: 1.5em;
+    margin-bottom: 20px;
+    font-weight: 600;
+}
+
+.wallet ul {
+    padding: 0;
+}
+
+.wallet ul li {
+    background-color: #f1f8e9;
+    padding: 12px;
+    margin-bottom: 10px;
+    border-radius: 8px;
+    font-size: 1em;
+    font-weight: 600;
+    color: #33691e;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.05);
+    transition: background-color 0.3s, transform 0.3s;
+}
+
+.wallet ul li:hover {
+    background-color: #dcedc8;
+    transform: translateX(5px);
+}
+
+/* Specific styling for Ethertrack header */
+.header {
+    color: #1a73e8; /* Customize header color here */
+    text-align: center;
+    font-size: 2em; /* Adjust size as necessary */
+    margin-bottom: 20px;
+}
+
+/* Button Styling */
+.button {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 6px;
+    background-color: #1a73e8;
+    color: #fff;
+    font-weight: bold;
+    cursor: pointer;
+    transition: background-color 0.3s, box-shadow 0.3s;
+}
+
+.button:hover {
+    background-color: #0c58d8;
+    box-shadow: 0 4px 12px rgba(26, 115, 232, 0.4);
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+    .filter {
+        flex-direction: column;
+    }
+
+    .filter input {
+        width: 100%;
+        margin-bottom: 10px;
+    }
+
+    ul li {
+        flex-direction: column;
+    }
+
+    ul li button {
+        width: 100%;
+        margin-top: 10px;
+    }
+}
+
+@media (max-width: 576px) {
+    .carbon-credits-trading {
+        padding: 20px;
+    }
+
+    h1, h2 {
+        font-size: 1.3em;
+    }
+
+    ul li {
+        padding: 15px;
+    }
+
+    .wallet ul li,
+    .transaction-history table td,
+    .transaction-history table th {
+        font-size: 0.9em;
+    }
+}

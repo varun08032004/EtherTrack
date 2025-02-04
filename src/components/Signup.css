@@ -1,0 +1,85 @@
+.signup-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: calc(100vh - 80px); /* Adjust height to avoid overlap with header */
+  background-color: #f0f2f5;
+  margin-top: -30px; /* Add margin to avoid overlap with fixed header */
+  padding: 20px; /* Padding around the content */
+}
+
+.signup-container h1 {
+  margin-bottom: 20px;
+}
+
+.signup-container input {
+  margin: 10px 0;
+  padding: 10px;
+  width: 200px; /* You may consider changing this to a relative unit for better responsiveness */
+  border: 1px solid #ccc;
+  border-radius: 5px;
+  transition: border-color 0.3s; /* Smooth transition for border color */
+}
+
+.signup-container input:focus {
+  border-color: #007bff; /* Highlight border on focus */
+  outline: none; /* Remove default outline */
+}
+
+.signup-container input.invalid {
+  border-color: red; /* Red border for invalid input */
+}
+
+.signup-container button {
+  padding: 10px 20px;
+  border: none;
+  background-color: #007bff;
+  color: #fff;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background-color 0.3s ease; /* Smooth transition for background color */
+}
+
+.signup-container button:hover {
+  background-color: #0056b3;
+}
+
+.signup-container button:focus {
+  outline: none; /* Remove default outline */
+  box-shadow: 0 0 5px rgba(0, 123, 255, 0.5); /* Add a glow effect */
+}
+
+.error-message {
+  color: red; /* Error message color */
+  margin-top: 5px; /* Space between input and error message */
+  font-size: 12px; /* Font size for error message */
+}
+
+.social-buttons {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-top: 20px; /* Space between sign-up button and social buttons */
+}
+
+.social-buttons button {
+  padding: 10px 20px;
+  margin: 5px 0; /* Space between social buttons */
+  border: none;
+  background-color: #f0f2f5; /* Light background for social buttons */
+  color: #333; /* Text color */
+  border-radius: 5px;
+  cursor: pointer;
+  display: flex;
+  align-items: center; /* Center icons vertically */
+  transition: background-color 0.3s ease; /* Smooth transition for background color */
+}
+
+.social-buttons button:hover {
+  background-color: #e1e1e1; /* Slightly darker on hover */
+}
+
+.social-buttons button svg {
+  margin-right: 8px; /* Space between icon and text */
+}

@@ -1,0 +1,14 @@
+.token-management {
+    padding: 20px;
+    background-color: #f4f4f4;
+}
+
+.token-management h1 {
+    font-size: 24px;
+    color: #333;
+}
+
+.token-management p {
+    font-size: 16px;
+    color: #666;
+}

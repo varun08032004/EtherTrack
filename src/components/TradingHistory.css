@@ -1,0 +1,14 @@
+.trading-history {
+    padding: 20px;
+    background-color: #f4f4f4;
+}
+
+.trading-history h1 {
+    font-size: 24px;
+    color: #333;
+}
+
+.trading-history p {
+    font-size: 16px;
+    color: #666;
+}

@@ -1,0 +1,54 @@
+/* General container for the Help page */
+.help-container {
+    padding: 20px;
+    max-width: 800px;
+    margin: 0 auto;
+    font-family: Arial, sans-serif;
+    line-height: 1.6;
+}
+
+/* Header styling */
+.help-container h1 {
+    font-size: 28px;
+    margin-bottom: 20px;
+    text-align: center;
+}
+
+/* Sections styling */
+.help-section {
+    margin-bottom: 40px;
+}
+
+.help-section h2 {
+    font-size: 24px;
+    margin-bottom: 10px;
+    color: #333;
+}
+
+.help-section ul {
+    list-style: none;
+    padding: 0;
+}
+
+.help-section li {
+    margin-bottom: 20px;
+}
+
+.help-section h3 {
+    font-size: 18px;
+    color: #007bff;
+}
+
+.help-section p {
+    font-size: 16px;
+    margin: 10px 0;
+}
+
+.help-section a {
+    color: #007bff;
+    text-decoration: none;
+}
+
+.help-section a:hover {
+    text-decoration: underline;
+}
