@@ -5,20 +5,29 @@
   "dependencies": {
     "@emotion/react": "^11.13.3",
     "@emotion/styled": "^11.13.0",
+    "@firebasegen/default-connector": "file:dataconnect-generated/js/default-connector",
     "@mui/material": "^6.0.2",
+    "@stripe/react-stripe-js": "^3.1.1",
+    "@stripe/stripe-js": "^5.6.0",
     "@testing-library/jest-dom": "^5.17.0",
     "@testing-library/react": "^13.4.0",
     "@testing-library/user-event": "^13.5.0",
-    "axios": "^1.7.7",
+    "@walletconnect/web3-provider": "^1.8.0",
+    "axios": "^1.9.0",
     "chart.js": "^4.4.4",
-    "firebase": "^10.14.0",
+    "ethers": "^6.13.5",
+    "firebase": "^10.14.1",
+    "qrcode.react": "^4.2.0",
     "react": "^18.3.1",
     "react-chartjs-2": "^5.2.0",
     "react-dom": "^18.3.1",
     "react-icons": "^5.3.0",
     "react-router-dom": "^6.26.1",
     "react-scripts": "5.0.1",
-    "web-vitals": "^2.1.4"
+    "react-stripe-checkout": "^2.6.3",
+    "react-ts-tradingview-widgets": "^1.2.8",
+    "web-vitals": "^2.1.4",
+    "web3": "^4.16.0"
   },
   "scripts": {
     "start": "react-scripts start",
@@ -43,5 +52,20 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
+  },
+  "devDependencies": {
+    "assert": "^2.1.0",
+    "autoprefixer": "^10.4.21",
+    "buffer": "^6.0.3",
+    "crypto-browserify": "^3.12.1",
+    "gh-pages": "^6.3.0",
+    "https-browserify": "^1.0.0",
+    "os-browserify": "^0.3.0",
+    "postcss": "^8.5.6",
+    "process": "^0.11.10",
+    "stream-browserify": "^3.0.0",
+    "stream-http": "^3.2.0",
+    "tailwindcss": "^4.1.11",
+    "url": "^0.11.4"
   }
 }

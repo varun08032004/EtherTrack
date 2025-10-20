@@ -1,23 +1,28 @@
+/* Dashboard Container */
 .dashboard-container {
   display: flex;
   flex-direction: column;
   height: 100vh;
 }
 
+/* Navbar Styles */
 .navbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 10px;
-  background-color: #f5f5f5; /* Light background */
-  border-bottom: 1px solid #ddd;
+  padding: 8px 20px; /* Adjusted padding */
+  height: 60px; /* Standard height */
+  background-color: black; /* Matches your theme */
+  border-bottom: 1px solid #444; /* Subtle separation */
 }
 
+/* Navbar Left */
 .navbar-left {
   display: flex;
   align-items: center;
 }
 
+/* Menu Button (Hamburger) */
 .menu-container {
   position: relative;
 }
@@ -26,112 +31,64 @@
   background: none;
   border: none;
   cursor: pointer;
-  font-size: 20px; /* Adjust size as needed */
+  font-size: 14px;
+  color: white; /* Better contrast */
+  padding: 4px 6px;
 }
 
 .menu-line {
   display: block;
   width: 25px;
   height: 3px;
-  background-color: #333;
+  background-color: white; /* White for contrast */
   margin: 4px 0;
 }
 
-/* Dropdown menu for the hamburger */
+/* Dropdown Menu for Hamburger */
 .menu-dropdown {
   display: flex;
   flex-direction: column;
   position: absolute;
-  top: 100%; /* Position directly below the button */
-  left: 0; /* Align with the left edge of the button */
+  top: 100%;
+  left: 0;
   background-color: white;
   border: 1px solid #ddd;
   box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
   z-index: 1000;
-  min-width: 160px; /* Adjust width as needed */
+  min-width: 160px;
 }
 
-/* General styles for dropdown links */
 .menu-dropdown a {
-  padding: 12px 20px; /* Increased padding for better click area */
+  padding: 12px 20px;
   text-decoration: none;
   color: #333;
-  display: flex; /* Use flexbox for alignment */
-  align-items: center; /* Center the text vertically */
-  transition: background-color 0.2s, color 0.2s; /* Smooth transition for hover effects */
+  display: flex;
+  align-items: center;
+  transition: background-color 0.2s, color 0.2s;
 }
 
-/* Hover effect for dropdown items */
 .menu-dropdown a:hover {
-  background-color: #007bff; /* Match primary color on hover */
-  color: white; /* Change text color on hover */
+  background-color: #007bff;
+  color: white;
 }
 
+/* Navbar Center */
 .navbar-center {
   padding-left: 10vw;
   display: flex;
   justify-content: center;
   align-items: center;
-  flex: 1; /* Ensure this section takes up available space */
-}
-
-/* Specific styling for application button in dropdown */
-.application-btn {
-  color: rgb(7, 7, 7); /* White text */
-  border: none; /* No border */
-  padding-right: 30px;
-  padding-top: 12px;
-  padding-bottom: 12px; /* Consistent padding */
-  font-size: 16px;
-  cursor: pointer;
-  border-radius: 5px; /* Rounded corners */
-  transition: background-color 0.2s; /* Smooth transition for hover */
-}
-
-/* Hover effect for application button */
-.application-btn:hover {
-  background-color: #0056b3; /* Darker shade on hover */
-}
-
-/* Dashboard content styling */
-.dashboard-content {
   flex: 1;
-  padding: 20px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center; /* Center the application boxes in the middle */
 }
 
-.application-boxes {
-  display: flex;
-  justify-content: center;
-  gap: 20px; /* Space between boxes */
-  width: 100%;
-}
-
-.application-box {
-  background-color: #f5f5f5;
-  border: 1px solid #ddd;
-  border-radius: 5px;
-  padding: 140px; /* Increased height */
-  text-align: center;
-  flex: 1;
-  max-width: 50%; /* Ensure two boxes fit side by side */
-  box-sizing: border-box;
-  transition: transform 0.2s; /* Animation effect */
-}
-
-.application-box:hover {
-  transform: scale(1.02); /* Slightly scale up on hover */
-}
-
+/* Navbar Right */
 .navbar-right {
   display: flex;
   align-items: center;
-  gap: 20px; /* Space out the buttons */
+  gap: 20px;
 }
 
+/* Help, Settings, and Profile Icons */
 .help-container,
 .settings-container,
 .profile-dropdown {
@@ -144,104 +101,143 @@
   background: none;
   border: none;
   cursor: pointer;
-  font-size: 24px; /* Adjust size as needed */
+  font-size: 20px; /* Adjusted size */
+  color: white;
+  padding: 5px;
 }
 
+/* Align help icon properly */
+.help-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Dropdown Styling */
 .dropdown-content {
   display: flex;
   flex-direction: column;
   position: absolute;
-  top: 100%; /* Position directly below the button */
-  right: 0; /* Align with the right edge of the button */
+  top: 100%;
+  right: 0;
   background-color: white;
   border: 1px solid #ddd;
   box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
   z-index: 1000;
-  min-width: 160px; /* Adjust width as needed */
+  min-width: 160px;
 }
 
-/* Dropdown styles for profile section */
 .dropdown-content a {
-  padding: 12px 20px; /* Increased padding for better click area */
+  padding: 12px 20px;
   text-decoration: none;
   color: #333;
-  display: flex; /* Use flexbox for alignment */
-  align-items: center; /* Center the text vertically */
-  transition: background-color 0.2s; /* Smooth transition for hover effects */
+  display: flex;
+  align-items: center;
+  transition: background-color 0.2s;
 }
 
-/* Hover effect for dropdown items in profile */
 .dropdown-content a:hover {
-  background-color: #007bff; /* Match primary color on hover */
-  color: white; /* Change text color on hover */
+  background-color: #007bff;
+  color: white;
 }
 
-/* Logout button in profile dropdown */
+/* Logout Button */
 .dropdown-content button {
-  background-color: #e74c3c; /* Red background for logout */
-  color: white; /* White text color */
-  border: none; /* No border */
-  padding: 12px 20px; /* Consistent padding */
-  border-radius: 5px; /* Rounded corners */
-  cursor: pointer; /* Pointer cursor */
-  transition: background-color 0.2s; /* Smooth transition for hover */
-}
-
-/* Hover effect for logout button */
-.dropdown-content button:hover {
-  background-color: #c0392b; /* Darker shade on hover */
-}
-
-.btn {
+  background-color: #e74c3c;
+  color: white;
+  border: none;
   padding: 12px 20px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background-color 0.2s;
 }
 
-/* Dashboard default content styling */
+.dropdown-content button:hover {
+  background-color: #c0392b;
+}
+
+/* Dashboard Content */
+.dashboard-content {
+  flex: 1;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Application Boxes */
+.application-boxes {
+  display: flex;
+  justify-content: center;
+  gap: 20px;
+  width: 100%;
+}
+
+.application-box {
+  background-color: #f5f5f5;
+  border: 1px solid #ddd;
+  border-radius: 5px;
+  padding: 140px;
+  text-align: center;
+  flex: 1;
+  max-width: 50%;
+  box-sizing: border-box;
+  transition: transform 0.2s;
+}
+
+.application-box:hover {
+  transform: scale(1.02);
+}
+
+/* Default Dashboard Content */
 .dashboard-default-content {
-  text-align: center; /* Center align the text */
-  padding: 40px; /* Add padding for spacing */
-  background-color: #f9f9f9; /* Light background color */
-  border: 1px solid #ddd; /* Add border */
-  border-radius: 8px; /* Rounded corners */
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); /* Subtle shadow for depth */
-  margin-top: 0px; /* Space above the section */
+  text-align: center;
+  padding: 40px;
+  background-color: #000; /* Black background */
+  border: 1px solid #4CAF50; /* Green border */
+  border-radius: 12px;
+  box-shadow: 0 4px 15px rgba(0, 255, 0, 0.2); /* Green glow */
+  color: #4CAF50; /* Green text */
+  margin-top: 0px;
 }
 
 .dashboard-default-content h2 {
-  font-size: 2em; /* Larger font size for the heading */
-  color: #333; /* Dark color for the heading */
-  margin-bottom: 10px; /* Space below the heading */
+  font-size: 2em;
+  color: #4CAF50; /* Green text */
+  margin-bottom: 10px;
 }
 
 .dashboard-default-content h3 {
-  font-size: 1.5em; /* Slightly larger font size for subheadings */
-  color: #007bff; /* Primary color for subheadings */
-  margin-top: 20px; /* Space above subheadings */
+  font-size: 1.5em;
+  color: #4CAF50; /* Green for headings */
+  margin-top: 20px;
 }
 
-.dashboard-default-content p {
-  font-size: 1.2em; /* Slightly larger font size for paragraphs */
-  color: #555; /* Medium gray for paragraph text */
-  line-height: 1.5; /* Increase line height for readability */
+.dashboard-default-content p,
+.dashboard-default-content ul {
+  color: #ccc; /* Light grey text for readability */
+  font-size: 1.1em;
+  line-height: 1.5;
 }
 
 .dashboard-default-content ul {
-  list-style-type: disc; /* Use disc bullets */
-  padding-left: 20px; /* Indent the list */
+  list-style-type: disc;
+  padding-left: 20px;
 }
 
-/* Responsive adjustments */
+/* Responsive Design */
 @media (max-width: 768px) {
   .navbar {
-    flex-direction: column; /* Stack the navbar items on smaller screens */
+    flex-direction: column;
     padding: 5px;
   }
 
   .application-boxes {
-    flex-direction: column; /* Stack application boxes vertically */
+    flex-direction: column;
   }
 
   .application-box {
-    max-width: 100%; /* Allow boxes to take full width on small screens */
+    max-width: 100%;
   }
 }

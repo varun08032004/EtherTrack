@@ -5,36 +5,69 @@
     box-sizing: border-box;
 }
 
+/* Header Styling */
 .app-header {
-    width: 100%; /* Full width */
-    padding: 0.5rem 1rem;
-    background-color: #333;
+    width: 100%;
+    padding: 0.75rem 1.5rem;
+    background-color: #222; /* Slightly darker for a modern look */
     color: white;
     display: flex;
     align-items: center;
+    justify-content: space-between;
     border-bottom: 1px solid #444;
-    position: fixed; /* Fixed position to stay on top */
-    top: 0; /* Align to the top */
-    left: 0; /* Align to the left */
-    z-index: 1000; /* Ensure it is on top of other elements */
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 1000;
 }
 
+/* Logo and Title Alignment */
 .app-header .logo-link {
     display: flex;
-    align-items: center;
+    align-items: center; /* Ensures vertical alignment */
+    gap: 8px; /* Adjust spacing between logo and text */
     text-decoration: none;
     color: white;
 }
 
 .app-header .logo {
     height: 40px;
-    margin-right: 0.5rem;
+    width: auto;
+    display: block;
 }
 
+/* Ensuring perfect text alignment */
 .app-header h1 {
-    margin: 0;
-    font-size: 1.5rem;
+    font-size: 1.6rem;
     color: white;
-    text-align: center;
-    
+    margin: 0;
+    padding: 0;
+    line-height: 1; /* Ensures no extra spacing */
+    display: flex;
+    align-items: center;
+}
+
+/* Logout Button */
+.app-header .logout-btn {
+    background-color: #555; /* Subtle grayish-blue */
+    color: white;
+    border: none;
+    padding: 0.4rem 0.8rem;
+    font-size: 0.9rem;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background 0.3s ease;
+    position: absolute;
+    right: 1rem; /* Align to right */
+    top: 50%;
+    transform: translateY(-50%); /* Center vertically */
+}
+
+.app-header .logout-btn:hover {
+    background-color: #777; /* Slightly lighter on hover */
+}
+
+/* Prevent content from hiding behind fixed header */
+.main-content {
+    padding-top: 4rem; /* Adjust based on header height */
 }

@@ -15,6 +15,7 @@ h1 {
     color: #333; /* Darker color for better contrast */
     margin-bottom: 25px; /* Space below the heading */
     text-align: center; /* Center align the heading */
+    margin-top: 40px;
 }
 
 /* Filters Section Styles */

@@ -1,0 +1,9 @@
+.Trading-View-Widget h2 {
+    background-color: #627da5;
+    color: #fff;
+    text-align: center;
+    padding: 10px;
+    border-top-left-radius: 10px;
+    border-top-right-radius: 10px;
+    margin: -15px -15px 10px -15px;
+}

@@ -1,36 +1,59 @@
-import React, { useState, useContext } from 'react';
-import { useNavigate } from 'react-router-dom';
-import './Signup.css';
-import { AuthContext } from '../App';
-import { FaGoogle, FaFacebook } from 'react-icons/fa';
-import Header from '../components/Header'; // Importing Header
+import React, { useState } from "react";
+import { useNavigate } from "react-router-dom";
+import "./Signup.css";
+import { FaGoogle, FaFacebook } from "react-icons/fa";
+import { auth, googleProvider, facebookProvider } from "../firebaseConfigure";
+import { signInWithPopup, createUserWithEmailAndPassword } from "firebase/auth";
 
 const Signup = () => {
-    const [email, setEmail] = useState('');
-    const [password, setPassword] = useState('');
-    const [emailError, setEmailError] = useState('');
-    const { setIsAuthenticated } = useContext(AuthContext);
+    const [email, setEmail] = useState("");
+    const [password, setPassword] = useState("");
+    const [emailError, setEmailError] = useState("");
     const navigate = useNavigate();
 
-    const validateEmail = (email) => {
-        // Simple regex for email validation
-        const regex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        return regex.test(email);
+    const validateEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
+    // 🔹 Signup with Email & Password
+    const handleSignup = async () => {
+        if (!validateEmail(email)) {
+            setEmailError("Invalid email format");
+            return;
+        }
+
+        try {
+            await createUserWithEmailAndPassword(auth, email, password);
+            alert("Signup successful! Please log in.");  // Notify user
+            navigate("/login");  // Redirect to login page
+        } catch (error) {
+            console.error("Signup Error:", error);
+            setEmailError(error.message);
+        }
     };
 
-    const handleSignup = () => {
-        if (validateEmail(email)) {
-            // Simulate authentication
-            setIsAuthenticated(true);
-            navigate('/login'); // Redirect to login page after successful signup
-        } else {
-            setEmailError('Invalid email format'); // Show error message if email is invalid
+    // 🔹 Google Signup
+    const handleGoogleSignup = async () => {
+        try {
+            await signInWithPopup(auth, googleProvider);
+            alert("Signup successful! Please log in.");
+            navigate("/login");
+        } catch (error) {
+            console.error("Google Sign-Up Error:", error);
+        }
+    };
+
+    // 🔹 Facebook Signup
+    const handleFacebookSignup = async () => {
+        try {
+            await signInWithPopup(auth, facebookProvider);
+            alert("Signup successful! Please log in.");
+            navigate("/login");
+        } catch (error) {
+            console.error("Facebook Sign-Up Error:", error);
         }
     };
 
     return (
         <div className="signup-container">
-            <Header /> {/* Integrated Header */}
             <h1>Signup</h1>
             <input
                 type="text"
@@ -38,9 +61,9 @@ const Signup = () => {
                 value={email}
                 onChange={(e) => {
                     setEmail(e.target.value);
-                    setEmailError(''); // Clear error on change
+                    setEmailError("");
                 }}
-                className={emailError ? 'invalid' : ''}
+                className={emailError ? "invalid" : ""}
             />
             {emailError && <span className="error-message">{emailError}</span>}
             <input
@@ -50,14 +73,16 @@ const Signup = () => {
                 onChange={(e) => setPassword(e.target.value)}
             />
             <button onClick={handleSignup}>Sign Up</button>
+
             <div className="social-buttons">
-                <button>
+                <button className="google-signup" onClick={handleGoogleSignup}>
                     <FaGoogle /> Sign Up with Google
                 </button>
-                <button>
+                <button className="facebook-signup" onClick={handleFacebookSignup}>
                     <FaFacebook /> Sign Up with Facebook
                 </button>
             </div>
+
             <p>Already a user? <a href="/login">Login</a></p>
         </div>
     );

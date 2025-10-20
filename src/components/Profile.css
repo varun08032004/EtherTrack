@@ -1,30 +1,61 @@
 .profile-container {
-  padding: 2rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  margin-top: 50px;
 }
 
-.profile-container h2 {
-  color: #343a40;
-  margin-bottom: 1.5rem;
+.profile-card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 20px;
+  width: 350px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+  text-align: center;
 }
 
-.profile-details {
-  margin-bottom: 1.5rem;
+.profile-image {
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  object-fit: cover;
+  margin-bottom: 15px;
 }
 
 .profile-details p {
-  margin: 0.5rem 0;
-  color: #495057;
+  font-size: 16px;
+  margin: 5px 0;
 }
 
-.profile-container button {
-  padding: 0.75rem 1.5rem;
-  background-color: #28a745;
-  color: #fff;
+.profile-actions {
+  margin-top: 15px;
+}
+
+.edit-btn, .logout-btn {
+  padding: 10px;
+  width: 100%;
+  margin: 5px 0;
   border: none;
-  border-radius: 4px;
+  border-radius: 5px;
   cursor: pointer;
+  font-size: 14px;
 }
 
-.profile-container button:hover {
-  background-color: #218838;
+.edit-btn {
+  background: #007bff;
+  color: white;
+}
+
+.logout-btn {
+  background: #dc3545;
+  color: white;
+}
+
+.edit-btn:hover {
+  background: #0056b3;
+}
+
+.logout-btn:hover {
+  background: #c82333;
 }

@@ -1,35 +1,169 @@
+/* Container Styling */
 .login-container {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: white;
+  padding: 30px;
+  border-radius: 10px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+  width: 400px;
+  text-align: center;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  height: 100vh;
-  background-color: #f0f2f5;
+  background: linear-gradient(135deg, #f0f2f5, #e3e6eb);
 }
 
-.login-container h1 {
+/* Login Box */
+.login-box {
+  background: #fff;
+  padding: 30px;
+  border-radius: 12px;
+  box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.1);
+  text-align: center;
+  width: 320px;
+}
+
+/* Title */
+.login-box h1 {
   margin-bottom: 20px;
+  font-size: 24px;
+  font-weight: bold;
 }
 
-.login-container input {
+/* Input Fields (Now Matched to Signup Page) */
+.login-box input {
   margin: 10px 0;
-  padding: 10px;
-  width: 200px;
-  border: 1px solid #ccc;
-  border-radius: 5px;
-
-  
+  padding: 12px;
+  width: 100%;
+  border: 1px solid #ccc;  /* Matched Signup Page */
+  border-radius: 5px;      /* Matched Signup Page */
+  transition: border-color 0.3s;
 }
 
-.login-container button {
-  padding: 10px 20px;
-  border: none;
-  background-color: #007bff;
-  color: #fff;
-  border-radius: 5px;
+.login-box input:focus {
+  border-color: #007bff;
+  outline: none;
+}
+
+.login-box input.invalid {
+  border-color: red;
+}
+
+/* Password Container */
+.password-container {
+  position: relative;
+  width: 100%;
+  display: flex;
+  align-items: center;
+}
+
+.password-container input {
+  width: 100%;
+  padding-right: 40px; /* Ensures space for the icon */
+  box-sizing: border-box; /* Prevents width overflow */
+}
+
+/* Eye Icon for Password Visibility */
+.eye-icon {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  cursor: pointer;
+  font-size: 18px;
+  color: #555; /* Keep the icon visible */
+}
+
+/* Remember Me Checkbox */
+.remember-me {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.remember-me input {
+  width: 16px;
+  height: 16px;
   cursor: pointer;
 }
 
-.login-container button:hover {
+.remember-me label {
+  font-size: 14px;
+  color: #333;
+  cursor: pointer;
+}
+
+/* Login Button */
+.login-box button {
+  width: 100%;
+  padding: 12px;
+  font-size: 18px;
+  border: none;
+  background-color: #007bff;
+  color: #fff;
+  border-radius: 8px;
+  cursor: pointer;
+  margin-top: 10px;
+  box-shadow: 0px 3px 6px rgba(0, 0, 0, 0.1);
+  transition: background 0.3s ease, transform 0.2s ease;
+}
+
+.login-box button:hover {
   background-color: #0056b3;
+  transform: scale(1.05);
+}
+
+/* Signup Link */
+.login-box p {
+  margin-top: 15px;
+  font-size: 14px;
+}
+
+.login-box p a {
+  color: #007bff;
+  font-weight: bold;
+  text-decoration: none;
+}
+
+.login-box p a:hover {
+  text-decoration: underline;
+}
+
+/* Forgot Password Link */
+.forgot-password {
+  color: purple;
+  text-decoration: underline;
+  font-size: 14px;
+  cursor: pointer;
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 10px 0;
+  display: inline-block;
+}
+
+.forgot-password:hover {
+  color: darkviolet;
+}
+
+/* Signup Link */
+.signup-link {
+  color: purple;
+  text-decoration: underline;
+}
+
+.signup-link:hover {
+  color: darkviolet;
+}
+
+/* Success Message */
+.success-message {
+  color: green;
+  font-size: 14px;
+  margin-top: 5px;
 }
