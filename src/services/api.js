@@ -1,5 +1,5 @@
 // EtherTrack Backend API Service
-const BASE = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+const BASE = process.env.REACT_APP_API_URL ;
 
 // ── tokenStorage is now a no-op — auth handled via httpOnly cookies ─
 export const tokenStorage = {
