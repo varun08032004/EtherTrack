@@ -1,0 +1,13 @@
+{
+  "network": "sepolia",
+  "chainId": "11155111",
+  "deployedAt": "2026-03-06T14:33:57.785Z",
+  "deployer": "0xE026653F4fDfe7Bd02fd1F6534Da631DD3410489",
+  "contracts": {
+    "KYCRegistry": "0xa4f2a51A11068C2fa692ac8F193cD897DB4e227B",
+    "Treasury": "0x35fD9d8674e133182e020fbf681D2F386fb8c25B",
+    "CarbonCreditToken": "0x78096FEd39F7CB87c198b1a4cBAd86096375fa26",
+    "EmissionRegistry": "0xF2d6480B763D834140601E175049d3B882FF7278",
+    "Marketplace": "0x101dD31ce59267c56Ff4e3F2bb12FB75E63E4BEb"
+  }
+}

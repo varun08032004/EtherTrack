@@ -40,3 +40,8 @@
 .main-content {
   padding-top: 60px; /* Adjust based on header height */
 }
+body, html {
+  background: #080c0a !important;
+  margin: 0;
+  padding: 0;
+}

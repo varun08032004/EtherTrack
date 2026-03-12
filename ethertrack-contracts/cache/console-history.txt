@@ -1,0 +1,88 @@
+console.log("✅ Done")
+await (await kyc.verifyKYC(newWallet, ethers.keccak256(ethers.toUtf8Bytes("varun-kyc")))).wait()
+await (await token.authorizeMinter(newWallet)).wait()
+const newWallet = "0xYOUR_OTHER_WALLET_ADDRESS"
+// Replace with the wallet address you want to authorize
+const kyc = await ethers.getContractAt("KYCRegistry", "0x8305E37B5435d1DC66DB7Da36B93818BBcd37826")
+const token = await ethers.getContractAt("CarbonCreditToken", "0x5E8F0f12fdB16e55B1C425dbB4E56956695AcBB2")
+const [deployer] = await ethers.getSigners()
+console.log("Deployer KYC:", await kyc.isKYCVerified(deployer.address))
+console.log("Deployer minter:", await token.authorizedMinters(deployer.address))
+console.log("Marketplace minter:", await token.authorizedMinters("0x28a082a5b6e8A5F423878F8b8a7638fFec414a07"))
+const kyc = await ethers.getContractAt("KYCRegistry", "0x8305E37B5435d1DC66DB7Da36B93818BBcd37826")
+const token = await ethers.getContractAt("CarbonCreditToken", "0x5E8F0f12fdB16e55B1C425dbB4E56956695AcBB2")
+const [deployer] = await ethers.getSigners()
+console.log("Deployer KYC:", await kyc.isKYCVerified(deployer.address))
+console.log("Deployer minter:", await token.authorizedMinters(deployer.address))
+console.log("Marketplace minter:", await token.authorizedMinters("0x28a082a5b6e8A5F423878F8b8a7638fFec414a07"))
+console.log("Deployer KYC:", await kyc.isKYCVerified(deployer.address))
+console.log("Deployer minter:", await token.authorizedMinters(deployer.address))
+console.log("Marketplace minter:", await token.authorizedMinters("0x28a082a5b6e8A5F423878F8b8a7638fFec414a07"))
+// Confirm
+console.log("✅ Deployer KYC verified")
+await tx3.wait()
+const tx3 = await kyc.verifyKYC(deployer.address, hash)
+const hash = ethers.keccak256(ethers.toUtf8Bytes("varun-kyc"))
+// Verify deployer KYC
+console.log("✅ Deployer authorized as minter")
+await tx2.wait()
+const tx2 = await token.authorizeMinter(deployer.address)
+// Authorize deployer as minter
+console.log("✅ Marketplace authorized as minter")
+await tx1.wait()
+const tx1 = await token.authorizeMinter("0x28a082a5b6e8A5F423878F8b8a7638fFec414a07")
+// Authorize Marketplace as minter
+const kyc = await ethers.getContractAt("KYCRegistry", "0x8305E37B5435d1DC66DB7Da36B93818BBcd37826")
+const token = await ethers.getContractAt("CarbonCreditToken", "0x5E8F0f12fdB16e55B1C425dbB4E56956695AcBB2")
+const [deployer] = await ethers.getSigners()
+console.log(artifact.abi.filter(x => x.type === 'function').map(x => x.name))
+const artifact = await hre.artifacts.readArtifact("CarbonCreditToken")
+console.log(Object.keys(token.interface.functions))
+const token = await ethers.getContractAt("CarbonCreditToken", "0x5E8F0f12fdB16e55B1C425dbB4E56956695AcBB2")
+console.log(Object.keys(token.interface.functions))
+// Check what functions are available
+console.log("Deployer is minter:", await token.isMinter(deployer.address))
+console.log("Marketplace is minter:", await token.isMinter("0x28a082a5b6e8A5F423878F8b8a7638fFec414a07"))
+// Confirm everything
+console.log("✅ Deployer KYC verified")
+await tx3.wait()
+const tx3 = await kyc.verifyKYC(deployer.address, hash)
+const hash = ethers.keccak256(ethers.toUtf8Bytes("varun-kyc"))
+// Verify deployer KYC
+console.log("✅ Deployer authorized as minter")
+await tx2.wait()
+const tx2 = await token.addMinter(deployer.address)
+// Authorize deployer wallet as minter (for Portfolio tokenisation)
+console.log("✅ Marketplace authorized as minter")
+await tx1.wait()
+const tx1 = await token.addMinter("0x28a082a5b6e8A5F423878F8b8a7638fFec414a07")
+// Authorize Marketplace as minter
+const kyc = await ethers.getContractAt("KYCRegistry", "0x8305E37B5435d1DC66DB7Da36B93818BBcd37826")
+const token = await ethers.getContractAt("CarbonCreditToken", "0x5E8F0f12fdB16e55B1C425dbB4E56956695AcBB2")
+const [deployer] = await ethers.getSigners()
+await kyc.verifyKYC(deployer.address, hash)
+const hash = ethers.keccak256(ethers.toUtf8Bytes("varun-kyc"))
+const kyc = await ethers.getContractAt("KYCRegistry", "0x8305E37B5435d1DC66DB7Da36B93818BBcd37826")
+// Verify deployer KYC
+console.log("✅ Marketplace authorized as minter")
+await token.addMinter(marketplace)
+// Add Marketplace as minter
+const marketplace = "0x28a082a5b6e8A5F423878F8b8a7638fFec414a07"
+const token = await ethers.getContractAt("CarbonCreditToken", "0x5E8F0f12fdB16e55B1C425dbB4E56956695AcBB2")
+const [deployer] = await ethers.getSigners()
+const marketplace = "YOUR_NEW_MARKETPLACE_ADDRESS"
+const token = await ethers.getContractAt("CarbonCreditToken", "YOUR_CARBON_CREDIT_TOKEN_ADDRESS")
+await tx.wait()
+const tx = await kyc.verifyKYC("0xE026653F4fDfe7Bd02fd1F6534Da631DD3410489", hash)
+const hash = ethers.keccak256(ethers.toUtf8Bytes("varun-kyc"))
+const kyc = await ethers.getContractAt("KYCRegistry", "0xebc35A7C6e447E409B61a794b58F50d9C7A80554")
+// should return true ✅
+await kyc.isKYCVerified("0xE026653F4fDfe7Bd02fd1F6534Da631DD3410489")
+// Confirm
+await tx.wait()
+const tx = await kyc.verifyKYC("0xE026653F4fDfe7Bd02fd1F6534Da631DD3410489", hash)
+const hash = ethers.keccak256(ethers.toUtf8Bytes("varun-kyc"))
+// If false, verify it manually
+await kyc.isKYCVerified("0xE026653F4fDfe7Bd02fd1F6534Da631DD3410489")
+// Check current status
+const kyc = await ethers.getContractAt("KYCRegistry", "0x6B5174F1B6feB911FBcC5a96eac09e80476eF7F8")
