@@ -21,8 +21,18 @@ const PORT = process.env.PORT || 5000;
 
 // ── Security ──────────────────────────────────────────────────────
 app.use(helmet());
+const ALLOWED_ORIGINS = [
+  'http://localhost:3000',
+  'https://ethertrack.vercel.app',
+  process.env.FRONTEND_URL,
+].filter(Boolean);
+
 app.use(cors({
-  origin:      process.env.FRONTEND_URL ,
+  origin: (origin, cb) => {
+    // allow server-to-server (no origin) + allowed list
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    cb(new Error(`CORS blocked: ${origin}`));
+  },
   credentials: true,
 }));
 

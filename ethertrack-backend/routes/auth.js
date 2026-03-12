@@ -10,7 +10,7 @@ const { body, validationResult } = require('express-validator');
 const COOKIE_OPTS = {
   httpOnly: true,
   secure:   process.env.NODE_ENV === 'production', // HTTPS only in prod
-  sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+  sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax', // 'none' required for cross-domain (Vercel → Railway)
   path:     '/',
 };
 

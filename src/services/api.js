@@ -1,45 +1,67 @@
 // EtherTrack Backend API Service
-const BASE = process.env.REACT_APP_API_URL ;
+const BASE = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 
-// ── tokenStorage is now a no-op — auth handled via httpOnly cookies ─
+const IS_PROD = process.env.NODE_ENV === 'production';
+
+// ── Token storage — localStorage in prod (cross-domain safe), cookies in dev ──
 export const tokenStorage = {
-  getAccess:  () => null,
-  getRefresh: () => null,
-  setTokens:  () => {},
-  setUser:    () => {},
-  getUser:    () => null,
-  clear:      () => {},
+  getAccess:  () => localStorage.getItem('et_access'),
+  getRefresh: () => localStorage.getItem('et_refresh'),
+  setTokens:  (access, refresh) => {
+    if (access)  localStorage.setItem('et_access',  access);
+    if (refresh) localStorage.setItem('et_refresh', refresh);
+  },
+  clear: () => {
+    localStorage.removeItem('et_access');
+    localStorage.removeItem('et_refresh');
+  },
 };
 
 // ── Guard against logout loop ─────────────────────────────────────
 let _loggingOut = false;
 
-// ── Core fetch — cookies sent automatically by browser ────────────
+// ── Core fetch ────────────────────────────────────────────────────
 export const apiFetch = async (path, options = {}, retry = true) => {
-  // Never intercept auth routes themselves (prevents loops)
   const isAuthRoute = path.startsWith('/api/auth/');
+
+  // In production: send token as Authorization header (cross-domain safe)
+  // In dev: rely on cookies
+  const accessToken = IS_PROD ? tokenStorage.getAccess() : null;
+  const authHeader  = accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
 
   const res = await fetch(`${BASE}${path}`, {
     ...options,
-    credentials: 'include', // ← sends httpOnly cookies automatically
-    headers: { 'Content-Type': 'application/json', ...options.headers },
+    credentials: 'include', // keep for dev + cookie fallback
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeader,
+      ...options.headers,
+    },
   });
 
-  // Auto-refresh on 401 — but not for auth routes or during logout
+  // Auto-refresh on 401
   if (res.status === 401 && retry && !isAuthRoute && !_loggingOut) {
+    const refreshToken = IS_PROD ? tokenStorage.getRefresh() : null;
+
     const refreshRes = await fetch(`${BASE}/api/auth/refresh`, {
       method:      'POST',
       credentials: 'include',
       headers:     { 'Content-Type': 'application/json' },
+      // Send refresh token in body for cross-domain
+      body: refreshToken ? JSON.stringify({ refreshToken }) : undefined,
     });
 
     if (refreshRes.ok) {
-      // Backend set new cookies — retry original request
+      const refreshData = await refreshRes.json().catch(() => ({}));
+      // Store new tokens if returned in body
+      if (refreshData.accessToken) {
+        tokenStorage.setTokens(refreshData.accessToken, refreshData.refreshToken);
+      }
       return apiFetch(path, options, false);
     } else {
-      // Refresh failed — fire logout once, never loop
       if (!_loggingOut) {
         _loggingOut = true;
+        tokenStorage.clear();
         window.dispatchEvent(new Event('auth:logout'));
         setTimeout(() => { _loggingOut = false; }, 5000);
       }
@@ -56,11 +78,22 @@ export const apiFetch = async (path, options = {}, retry = true) => {
 // AUTH
 // ══════════════════════════════════════════════════════════════════
 export const authAPI = {
-  syncUser: (body) => apiFetch('/api/auth/firebase-sync', {
-    method: 'POST', body: JSON.stringify(body),
-  }),
+  syncUser: async (body) => {
+    const data = await apiFetch('/api/auth/firebase-sync', {
+      method: 'POST', body: JSON.stringify(body),
+    });
+    // Store tokens from response body (works cross-domain)
+    if (data?.accessToken) {
+      tokenStorage.setTokens(data.accessToken, data.refreshToken);
+    }
+    return data;
+  },
   me:     () => apiFetch('/api/auth/me'),
-  logout: () => apiFetch('/api/auth/logout', { method: 'POST' }),
+  logout: async () => {
+    const res = await apiFetch('/api/auth/logout', { method: 'POST' });
+    tokenStorage.clear();
+    return res;
+  },
 };
 
 // ══════════════════════════════════════════════════════════════════
