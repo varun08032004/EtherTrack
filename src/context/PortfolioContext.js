@@ -10,6 +10,7 @@ const ADDRESSES = {
   AMMPool:           process.env.REACT_APP_AMM_POOL_ADDRESS,
 };
 
+const API = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 const SEPOLIA_CHAIN_ID = '0xaa36a7';
 
 const ABI = {
@@ -84,6 +85,20 @@ export const vintagePenalty = (year) => {
 
 const ETH_INR_RATE = 280000;
 
+// ── Fetch bound wallet from backend ──────────────────────────────
+const fetchBoundWallet = async () => {
+  try {
+    const res = await fetch(`${API}/api/wallet/status`, {
+      credentials: 'include',
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.walletAddress?.toLowerCase() || null;
+  } catch {
+    return null;
+  }
+};
+
 const PortfolioContext = createContext(null);
 
 export function PortfolioProvider({ children }) {
@@ -93,6 +108,11 @@ export function PortfolioProvider({ children }) {
   const [contracts,     setContracts]     = useState(null);
   const [isKYCVerified, setIsKYCVerified] = useState(false);
   const [chainOk,       setChainOk]       = useState(false);
+
+  // ── NEW: wallet mismatch state ───────────────────────────────
+  const [walletMismatch,     setWalletMismatch]     = useState(false);
+  const [walletMismatchInfo, setWalletMismatchInfo] = useState(null);
+  // walletMismatchInfo = { metamaskWallet, boundWallet }
 
   const [myCredits,    setMyCredits]    = useState([]);
   const [listings,     setListings]     = useState([]);
@@ -126,8 +146,36 @@ export function PortfolioProvider({ children }) {
       if (!accounts.length) {
         setWalletAddress(''); setContracts(null);
         setIsKYCVerified(false); setChainOk(false);
+        setWalletMismatch(false); setWalletMismatchInfo(null);
         return;
       }
+
+      const metamaskWallet = accounts[0].toLowerCase();
+
+      // ── SECURITY CHECK: compare MetaMask wallet vs DB bound wallet ──
+      const boundWallet = await fetchBoundWallet();
+
+      if (boundWallet && boundWallet !== metamaskWallet) {
+        // Wallet mismatch — block portfolio, show error
+        setWalletMismatch(true);
+        setWalletMismatchInfo({ metamaskWallet, boundWallet });
+        setWalletAddress('');
+        setContracts(null);
+        setIsKYCVerified(false);
+        setChainOk(false);
+        setMyCredits([]);
+        setError(
+          `Wrong wallet connected. Your account is bound to ${boundWallet.slice(0,6)}...${boundWallet.slice(-4)}. ` +
+          `Please switch to that wallet in MetaMask.`
+        );
+        return;
+      }
+
+      // Wallets match (or no wallet bound yet) — proceed normally
+      setWalletMismatch(false);
+      setWalletMismatchInfo(null);
+      setError('');
+
       const ok = await checkChain();
       setChainOk(ok);
       if (!ok) {
@@ -135,17 +183,20 @@ export function PortfolioProvider({ children }) {
         setError('Please switch MetaMask to Ethereum Sepolia');
         return;
       }
-      setError('');
+
       const _provider = new ethers.BrowserProvider(window.ethereum);
       const _signer   = await _provider.getSigner();
       const _address  = await _signer.getAddress();
       setProvider(_provider);
       setSigner(_signer);
       setWalletAddress(_address);
+
       const c = buildContracts(_signer);
       setContracts(c);
+
       const verified = await c.kyc.isKYCVerified(_address);
       setIsKYCVerified(verified);
+
       if (!verified) {
         if (kycPollRef.current) clearInterval(kycPollRef.current);
         let attempts = 0;
@@ -158,6 +209,7 @@ export function PortfolioProvider({ children }) {
           if (attempts >= 24) clearInterval(kycPollRef.current);
         }, 5000);
       }
+
       _setupListeners(c, _address);
     } catch (e) {
       console.error('Wallet init error:', e);
@@ -228,13 +280,13 @@ export function PortfolioProvider({ children }) {
   }, [init]);
 
   useEffect(() => {
-    if (contracts && walletAddress && chainOk) {
+    if (contracts && walletAddress && chainOk && !walletMismatch) {
       loadMyCredits(contracts, walletAddress);
       loadListings(contracts);
       loadBuyOrders(contracts);
       if (contracts.amm) loadAMMPools(contracts);
     }
-  }, [contracts, walletAddress, chainOk]);
+  }, [contracts, walletAddress, chainOk, walletMismatch]);
 
   const refreshKYC = useCallback(async () => {
     if (!contracts || !walletAddress) return false;
@@ -246,40 +298,24 @@ export function PortfolioProvider({ children }) {
     } catch { return false; }
   }, [contracts, walletAddress]);
 
-  // ══════════════════════════════════════════════════════
-  // loadMyCredits — KEY FIX
-  //
-  // When tokens are listed, they move to Marketplace escrow.
-  // balanceOf(wallet) returns only HELD tokens.
-  // We must ALSO check active listings to find escrowed tokens.
-  //
-  // heldBal   = tokens in wallet  (balanceOf)
-  // listedBal = tokens in escrow  (listing.amountRemaining)
-  // totalBal  = heldBal + listedBal  → shown as "total credits"
-  //
-  // Portfolio Value = heldBal × price  (listed = on market, not in hand)
-  // ══════════════════════════════════════════════════════
   const loadMyCredits = useCallback(async (c, addr) => {
     const _c    = c    || contracts;
     const _addr = addr || walletAddress;
-    if (!_c || !_addr) return;
+    if (!_c || !_addr || walletMismatch) return;
     setLoading(l => ({ ...l, credits:true }));
     try {
       const nextId = await _c.token.getNextTokenId();
       const total  = Number(nextId);
 
-      // Fetch all seller listings once upfront
       const sellerIds      = await _c.market.getSellerListings(_addr);
       const sellerListings = await Promise.all(sellerIds.map(lid => _c.market.listings(lid)));
 
       const result = [];
 
       for (let tokenId = 0; tokenId < total; tokenId++) {
-        // Tokens still in wallet
         const bal     = await _c.token.balanceOf(_addr, tokenId);
         const heldBal = Number(bal);
 
-        // Tokens in escrow for this tokenId
         let listingId    = null;
         let listingPrice = 0;
         let listedBal    = 0;
@@ -294,7 +330,7 @@ export function PortfolioProvider({ children }) {
         }
 
         const totalBal = heldBal + listedBal;
-        if (totalBal === 0) continue;  // user truly owns nothing for this tokenId
+        if (totalBal === 0) continue;
 
         const meta    = await _c.token.getCreditMetadata(tokenId);
         const retired = await _c.token.getTotalRetired(tokenId);
@@ -315,9 +351,9 @@ export function PortfolioProvider({ children }) {
           vintageYear:        Number(meta.vintageYear),
           expiryDate:         new Date(Number(meta.expiryDate)*1000).toISOString().slice(0,10),
           serialNumber:       meta.serialNumber,
-          credits:            totalBal,   // held + escrowed = total you own
-          heldCredits:        heldBal,    // in your wallet
-          listedCredits:      listedBal,  // locked in marketplace escrow
+          credits:            totalBal,
+          heldCredits:        heldBal,
+          listedCredits:      listedBal,
           totalRetired:       Number(retired),
           active:             meta.active,
           registeredBy:       meta.registeredBy,
@@ -343,7 +379,7 @@ export function PortfolioProvider({ children }) {
     } finally {
       setLoading(l => ({ ...l, credits:false }));
     }
-  }, [contracts, walletAddress]);
+  }, [contracts, walletAddress, walletMismatch]);
 
   const loadListings = useCallback(async (c) => {
     const _c = c || contracts;
@@ -445,6 +481,7 @@ export function PortfolioProvider({ children }) {
 
   const registerCredit = useCallback(async (formData) => {
     if (!contracts) throw new Error('Wallet not connected');
+    if (walletMismatch) throw new Error('Wrong wallet connected');
     setLoading(l => ({ ...l, tx:true }));
     try {
       const params = {
@@ -470,10 +507,11 @@ export function PortfolioProvider({ children }) {
       return { success:true, tokenId, txHash:tx.hash };
     } catch(e) { throw e; }
     finally { setLoading(l => ({ ...l, tx:false })); }
-  }, [contracts, walletAddress, loadMyCredits]);
+  }, [contracts, walletAddress, walletMismatch, loadMyCredits]);
 
   const listCredit = useCallback(async (tokenId, amount, priceInEth, durationDays = 30) => {
     if (!contracts) throw new Error('Wallet not connected');
+    if (walletMismatch) throw new Error('Wrong wallet connected');
     setLoading(l => ({ ...l, tx:true }));
     try {
       const approved = await contracts.token.isApprovedForAll(walletAddress, ADDRESSES.Marketplace);
@@ -491,10 +529,11 @@ export function PortfolioProvider({ children }) {
       return { success:true, txHash:tx.hash };
     } catch(e) { throw e; }
     finally { setLoading(l => ({ ...l, tx:false })); }
-  }, [contracts, walletAddress, loadMyCredits]);
+  }, [contracts, walletAddress, walletMismatch, loadMyCredits]);
 
   const delistCredit = useCallback(async (listingId) => {
     if (!contracts) throw new Error('Wallet not connected');
+    if (walletMismatch) throw new Error('Wrong wallet connected');
     setLoading(l => ({ ...l, tx:true }));
     try {
       const tx = await contracts.market.cancelListing(listingId);
@@ -503,10 +542,11 @@ export function PortfolioProvider({ children }) {
       return { success:true, txHash:tx.hash };
     } catch(e) { throw e; }
     finally { setLoading(l => ({ ...l, tx:false })); }
-  }, [contracts, loadMyCredits]);
+  }, [contracts, walletMismatch, loadMyCredits]);
 
   const retireCredit = useCallback(async (tokenId, amount) => {
     if (!contracts) throw new Error('Wallet not connected');
+    if (walletMismatch) throw new Error('Wrong wallet connected');
     setLoading(l => ({ ...l, tx:true }));
     try {
       const tx = await contracts.token.retireCredit(tokenId, amount);
@@ -515,10 +555,11 @@ export function PortfolioProvider({ children }) {
       return { success:true, txHash:tx.hash };
     } catch(e) { throw e; }
     finally { setLoading(l => ({ ...l, tx:false })); }
-  }, [contracts, loadMyCredits]);
+  }, [contracts, walletMismatch, loadMyCredits]);
 
   const buyCredit = useCallback(async (listingId, amount, totalEth) => {
     if (!contracts) throw new Error('Wallet not connected');
+    if (walletMismatch) throw new Error('Wrong wallet connected');
     setLoading(l => ({ ...l, tx:true }));
     try {
       const tx = await contracts.market.buyCredit(
@@ -529,15 +570,15 @@ export function PortfolioProvider({ children }) {
       return { success:true, txHash:tx.hash };
     } catch(e) { throw e; }
     finally { setLoading(l => ({ ...l, tx:false })); }
-  }, [contracts]);
+  }, [contracts, walletMismatch]);
 
   const placeBuyOrder = useCallback(async (tokenId, amount, limitPriceEth, durationDays = 7) => {
     if (!contracts) throw new Error('Wallet not connected');
+    if (walletMismatch) throw new Error('Wrong wallet connected');
     setLoading(l => ({ ...l, tx:true }));
     try {
       const limitWei  = ethers.parseEther(limitPriceEth.toString());
-      /* eslint-disable-next-line no-undef */
-      const totalCost = limitWei * BigInt(amount);
+      const totalCost = limitWei * BigInt(amount); // eslint-disable-line no-undef
       const fee       = totalCost * 50n / 10000n;
       const tx = await contracts.market.placeBuyOrder(
         tokenId, amount, limitWei,
@@ -549,10 +590,11 @@ export function PortfolioProvider({ children }) {
       return { success:true, txHash:tx.hash };
     } catch(e) { throw e; }
     finally { setLoading(l => ({ ...l, tx:false })); }
-  }, [contracts, loadBuyOrders]);
+  }, [contracts, walletMismatch, loadBuyOrders]);
 
   const cancelBuyOrder = useCallback(async (orderId) => {
     if (!contracts) throw new Error('Wallet not connected');
+    if (walletMismatch) throw new Error('Wrong wallet connected');
     setLoading(l => ({ ...l, tx:true }));
     try {
       const tx = await contracts.market.cancelBuyOrder(orderId);
@@ -561,10 +603,11 @@ export function PortfolioProvider({ children }) {
       return { success:true, txHash:tx.hash };
     } catch(e) { throw e; }
     finally { setLoading(l => ({ ...l, tx:false })); }
-  }, [contracts, loadBuyOrders]);
+  }, [contracts, walletMismatch, loadBuyOrders]);
 
   const ammSwapETHForCredits = useCallback(async (poolId, ethAmount, minCredits = 0) => {
     if (!contracts?.amm) throw new Error('AMM not available');
+    if (walletMismatch) throw new Error('Wrong wallet connected');
     setLoading(l => ({ ...l, tx:true }));
     try {
       const tx = await contracts.amm.swapETHForCredits(poolId, minCredits, { value: ethers.parseEther(ethAmount.toString()) });
@@ -573,10 +616,11 @@ export function PortfolioProvider({ children }) {
       return { success:true, txHash:tx.hash };
     } catch(e) { throw e; }
     finally { setLoading(l => ({ ...l, tx:false })); }
-  }, [contracts, loadMyCredits, loadAMMPools]);
+  }, [contracts, walletMismatch, loadMyCredits, loadAMMPools]);
 
   const ammSwapCreditsForETH = useCallback(async (poolId, credits, minEth = 0) => {
     if (!contracts?.amm) throw new Error('AMM not available');
+    if (walletMismatch) throw new Error('Wrong wallet connected');
     setLoading(l => ({ ...l, tx:true }));
     try {
       const approved = await contracts.token.isApprovedForAll(walletAddress, ADDRESSES.AMMPool);
@@ -587,10 +631,11 @@ export function PortfolioProvider({ children }) {
       return { success:true, txHash:tx.hash };
     } catch(e) { throw e; }
     finally { setLoading(l => ({ ...l, tx:false })); }
-  }, [contracts, walletAddress, loadMyCredits, loadAMMPools]);
+  }, [contracts, walletAddress, walletMismatch, loadMyCredits, loadAMMPools]);
 
   const ammAddLiquidity = useCallback(async (poolId, creditAmount, ethAmount) => {
     if (!contracts?.amm) throw new Error('AMM not available');
+    if (walletMismatch) throw new Error('Wrong wallet connected');
     setLoading(l => ({ ...l, tx:true }));
     try {
       const approved = await contracts.token.isApprovedForAll(walletAddress, ADDRESSES.AMMPool);
@@ -601,18 +646,8 @@ export function PortfolioProvider({ children }) {
       return { success:true, txHash:tx.hash };
     } catch(e) { throw e; }
     finally { setLoading(l => ({ ...l, tx:false })); }
-  }, [contracts, walletAddress, loadMyCredits, loadAMMPools]);
+  }, [contracts, walletAddress, walletMismatch, loadMyCredits, loadAMMPools]);
 
-  // ── Stats ─────────────────────────────────────────────
-  //
-  // totalCredits = heldCredits only (listed ones are on market)
-  // totalValue   = heldCredits × price
-  //
-  // Example: 200 minted, list 100
-  //   totalCredits = 100  ✅
-  //   totalValue   = 100 × ₹833 = ₹83,300 ✅
-  //   delist 100   → totalCredits = 200, value = ₹1,66,600 ✅
-  //
   const stats = {
     totalCredits: myCredits
       .filter(c => c.status !== 'RETIRED')
@@ -620,17 +655,14 @@ export function PortfolioProvider({ children }) {
         const qty = c.heldCredits !== undefined ? c.heldCredits : (c.status === 'HELD' ? c.credits : 0);
         return s + qty;
       }, 0),
-
     totalValue: myCredits
       .filter(c => c.status !== 'RETIRED')
       .reduce((s, c) => {
         const priceInr = c.pricePerCredit > 0 ? c.pricePerCredit : 850;
         const dep      = vintagePenalty(c.vintageYear) / 100;
-        // Use heldCredits if available (new field), fallback for old cached data
         const qty = c.heldCredits !== undefined ? c.heldCredits : (c.status === 'HELD' ? c.credits : 0);
         return s + qty * priceInr * (1 - dep);
       }, 0),
-
     listedCount:  myCredits.filter(c => c.status === 'LISTED').length,
     retiredCount: myCredits.filter(c => c.status === 'RETIRED').length,
     heldCount:    myCredits.filter(c => c.status === 'HELD').length,
@@ -640,6 +672,7 @@ export function PortfolioProvider({ children }) {
   return (
     <PortfolioContext.Provider value={{
       provider, signer, walletAddress, isKYCVerified, contracts, chainOk,
+      walletMismatch, walletMismatchInfo,
       myCredits, listings, buyOrders, tradeHistory, ammPools, stats,
       loading, error,
       registerCredit, listCredit, delistCredit, retireCredit,

@@ -17,7 +17,8 @@ import Portfolio        from './components/Portfolio';
 import KYCGate          from './components/KYCGate';
 import Settings         from './components/Settings';
 import Notifications    from './components/Notifications';
-import AdminDashboard   from './components/AdminDashboard';   // ← added
+import AdminDashboard   from './components/AdminDashboard';
+import WalletMismatchBanner from './components/WalletMismatchBanner'; // ← added
 import { NotificationProvider } from './context/NotificationContext';
 import { PortfolioProvider }    from './context/PortfolioContext';
 import { authAPI } from './services/api';
@@ -32,7 +33,6 @@ export const AuthContext = React.createContext();
 
 const getUserKey = (email) => `user_${email}`;
 
-// ── Admin guard — blocks non-admins from /admin ──────────────────
 const AdminGuard = ({ dbUser, children }) => {
   if (!dbUser) return <Navigate to="/dashboard" />;
   if (dbUser.role !== 'admin') return <Navigate to="/dashboard" />;
@@ -53,11 +53,11 @@ function AppInner({ isAuthenticated, user, setUser, kycCompleted, handleLogin, h
       dbUser,
       setDbUser,
     }}>
-      {/* Hide header on admin dashboard */}
       {!isAdmin && <Header />}
+      {/* Wallet mismatch banner — only shown to logged-in non-admin users */}
+      {isAuthenticated && !isAdmin && <WalletMismatchBanner />}
       <div className="main-content" style={{ paddingTop: isAdmin ? '0' : '60px', background: '#080c0a', minHeight: '100vh' }}>
         <Routes>
-          {/* Public routes */}
           <Route path="/"       element={isAuthenticated ? <Navigate to={isAdmin ? '/admin' : '/dashboard'} /> : <Navigate to="/signup" />} />
           <Route path="/login"  element={isAuthenticated ? <Navigate to={isAdmin ? '/admin' : '/dashboard'} /> : <Login />} />
           <Route path="/signup" element={isAuthenticated ? <Navigate to={isAdmin ? '/admin' : '/dashboard'} /> : <Signup />} />
@@ -66,14 +66,12 @@ function AppInner({ isAuthenticated, user, setUser, kycCompleted, handleLogin, h
 
           {isAuthenticated ? (
             <>
-              {/* ── Admin route ── */}
               <Route path="/admin" element={
                 <AdminGuard dbUser={dbUser}>
                   <AdminDashboard />
                 </AdminGuard>
               } />
 
-              {/* ── Regular user routes (hidden from admin) ── */}
               {!isAdmin && (
                 <>
                   <Route path="/dashboard"     element={<Dashboard />} />
@@ -131,7 +129,6 @@ function App() {
           setDbUser(me);
           setKycCompleted(!!me.kyc_verified);
           setIsAuthenticated(true);
-
           const activeEmail = localStorage.getItem('activeEmail');
           if (activeEmail) {
             const stored = localStorage.getItem(getUserKey(activeEmail));
@@ -164,7 +161,6 @@ function App() {
   const handleLogin = async (userData, firebaseUser = null) => {
     setUser(userData);
     localStorage.setItem('activeEmail', userData.email);
-
     if (firebaseUser) {
       try {
         const res = await authAPI.syncUser({
@@ -180,8 +176,6 @@ function App() {
         console.warn('Backend sync failed:', e?.message || e);
       }
     }
-
-    // Set authenticated AFTER dbUser is set so role-based redirect is correct
     setIsAuthenticated(true);
   };
 
