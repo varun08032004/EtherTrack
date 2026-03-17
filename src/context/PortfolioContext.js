@@ -251,6 +251,12 @@ export function PortfolioProvider({ children }) {
     ];
   };
 
+  // ✅ Check KYC from DB on mount — independent of wallet connection
+  // Ensures button is enabled even before MetaMask is connected
+  useEffect(() => {
+    fetchDBKycStatus().then(v => { if (v) setIsKYCVerified(true); });
+  }, []);
+
   useEffect(() => {
     init();
     if (window.ethereum) {
