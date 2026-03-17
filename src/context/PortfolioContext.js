@@ -2,7 +2,6 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import { ethers } from 'ethers';
 
 const ADDRESSES = {
-  KYCRegistry:       process.env.REACT_APP_KYC_REGISTRY_ADDRESS,
   CarbonCreditToken: process.env.REACT_APP_CARBON_CREDIT_TOKEN_ADDRESS,
   Marketplace:       process.env.REACT_APP_MARKETPLACE_ADDRESS,
   EmissionRegistry:  process.env.REACT_APP_EMISSION_REGISTRY_ADDRESS,
@@ -14,11 +13,6 @@ const API = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 const SEPOLIA_CHAIN_ID = '0xaa36a7';
 
 const ABI = {
-  KYCRegistry: [
-    'function isKYCVerified(address wallet) view returns (bool)',
-    'function selfVerify(bytes32 kycDataHash) external',
-    'function verifyKYC(address wallet, bytes32 kycDataHash) external',
-  ],
   CarbonCreditToken: [
     'function mintCredit((address to,uint256 amount,string projectName,string location,uint8 standard,string projectType,string developer,uint256 vintageYear,uint256 expiryDate,string serialNumber,string metadataURI) p) returns (uint256)',
     'function retireCredit(uint256 tokenId, uint256 amount)',
@@ -85,11 +79,29 @@ export const vintagePenalty = (year) => {
 
 const ETH_INR_RATE = 280000;
 
+// ── KYC is DB-only (admin approval). Check /api/auth/me, not contract ──
+const fetchDBKycStatus = async () => {
+  try {
+    const token = localStorage.getItem('et_access');
+    const res = await fetch(`${API}/api/auth/me`, {
+      credentials: 'include',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    return !!(data.kyc_verified || data.kyc_status === 'verified');
+  } catch {
+    return false;
+  }
+};
+
 // ── Fetch bound wallet from backend ──────────────────────────────
 const fetchBoundWallet = async () => {
   try {
+    const token = localStorage.getItem('et_access');
     const res = await fetch(`${API}/api/wallet/status`, {
       credentials: 'include',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     if (!res.ok) return null;
     const data = await res.json();
@@ -109,10 +121,8 @@ export function PortfolioProvider({ children }) {
   const [isKYCVerified, setIsKYCVerified] = useState(false);
   const [chainOk,       setChainOk]       = useState(false);
 
-  // ── NEW: wallet mismatch state ───────────────────────────────
   const [walletMismatch,     setWalletMismatch]     = useState(false);
   const [walletMismatchInfo, setWalletMismatchInfo] = useState(null);
-  // walletMismatchInfo = { metamaskWallet, boundWallet }
 
   const [myCredits,    setMyCredits]    = useState([]);
   const [listings,     setListings]     = useState([]);
@@ -123,7 +133,6 @@ export function PortfolioProvider({ children }) {
   const [loading, setLoading] = useState({ credits:false, listings:false, buyOrders:false, tx:false });
   const [error,   setError]   = useState('');
 
-  const kycPollRef   = useRef(null);
   const listenersRef = useRef([]);
 
   const checkChain = async () => {
@@ -132,8 +141,8 @@ export function PortfolioProvider({ children }) {
     return cid === SEPOLIA_CHAIN_ID;
   };
 
+  // KYCRegistry removed — no kyc contract
   const buildContracts = (_signer) => ({
-    kyc:    new ethers.Contract(ADDRESSES.KYCRegistry,       ABI.KYCRegistry,       _signer),
     token:  new ethers.Contract(ADDRESSES.CarbonCreditToken, ABI.CarbonCreditToken, _signer),
     market: new ethers.Contract(ADDRESSES.Marketplace,       ABI.Marketplace,       _signer),
     amm:    ADDRESSES.AMMPool ? new ethers.Contract(ADDRESSES.AMMPool, ABI.AMMPool, _signer) : null,
@@ -152,17 +161,13 @@ export function PortfolioProvider({ children }) {
 
       const metamaskWallet = accounts[0].toLowerCase();
 
-      // ── SECURITY CHECK: compare MetaMask wallet vs DB bound wallet ──
+      // Wallet mismatch check
       const boundWallet = await fetchBoundWallet();
-
       if (boundWallet && boundWallet !== metamaskWallet) {
-        // Wallet mismatch — block portfolio, show error
         setWalletMismatch(true);
         setWalletMismatchInfo({ metamaskWallet, boundWallet });
-        setWalletAddress('');
-        setContracts(null);
-        setIsKYCVerified(false);
-        setChainOk(false);
+        setWalletAddress(''); setContracts(null);
+        setIsKYCVerified(false); setChainOk(false);
         setMyCredits([]);
         setError(
           `Wrong wallet connected. Your account is bound to ${boundWallet.slice(0,6)}...${boundWallet.slice(-4)}. ` +
@@ -171,10 +176,7 @@ export function PortfolioProvider({ children }) {
         return;
       }
 
-      // Wallets match (or no wallet bound yet) — proceed normally
-      setWalletMismatch(false);
-      setWalletMismatchInfo(null);
-      setError('');
+      setWalletMismatch(false); setWalletMismatchInfo(null); setError('');
 
       const ok = await checkChain();
       setChainOk(ok);
@@ -194,21 +196,9 @@ export function PortfolioProvider({ children }) {
       const c = buildContracts(_signer);
       setContracts(c);
 
-      const verified = await c.kyc.isKYCVerified(_address);
+      // ✅ KYC from DB only — not from contract
+      const verified = await fetchDBKycStatus();
       setIsKYCVerified(verified);
-
-      if (!verified) {
-        if (kycPollRef.current) clearInterval(kycPollRef.current);
-        let attempts = 0;
-        kycPollRef.current = setInterval(async () => {
-          attempts++;
-          try {
-            const r = await c.kyc.isKYCVerified(_address);
-            if (r) { setIsKYCVerified(true); clearInterval(kycPollRef.current); }
-          } catch {}
-          if (attempts >= 24) clearInterval(kycPollRef.current);
-        }, 5000);
-      }
 
       _setupListeners(c, _address);
     } catch (e) {
@@ -272,7 +262,6 @@ export function PortfolioProvider({ children }) {
         window.ethereum.removeListener('accountsChanged', init);
         window.ethereum.removeListener('chainChanged',    init);
       }
-      if (kycPollRef.current) clearInterval(kycPollRef.current);
       listenersRef.current.forEach(({ contract, event, handler }) => {
         try { contract.off(event, handler); } catch {}
       });
@@ -288,15 +277,14 @@ export function PortfolioProvider({ children }) {
     }
   }, [contracts, walletAddress, chainOk, walletMismatch]);
 
+  // ✅ refreshKYC now checks DB, not contract
   const refreshKYC = useCallback(async () => {
-    if (!contracts || !walletAddress) return false;
     try {
-      const v = await contracts.kyc.isKYCVerified(walletAddress);
+      const v = await fetchDBKycStatus();
       setIsKYCVerified(v);
-      if (kycPollRef.current) clearInterval(kycPollRef.current);
       return v;
     } catch { return false; }
-  }, [contracts, walletAddress]);
+  }, []);
 
   const loadMyCredits = useCallback(async (c, addr) => {
     const _c    = c    || contracts;
