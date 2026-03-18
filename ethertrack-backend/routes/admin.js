@@ -193,9 +193,23 @@ router.get('/credits', isAdmin, async (req, res) => {
   const { status = 'pending' } = req.query;
   try {
     const { rows } = await query(
-      `SELECT b.*, u.email, u.full_name
+      `SELECT b.id, b.project_name, b.project_location, b.country,
+              b.standard, b.project_type, b.developer,
+              b.quantity, b.vintage_year, b.expiry_date,
+              b.registry_serial, b.doc_ipfs_hash,
+              b.admin_status, b.admin_notes, b.status,
+              b.token_id, b.tx_hash_mint,              -- ✅ explicit
+              b.created_at, b.updated_at,
+              b.credit_type, b.cbam_eligible,
+              b.corresponding_adjustment, b.sdg_tags,
+              b.icvcm_ccp_eligible, b.icvcm_ccp_label,
+              b.registry_link,
+              u.email, u.full_name,
+              u.wallet_address AS user_wallet,
+              p.name AS registry_name
        FROM carbon_batches b
        LEFT JOIN users u ON u.id = b.user_id
+       LEFT JOIN projects p ON p.id = b.project_id
        WHERE b.admin_status = $1
        ORDER BY b.created_at ASC NULLS LAST`,
       [status]
