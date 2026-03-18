@@ -79,8 +79,7 @@ router.post('/sync', authenticate, async (req, res) => {
 });
 
 // ── GET /api/transactions/retirements ─────────────────────────────
-// ✅ Reads from registry_transactions (where actual retirements are stored)
-// ✅ Normalizes cert_id → certificate_id for frontend consistency
+// ✅ Reads from registry_transactions + joins carbon_batches for full metadata
 router.get('/retirements', authenticate, async (req, res) => {
   try {
     const { rows } = await query(
@@ -101,8 +100,21 @@ router.get('/retirements', authenticate, async (req, res) => {
          rt.beneficiary,
          rt.beneficiary            AS beneficiary_name,
          rt.created_at,
-         rt.created_at             AS retired_at
+         rt.created_at             AS retired_at,
+         -- ✅ Join carbon_batches for missing fields
+         cb.vintage_year,
+         cb.country,
+         cb.expiry_date,
+         cb.registry_serial,
+         cb.icvcm_ccp_eligible,
+         cb.corresponding_adjustment,
+         cb.sdg_tags,
+         cb.credit_type,
+         -- wallet from user
+         u.wallet_address
        FROM registry_transactions rt
+       LEFT JOIN carbon_batches cb ON cb.token_id = rt.token_id
+       LEFT JOIN users u ON u.id = rt.user_id
        WHERE (rt.from_user_id=$1 OR rt.user_id=$1)
          AND (rt.tx_type='RETIRE' OR rt.type::text='RETIRE')
        ORDER BY rt.created_at DESC NULLS LAST`,
@@ -110,24 +122,31 @@ router.get('/retirements', authenticate, async (req, res) => {
     );
 
     const retirements = rows.map(r => ({
-      id:               r.id,
-      certificate_id:   r.cert_id || r.certificate_id,
-      cert_id:          r.cert_id,
-      token_id:         r.token_id,
-      amount:           parseInt(r.amount) || 0,
-      tx_hash:          r.tx_hash,
-      block_number:     r.block_number,
-      project_name:     r.project_name || '—',
-      project_type:     r.project_type || '—',
-      standard:         r.standard || 'VCS',
-      serial_number:    r.serial_number || '—',
-      developer:        r.developer || '—',
-      location:         r.location || '—',
-      beneficiary:      r.beneficiary || '',
-      beneficiary_name: r.beneficiary || '',
-      retire_scope:     '1',
-      retired_at:       r.created_at,
-      created_at:       r.created_at,
+      id:                     r.id,
+      certificate_id:         r.cert_id || r.certificate_id,
+      cert_id:                r.cert_id,
+      token_id:               r.token_id,
+      amount:                 parseInt(r.amount) || 0,
+      tx_hash:                r.tx_hash,
+      block_number:           r.block_number,
+      project_name:           r.project_name || '—',
+      project_type:           r.project_type || '—',
+      standard:               r.standard || 'VCS',
+      serial_number:          r.serial_number || r.registry_serial || '—',
+      developer:              r.developer || '—',
+      location:               r.location || '—',
+      // ✅ Now populated from carbon_batches
+      vintage_year:           r.vintage_year || '—',
+      country:                r.country || '—',
+      beneficiary:            r.beneficiary || '',
+      beneficiary_name:       r.beneficiary || '',
+      retire_scope:           '1',
+      retired_at:             r.created_at,
+      created_at:             r.created_at,
+      icvcm_ccp_eligible:     r.icvcm_ccp_eligible || false,
+      corresponding_adjustment: r.corresponding_adjustment || 'none',
+      credit_type:            r.credit_type || 'voluntary',
+      wallet_address:         r.wallet_address || '',
     }));
 
     res.json({ retirements });
@@ -161,6 +180,24 @@ router.post('/retirements', authenticate, async (req, res) => {
         serialNumber||null, developer||null, location||null, projectType||null,
       ]
     );
+
+    // ✅ Update carbon_batches so HELD credits count is correct
+    if (tokenId != null) {
+      await query(
+        `UPDATE carbon_batches
+         SET retired_credits    = COALESCE(retired_credits, 0) + $1,
+             available_credits  = GREATEST(0, COALESCE(available_credits, quantity) - $1),
+             status             = CASE
+               WHEN GREATEST(0, COALESCE(available_credits, quantity) - $1) = 0
+               THEN 'exhausted'
+               ELSE status
+             END,
+             updated_at = NOW()
+         WHERE token_id = $2 AND user_id = $3`,
+        [credits, tokenId, req.user.id]
+      );
+    }
+
     res.json({ message: 'Retirement recorded', certId, id: rows[0]?.id });
   } catch (e) {
     console.error('Retirement record error:', e.message);

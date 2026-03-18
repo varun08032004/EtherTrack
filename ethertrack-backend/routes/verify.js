@@ -8,7 +8,7 @@ router.get('/:certId', async (req, res) => {
   if (!certId) return res.status(400).json({ error: 'Certificate ID required' });
 
   try {
-    // ✅ Check registry_transactions first (where actual retirements live)
+    // ✅ Check registry_transactions first, join carbon_batches for full metadata
     const { rows: txRows } = await query(
       `SELECT
          rt.id,
@@ -20,19 +20,21 @@ router.get('/:certId', async (req, res) => {
          rt.created_at           AS retired_at,
          rt.project_name,
          rt.project_type,
-         NULL                    AS vintage_year,
          rt.serial_number,
          rt.developer,
          rt.location,
-         NULL                    AS country,
          rt.standard,
-         NULL                    AS corresponding_adjustment,
          rt.beneficiary          AS beneficiary_name,
-         NULL                    AS beneficiary_entity,
-         NULL                    AS beneficiary_gstin,
-         rt.from_wallet          AS wallet_address,
-         u.wallet_address        AS user_wallet
+         -- ✅ From carbon_batches
+         cb.vintage_year,
+         cb.country,
+         cb.corresponding_adjustment,
+         cb.icvcm_ccp_eligible,
+         cb.credit_type,
+         -- wallet
+         COALESCE(rt.from_wallet, u.wallet_address) AS wallet_address
        FROM registry_transactions rt
+       LEFT JOIN carbon_batches cb ON cb.token_id = rt.token_id
        LEFT JOIN users u ON u.id = COALESCE(rt.from_user_id, rt.user_id)
        WHERE rt.cert_id = $1
        LIMIT 1`,
@@ -50,7 +52,7 @@ router.get('/:certId', async (req, res) => {
         retired_at:               r.retired_at,
         project_name:             r.project_name || '—',
         project_type:             r.project_type || '—',
-        vintage_year:             r.vintage_year,
+        vintage_year:             r.vintage_year || '—',
         serial_number:            r.serial_number || '—',
         developer:                r.developer || '—',
         location:                 r.location || '—',
@@ -58,9 +60,10 @@ router.get('/:certId', async (req, res) => {
         standard:                 r.standard || 'VCS',
         corresponding_adjustment: r.corresponding_adjustment || 'none',
         beneficiary_name:         r.beneficiary_name || '',
-        beneficiary_entity:       r.beneficiary_entity || '',
-        beneficiary_gstin:        r.beneficiary_gstin || '',
-        wallet_address:           r.wallet_address || r.user_wallet || '',
+        beneficiary_entity:       '',
+        beneficiary_gstin:        '',
+        wallet_address:           r.wallet_address || '',
+        icvcm_ccp_eligible:       r.icvcm_ccp_eligible || false,
         source:                   'registry_transactions',
       });
     }

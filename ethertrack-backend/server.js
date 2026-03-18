@@ -42,21 +42,27 @@ app.use(cors({
 
 app.use(cookieParser());
 
+// ── Rate limiting ─────────────────────────────────────────────────
+// /api/auth/me is called frequently — skip rate limit for it
+app.use('/api/auth/me', (req, res, next) => next()); // ✅ exempt /me
+
+// Login/register/verify — stricter limit
 app.use('/api/auth', rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
-  message: { error: 'Too many requests, please try again later' },
+  windowMs: 15 * 60 * 1000, // 15 mins
+  max: 100,                  // was 20 — increased to 100
+  skip: (req) => req.path === '/me' || req.path === '/refresh',
+  message: { error: 'Too many auth requests, please try again later' },
 }));
 
 app.use('/api/kyc', rateLimit({
   windowMs: 60 * 60 * 1000,
-  max: 10,
+  max: 20,                   // was 10 — increased to 20
   message: { error: 'Too many KYC attempts, please try again later' },
 }));
 
 app.use('/api/', rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 200,
+  max: 500,                  // was 200 — increased to 500
 }));
 
 app.use(express.json({ limit: '10mb' }));
