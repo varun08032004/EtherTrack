@@ -541,4 +541,54 @@ router.get('/audit', isAdmin, async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Failed to fetch audit log' }); }
 });
 
+// ── POST /api/admin/credits/:id/retry-mint ────────────────────────
+// ✅ Retry minting for approved but un-minted credits
+router.post('/credits/:id/retry-mint', isAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    // Fetch the batch
+    const { rows } = await query(
+      `SELECT cb.*, u.wallet_address, u.email, u.full_name
+       FROM carbon_batches cb
+       JOIN users u ON u.id = cb.user_id
+       WHERE cb.id = $1`,
+      [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Batch not found' });
+
+    const batch = rows[0];
+
+    if (batch.admin_status !== 'approved') {
+      return res.status(400).json({ error: 'Batch must be approved before minting' });
+    }
+    if (batch.token_id != null) {
+      return res.status(400).json({ error: `Already minted — Token #${batch.token_id}` });
+    }
+    if (!batch.wallet_address) {
+      return res.status(400).json({ error: 'User has no wallet address' });
+    }
+
+    // Trigger mint via minter service
+    const { mintApprovedCredit } = require('../services/minter');
+    const result = await mintApprovedCredit(id);
+
+    if (result.success) {
+      res.json({
+        success:  true,
+        tokenId:  result.tokenId,
+        txHash:   result.txHash,
+        message:  `Minted Token #${result.tokenId}`,
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        error:   result.error || 'Mint failed',
+      });
+    }
+  } catch (e) {
+    console.error('Retry mint error:', e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 module.exports = router;
