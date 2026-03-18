@@ -1,39 +1,101 @@
-import React, { useContext, useEffect } from 'react';
+import React, { useContext, useEffect, useState } from 'react';
 import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { AuthContext } from '../App';
+import { authAPI } from '../services/api';
 
 const KYCGate = ({ children }) => {
-  const { isAuthenticated, kycCompleted, dbUser } = useContext(AuthContext);
-  const location = useLocation();
-  const navigate = useNavigate();
+  const { isAuthenticated, kycCompleted, dbUser, handleKycComplete } = useContext(AuthContext);
+  const location  = useLocation();
+  const navigate  = useNavigate();
 
-  // Inject Google Font once
+  // ✅ Self-healing: re-fetch /api/auth/me if state looks wrong
+  const [checking, setChecking] = useState(false);
+  const [checked,  setChecked]  = useState(false);
+
   useEffect(() => {
+    // Inject Google Font once
     const id = 'dm-mono-font';
     if (!document.getElementById(id)) {
-      const link = document.createElement('link');
-      link.id   = id;
-      link.rel  = 'stylesheet';
-      link.href = 'https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap';
+      const link  = document.createElement('link');
+      link.id     = id;
+      link.rel    = 'stylesheet';
+      link.href   = 'https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap';
       document.head.appendChild(link);
     }
   }, []);
+
+  useEffect(() => {
+    // ✅ If user is authenticated but kycCompleted=false and dbUser not yet loaded
+    // OR dbUser is loaded but kyc_verified=true while kycCompleted=false (stale state)
+    // → re-fetch /me to self-heal
+    if (!isAuthenticated || checked) return;
+
+    const kycLooksFalseButMightBeTrue =
+      !kycCompleted &&
+      (!dbUser || dbUser?.kyc_verified === true || dbUser?.kyc_status === 'verified');
+
+    if (kycLooksFalseButMightBeTrue) {
+      setChecking(true);
+      authAPI.me()
+        .then(me => {
+          if (me?.kyc_verified || me?.kyc_status === 'verified') {
+            handleKycComplete(true); // ✅ Heal the stale state
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          setChecking(false);
+          setChecked(true);
+        });
+    } else {
+      setChecked(true);
+    }
+  }, [isAuthenticated, kycCompleted, dbUser, checked, handleKycComplete]);
 
   // Not logged in
   if (!isAuthenticated) {
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
+  // ✅ Show spinner while re-checking KYC status
+  if (checking) {
+    return (
+      <div style={{
+        minHeight:'100vh', background:'#080c0a',
+        display:'flex', alignItems:'center', justifyContent:'center',
+        fontFamily:"'DM Mono',monospace",
+      }}>
+        <div style={{ textAlign:'center' }}>
+          <div style={{
+            width:24, height:24,
+            border:'2px solid #22c55e22', borderTopColor:'#22c55e',
+            borderRadius:'50%', animation:'spin 1s linear infinite',
+            margin:'0 auto 12px',
+          }}/>
+          <div style={{ fontSize:10, color:'#86efac44', letterSpacing:'.1em' }}>
+            VERIFYING ACCESS...
+          </div>
+        </div>
+        <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      </div>
+    );
+  }
+
   const status = dbUser?.kyc_status;
 
-  // ── Fully verified — let through ─────────────────────────────
-  if (kycCompleted || status === 'verified') return children;
+  // ✅ Multiple ways to confirm verified — handles stale state
+  const isVerified =
+    kycCompleted ||
+    status === 'verified' ||
+    dbUser?.kyc_verified === true;
+
+  if (isVerified) return children;
 
   // ── Submitted — waiting for admin ────────────────────────────
   if (status === 'submitted') {
     return (
       <>
-        <style>{`@keyframes kycFadeUp{from{opacity:0;transform:translateY(16px);}to{opacity:1;transform:translateY(0);}}`}</style>
+        <style>{ANIM}</style>
         <div style={styles.page}>
           <div style={styles.card}>
             <div style={styles.icon}>⏳</div>
@@ -43,8 +105,6 @@ const KYCGate = ({ children }) => {
               Your KYC submission is being reviewed by our compliance team.
               This typically takes <strong style={{ color:'#facc15' }}>1–2 business days</strong>.
             </div>
-
-            {/* Status steps */}
             <div style={{ textAlign:'left', marginBottom:20 }}>
               {[
                 { icon:'✅', label:'KYC Submitted',        done:true  },
@@ -56,49 +116,41 @@ const KYCGate = ({ children }) => {
                   display:'flex', alignItems:'center', gap:12,
                   padding:'10px 14px', borderRadius:7, marginBottom:6,
                   background: done ? '#0d2e1f22' : '#060a07',
-                  border: `1px solid ${done ? '#22c55e22' : '#0f2a1a'}`,
+                  border:`1px solid ${done ? '#22c55e22' : '#0f2a1a'}`,
                 }}>
                   <span style={{ fontSize:16 }}>{icon}</span>
-                  <span style={{ flex:1, fontSize:11, color: done ? '#22c55e' : '#86efac44' }}>{label}</span>
-                  <span style={{ fontSize:9, letterSpacing:'.08em', color: done ? '#22c55e77' : '#86efac22' }}>
+                  <span style={{ flex:1, fontSize:11, color:done?'#22c55e':'#86efac44' }}>{label}</span>
+                  <span style={{ fontSize:9, letterSpacing:'.08em', color:done?'#22c55e77':'#86efac22' }}>
                     {done ? 'DONE' : 'PENDING'}
                   </span>
                 </div>
               ))}
             </div>
-
             <div style={styles.notice}>
               📧 You'll receive an email at <strong style={{ color:'#86efac88' }}>{dbUser?.email}</strong> once verified.
-              Until then, trading features remain locked.
             </div>
-            <button style={styles.btnOutline} onClick={() => navigate('/dashboard')}>
-              ← BACK TO DASHBOARD
-            </button>
+            <button style={styles.btnOutline} onClick={() => navigate('/dashboard')}>← BACK TO DASHBOARD</button>
           </div>
         </div>
       </>
     );
   }
 
-  // ── Rejected — ask to resubmit ───────────────────────────────
+  // ── Rejected ─────────────────────────────────────────────────
   if (status === 'rejected') {
     return (
       <>
-        <style>{`@keyframes kycFadeUp{from{opacity:0;transform:translateY(16px);}to{opacity:1;transform:translateY(0);}}`}</style>
+        <style>{ANIM}</style>
         <div style={styles.page}>
           <div style={styles.card}>
             <div style={styles.icon}>❌</div>
             <div style={{ fontSize:9, color:'#f8717177', letterSpacing:'.2em', marginBottom:8 }}>KYC REJECTED</div>
             <div style={styles.title}>Resubmission <span style={{ color:'#f87171' }}>Required</span></div>
             <div style={styles.sub}>
-              Your KYC submission was not approved. Please check your email for the reason and resubmit with the correct information.
+              Your KYC submission was not approved. Please check your email for the reason and resubmit.
             </div>
-            <button style={styles.btn} onClick={() => navigate('/kyc')}>
-              RESUBMIT KYC →
-            </button>
-            <button style={{ ...styles.btnOutline, marginTop:10 }} onClick={() => navigate('/dashboard')}>
-              ← BACK TO DASHBOARD
-            </button>
+            <button style={styles.btn} onClick={() => navigate('/kyc')}>RESUBMIT KYC →</button>
+            <button style={{ ...styles.btnOutline, marginTop:10 }} onClick={() => navigate('/dashboard')}>← BACK TO DASHBOARD</button>
           </div>
         </div>
       </>
@@ -108,14 +160,13 @@ const KYCGate = ({ children }) => {
   // ── Not submitted yet ─────────────────────────────────────────
   return (
     <>
-      <style>{`@keyframes kycFadeUp{from{opacity:0;transform:translateY(16px);}to{opacity:1;transform:translateY(0);}}`}</style>
+      <style>{ANIM}</style>
       <div style={styles.page}>
         <div style={styles.card}>
           <div style={styles.icon}>🔐</div>
           <div style={styles.title}>KYC Verification Required</div>
           <div style={styles.sub}>
-            You need to complete KYC verification before accessing trading features.
-            This is mandatory for all users.
+            Complete KYC verification to access trading features. Mandatory for all users.
           </div>
           <div style={{ textAlign:'left', marginBottom:28 }}>
             {[
@@ -129,12 +180,7 @@ const KYCGate = ({ children }) => {
               </div>
             ))}
           </div>
-          <button
-            style={styles.btn}
-            onMouseOver={e => e.target.style.opacity = '0.85'}
-            onMouseOut={e  => e.target.style.opacity = '1'}
-            onClick={() => navigate('/kyc')}
-          >
+          <button style={styles.btn} onClick={() => navigate('/kyc')}>
             COMPLETE KYC VERIFICATION →
           </button>
           <div style={styles.note}>⚡ Takes less than 5 minutes · Your data is secure</div>
@@ -144,65 +190,57 @@ const KYCGate = ({ children }) => {
   );
 };
 
+const ANIM = `@keyframes kycFadeUp{from{opacity:0;transform:translateY(16px);}to{opacity:1;transform:translateY(0);}}`;
+
 const styles = {
   page: {
-    minHeight: '100vh',
-    background: '#080c0a',
-    fontFamily: "'DM Mono', monospace",
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    position: 'relative',
-    backgroundImage:
-      'linear-gradient(rgba(34,197,94,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(34,197,94,0.03) 1px, transparent 1px)',
-    backgroundSize: '40px 40px',
+    minHeight:'100vh', background:'#080c0a',
+    fontFamily:"'DM Mono', monospace",
+    display:'flex', alignItems:'center', justifyContent:'center',
+    backgroundImage:'linear-gradient(rgba(34,197,94,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(34,197,94,0.03) 1px,transparent 1px)',
+    backgroundSize:'40px 40px',
   },
   card: {
-    position: 'relative',
-    zIndex: 1,
-    background: '#0a0f0c',
-    border: '1px solid #0f2a1a',
-    borderRadius: '14px',
-    padding: '48px 40px',
-    maxWidth: '440px',
-    width: '100%',
-    textAlign: 'center',
-    boxShadow: '0 24px 64px rgba(0,0,0,0.6)',
-    animation: 'kycFadeUp 0.5s ease both',
+    position:'relative', zIndex:1,
+    background:'#0a0f0c', border:'1px solid #0f2a1a',
+    borderRadius:14, padding:'48px 40px',
+    maxWidth:440, width:'100%', textAlign:'center',
+    boxShadow:'0 24px 64px rgba(0,0,0,0.6)',
+    animation:'kycFadeUp 0.5s ease both',
   },
-  icon:  { fontSize: '40px', marginBottom: '16px' },
-  title: { fontSize: '20px', fontWeight: 700, color: '#f0fdf4', marginBottom: '8px', letterSpacing: '0.04em' },
-  sub:   { fontSize: '12px', color: '#86efac66', marginBottom: '24px', lineHeight: 1.8, letterSpacing: '0.03em' },
-  step: {
-    display: 'flex', alignItems: 'center', gap: '12px',
-    padding: '10px 14px', borderRadius: '7px',
-    background: '#060a07', border: '1px solid #0f2a1a',
-    marginBottom: '8px', fontSize: '12px', color: '#e2e8e4',
+  icon:  { fontSize:40, marginBottom:16 },
+  title: { fontSize:20, fontWeight:700, color:'#f0fdf4', marginBottom:8, letterSpacing:'.04em' },
+  sub:   { fontSize:12, color:'#86efac66', marginBottom:24, lineHeight:1.8, letterSpacing:'.03em' },
+  step:  {
+    display:'flex', alignItems:'center', gap:12,
+    padding:'10px 14px', borderRadius:7,
+    background:'#060a07', border:'1px solid #0f2a1a',
+    marginBottom:8, fontSize:12, color:'#e2e8e4',
   },
   stepNum: {
-    width: '22px', height: '22px', borderRadius: '50%',
-    background: '#0d2e1f', border: '1px solid #22c55e33',
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    fontSize: '10px', color: '#22c55e', flexShrink: 0,
+    width:22, height:22, borderRadius:'50%',
+    background:'#0d2e1f', border:'1px solid #22c55e33',
+    display:'flex', alignItems:'center', justifyContent:'center',
+    fontSize:10, color:'#22c55e', flexShrink:0,
   },
   notice: {
-    fontSize: '10px', color: '#86efac44', lineHeight: 1.8,
-    marginBottom: '20px', padding: '12px',
-    background: '#040706', borderRadius: '8px', border: '1px solid #0f2a1a',
+    fontSize:10, color:'#86efac44', lineHeight:1.8,
+    marginBottom:20, padding:12,
+    background:'#040706', borderRadius:8, border:'1px solid #0f2a1a',
   },
   btn: {
-    width: '100%', padding: '14px', borderRadius: '8px', border: 'none',
-    background: 'linear-gradient(135deg, #16a34a, #15803d)',
-    color: '#fff', cursor: 'pointer', fontFamily: "'DM Mono', monospace",
-    fontSize: '13px', fontWeight: 700, letterSpacing: '0.1em', transition: 'opacity 0.2s',
+    width:'100%', padding:14, borderRadius:8, border:'none',
+    background:'linear-gradient(135deg,#16a34a,#15803d)',
+    color:'#fff', cursor:'pointer', fontFamily:"'DM Mono',monospace",
+    fontSize:13, fontWeight:700, letterSpacing:'.1em', transition:'opacity .2s',
   },
   btnOutline: {
-    width: '100%', padding: '13px', borderRadius: '8px',
-    border: '1px solid #0f2a1a', background: 'transparent',
-    color: '#86efac44', cursor: 'pointer', fontFamily: "'DM Mono', monospace",
-    fontSize: '12px', letterSpacing: '0.08em',
+    width:'100%', padding:13, borderRadius:8,
+    border:'1px solid #0f2a1a', background:'transparent',
+    color:'#86efac44', cursor:'pointer', fontFamily:"'DM Mono',monospace",
+    fontSize:12, letterSpacing:'.08em',
   },
-  note: { fontSize: '10px', color: '#4ade8033', marginTop: '14px', letterSpacing: '0.06em' },
+  note: { fontSize:10, color:'#4ade8033', marginTop:14, letterSpacing:'.06em' },
 };
 
 export default KYCGate;
