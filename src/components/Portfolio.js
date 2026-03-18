@@ -996,13 +996,23 @@ export default function Portfolio() {
       const certId       = `CERT-${tokenDisplay.replace('0x','').slice(0,8).toUpperCase()}-${retiredAt.toString(36).toUpperCase().slice(-6)}`;
       try {
         await txAPI.recordRetirement({
-          tokenId:credit.tokenHex||credit.tokenId, projectName:credit.projectName,
-          standard:credit.standard, credits:qty, vintageYear:credit.vintageYear,
-          serialNumber:credit.serialNumber, developer:credit.developer,
-          location:credit.location, country:credit.country, projectType:credit.projectType,
-          txHash:result.txHash, beneficiary:user?.email||walletAddress, retireScope:scope,
-          correspondingAdjustment:credit.correspondingAdjustment,
-          certificateId:certId, walletAddress,
+          tokenId:          credit.tokenHex||credit.tokenId,
+          projectName:      credit.projectName,
+          standard:         credit.standard,
+          credits:          qty,
+          vintageYear:      credit.vintageYear,
+          serialNumber:     credit.serialNumber,
+          developer:        credit.developer,
+          location:         credit.location,
+          country:          credit.country,
+          projectType:      credit.projectType,
+          txHash:           result.txHash,
+          blockNumber:      result.blockNumber || null, // ✅ save block number
+          beneficiary:      user?.email||walletAddress,
+          retireScope:      scope,
+          correspondingAdjustment: credit.correspondingAdjustment,
+          certificateId:    certId,
+          walletAddress,
           // ✅ Corporate beneficiary data
           beneficiaryName:   corporateData?.beneficiaryName   || '',
           beneficiaryEntity: corporateData?.beneficiaryEntity || '',
@@ -1247,7 +1257,7 @@ export default function Portfolio() {
           />
 
           <OffsetGapPanel myCredits={allCredits} emissionsData={emissionsData}/>
-          <CreditScorePanel stats={stats} myCredits={allCredits} emissionsData={emissionsData}/>
+          {/* Credit score panel removed — coming in v2 */}
 
           {/* Tabs — with new CCP tab */}
           <div className="pt-tabs">

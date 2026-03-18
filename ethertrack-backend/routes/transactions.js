@@ -162,10 +162,16 @@ router.post('/retirements', authenticate, async (req, res) => {
     tokenId, projectName, standard, credits, vintageYear,
     serialNumber, developer, location, country, projectType,
     txHash, beneficiary,
+    // ✅ Corporate fields
+    beneficiaryName, beneficiaryEntity, beneficiaryGstin,
+    reportingStandard, purpose, retireScope,
+    correspondingAdjustment, blockNumber, walletAddress,
   } = req.body;
 
   try {
     const certId = `CERT-${(tokenId||'').toString().slice(0,8)||'XXXXXX'}-${Date.now().toString(36).toUpperCase()}`;
+
+    // ✅ Write to registry_transactions (for backwards compat)
     const { rows } = await query(
       `INSERT INTO registry_transactions
          (user_id, from_user_id, tx_hash, tx_type, type, token_id, amount,
@@ -176,18 +182,73 @@ router.post('/retirements', authenticate, async (req, res) => {
        RETURNING id, cert_id`,
       [
         req.user.id, txHash, tokenId, credits,
-        projectName, standard, certId, beneficiary||null,
+        projectName, standard, certId, beneficiary||beneficiaryName||null,
         serialNumber||null, developer||null, location||null, projectType||null,
       ]
     );
 
-    // ✅ Update carbon_batches so HELD credits count is correct
+    // ✅ Also write to retirements table with FULL corporate data
+    // This is what verify.js reads for the public certificate page
+    try {
+      await query(
+        `INSERT INTO retirements
+           (retired_by, wallet_address, token_id, batch_id, amount,
+            certificate_id, tx_hash, block_number,
+            project_name, project_type, vintage_year, serial_number,
+            developer, location, country, standard,
+            beneficiary_name, beneficiary_entity, beneficiary_gstin,
+            retire_scope, corresponding_adjustment,
+            reporting_standard, purpose,
+            is_public, retired_at)
+         VALUES (
+           $1, $2, $3,
+           (SELECT id FROM carbon_batches WHERE token_id=$3 AND user_id=$1 LIMIT 1),
+           $4, $5, $6, $7,
+           $8, $9, $10, $11,
+           $12, $13, $14, $15,
+           $16, $17, $18,
+           $19, $20,
+           $21, $22,
+           true, NOW()
+         )
+         ON CONFLICT DO NOTHING`,
+        [
+          req.user.id,
+          walletAddress || null,
+          tokenId,
+          credits,
+          certId,
+          txHash,
+          blockNumber || null,
+          projectName,
+          projectType || null,
+          vintageYear || null,
+          serialNumber || null,
+          developer || null,
+          location || null,
+          country || null,
+          standard,
+          beneficiaryName || beneficiary || null,
+          beneficiaryEntity || null,
+          beneficiaryGstin || null,
+          retireScope || '1',
+          correspondingAdjustment || 'none',
+          reportingStandard || 'GHG_PROTOCOL',
+          purpose || 'voluntary_offset',
+        ]
+      );
+    } catch (retErr) {
+      // Log but don't fail — registry_transactions insert already succeeded
+      console.warn('Retirements table insert failed:', retErr.message);
+    }
+
+    // ✅ Update carbon_batches available_credits
     if (tokenId != null) {
       await query(
         `UPDATE carbon_batches
-         SET retired_credits    = COALESCE(retired_credits, 0) + $1,
-             available_credits  = GREATEST(0, COALESCE(available_credits, quantity) - $1),
-             status             = CASE
+         SET retired_credits   = COALESCE(retired_credits, 0) + $1,
+             available_credits = GREATEST(0, COALESCE(available_credits, quantity) - $1),
+             status            = CASE
                WHEN GREATEST(0, COALESCE(available_credits, quantity) - $1) = 0
                THEN 'exhausted'
                ELSE status
