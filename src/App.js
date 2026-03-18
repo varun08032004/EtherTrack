@@ -3,19 +3,22 @@ import { BrowserRouter as Router, Route, Routes, Navigate } from 'react-router-d
 import './App.css';
 import './index.css';
 
-import Login            from './components/Login';
-import Signup           from './components/Signup';
-import Dashboard        from './components/Dashboard';
-import Header           from './components/Header';
-import Profile          from './components/Profile';
-import EditProfile      from './components/EditProfile';
-import EmissionTracking from './components/EmissionTracking';
-import CarbonCredits    from './components/CarbonCredits';
-import TradingHistory   from './components/TradingHistory';
-import KYCForm          from './components/KYCForm';
-import Portfolio        from './components/Portfolio';
-import KYCGate          from './components/KYCGate';
-import AdminDashboard   from './components/AdminDashboard';
+import Login              from './components/Login';
+import Signup             from './components/Signup';
+import Dashboard          from './components/Dashboard';
+import Header             from './components/Header';
+import Profile            from './components/Profile';
+import EditProfile        from './components/EditProfile';
+import EmissionTracking   from './components/EmissionTracking';
+import CarbonCredits      from './components/CarbonCredits';
+import TradingHistory     from './components/TradingHistory';
+import KYCForm            from './components/KYCForm';
+import Portfolio          from './components/Portfolio';
+import KYCGate            from './components/KYCGate';
+import AdminDashboard     from './components/AdminDashboard';
+import VerifyCertificate  from './components/VerifyCertificate';
+import TeamManagement     from './components/TeamManagement';   // ✅ NEW
+import JoinOrg            from './components/JoinOrg';          // ✅ NEW
 
 import { NotificationProvider } from './context/NotificationContext';
 import { PortfolioProvider }    from './context/PortfolioContext';
@@ -24,21 +27,21 @@ import { authAPI, tokenStorage } from './services/api';
 // ── Optional components — safe fallbacks if file doesn't exist ────
 let Settings, Notifications, WalletMismatchBanner, Help, Feedback, TransactionStatus, NotFound;
 
-try { Settings              = require('./components/Settings').default;              } catch { Settings              = () => <div style={{color:'#22c55e',fontFamily:'monospace',padding:40}}>Settings coming soon</div>; }
-try { Notifications         = require('./components/Notifications').default;         } catch { Notifications         = () => <div style={{color:'#22c55e',fontFamily:'monospace',padding:40}}>Notifications coming soon</div>; }
-try { WalletMismatchBanner  = require('./components/WalletMismatchBanner').default;  } catch { WalletMismatchBanner  = () => null; }
-try { Help                  = require('./components/Help').default;                  } catch { Help                  = () => <div style={{color:'#22c55e',fontFamily:'monospace',padding:40}}>Help coming soon</div>; }
-try { Feedback              = require('./components/Feedback').default;              } catch { Feedback              = () => <div style={{color:'#22c55e',fontFamily:'monospace',padding:40}}>Feedback coming soon</div>; }
-try { TransactionStatus     = require('./components/TransactionStatus').default;     } catch { TransactionStatus     = () => <div style={{color:'#22c55e',fontFamily:'monospace',padding:40}}>Transaction Status coming soon</div>; }
-try { NotFound              = require('./components/NotFound').default;              } catch { NotFound              = () => <div style={{color:'#22c55e',fontFamily:'monospace',padding:40}}>404 — Page not found</div>; }
+try { Settings             = require('./components/Settings').default;             } catch { Settings             = () => <div style={{color:'#22c55e',fontFamily:'monospace',padding:40}}>Settings coming soon</div>; }
+try { Notifications        = require('./components/Notifications').default;        } catch { Notifications        = () => <div style={{color:'#22c55e',fontFamily:'monospace',padding:40}}>Notifications coming soon</div>; }
+try { WalletMismatchBanner = require('./components/WalletMismatchBanner').default; } catch { WalletMismatchBanner = () => null; }
+try { Help                 = require('./components/Help').default;                 } catch { Help                 = () => <div style={{color:'#22c55e',fontFamily:'monospace',padding:40}}>Help coming soon</div>; }
+try { Feedback             = require('./components/Feedback').default;             } catch { Feedback             = () => <div style={{color:'#22c55e',fontFamily:'monospace',padding:40}}>Feedback coming soon</div>; }
+try { TransactionStatus    = require('./components/TransactionStatus').default;    } catch { TransactionStatus    = () => <div style={{color:'#22c55e',fontFamily:'monospace',padding:40}}>Transaction Status coming soon</div>; }
+try { NotFound             = require('./components/NotFound').default;             } catch { NotFound             = () => <div style={{color:'#22c55e',fontFamily:'monospace',padding:40}}>404 — Page not found</div>; }
 
 export const AuthContext = React.createContext();
 
 const getUserKey = (email) => `user_${email}`;
 
 const AdminGuard = ({ dbUser, children }) => {
-  if (!dbUser)                   return <Navigate to="/dashboard" />;
-  if (dbUser.role !== 'admin')   return <Navigate to="/dashboard" />;
+  if (!dbUser)                 return <Navigate to="/dashboard" />;
+  if (dbUser.role !== 'admin') return <Navigate to="/dashboard" />;
   return children;
 };
 
@@ -47,24 +50,34 @@ function AppInner({ isAuthenticated, user, setUser, kycCompleted, handleLogin, h
 
   return (
     <AuthContext.Provider value={{
-      isAuthenticated,
-      user, setUser,
-      kycCompleted,
-      handleLogin,
-      handleLogout,
-      handleKycComplete,
-      dbUser,
-      setDbUser,
+      isAuthenticated, user, setUser, kycCompleted,
+      handleLogin, handleLogout, handleKycComplete, dbUser, setDbUser,
     }}>
       {!isAdmin && <Header />}
       {isAuthenticated && !isAdmin && <WalletMismatchBanner />}
       <div className="main-content" style={{ paddingTop: isAdmin ? '0' : '60px', background:'#080c0a', minHeight:'100vh' }}>
         <Routes>
+
+          {/* ── Fully public routes — no auth required ── */}
+          <Route path="/verify/:certId" element={<VerifyCertificate />} />
+          <Route path="/help"           element={<Help />} />
+          <Route path="/feedback"       element={<Feedback />} />
+
           <Route path="/"       element={isAuthenticated ? <Navigate to={isAdmin ? '/admin' : '/dashboard'} /> : <Navigate to="/signup" />} />
           <Route path="/login"  element={isAuthenticated ? <Navigate to={isAdmin ? '/admin' : '/dashboard'} /> : <Login />} />
           <Route path="/signup" element={isAuthenticated ? <Navigate to={isAdmin ? '/admin' : '/dashboard'} /> : <Signup />} />
-          <Route path="/help"     element={<Help />} />
-          <Route path="/feedback" element={<Feedback />} />
+
+          {/* ✅ Join org — requires auth but NOT KYC */}
+          <Route path="/join-org" element={
+            isAuthenticated
+              ? <JoinOrg />
+              : (() => {
+                  // Save token to sessionStorage before redirecting to login
+                  const token = new URLSearchParams(window.location.search).get('token');
+                  if (token) sessionStorage.setItem('pending_invite_token', token);
+                  return <Navigate to="/login" />;
+                })()
+          } />
 
           {isAuthenticated ? (
             <>
@@ -76,17 +89,20 @@ function AppInner({ isAuthenticated, user, setUser, kycCompleted, handleLogin, h
 
               {!isAdmin && (
                 <>
-                  <Route path="/dashboard"     element={<Dashboard />} />
-                  <Route path="/profile"       element={<Profile />} />
-                  <Route path="/edit-profile"  element={<EditProfile />} />
-                  <Route path="/settings"      element={<Settings />} />
-                  <Route path="/notifications" element={<Notifications />} />
+                  <Route path="/dashboard"          element={<Dashboard />} />
+                  <Route path="/profile"            element={<Profile />} />
+                  <Route path="/edit-profile"       element={<EditProfile />} />
+                  <Route path="/settings"           element={<Settings />} />
+                  <Route path="/notifications"      element={<Notifications />} />
 
                   <Route path="/kyc" element={
                     kycCompleted
                       ? <Navigate to="/dashboard" />
                       : <KYCForm onComplete={handleKycComplete} />
                   } />
+
+                  {/* ✅ Team management — auth required, no KYC gate */}
+                  <Route path="/team"               element={<TeamManagement />} />
 
                   <Route path="/portfolio"          element={<KYCGate><Portfolio /></KYCGate>} />
                   <Route path="/carbon-credits"     element={<KYCGate><CarbonCredits /></KYCGate>} />
@@ -121,26 +137,18 @@ function App() {
     setKycCompleted(false);
     setDbUser(null);
     localStorage.removeItem('activeEmail');
-    // tokenStorage.clear() already called inside authAPI.logout()
   }, []);
 
-  // ── Restore session on page load/refresh ─────────────────────
   useEffect(() => {
     const restoreSession = async () => {
-      // Only attempt restore if we have a stored access token
       const hasToken = !!tokenStorage.getAccess();
-      if (!hasToken) {
-        setSessionChecked(true);
-        return;
-      }
-
+      if (!hasToken) { setSessionChecked(true); return; }
       try {
         const me = await authAPI.me();
         if (me?.id) {
           setDbUser(me);
           setKycCompleted(!!me.kyc_verified);
           setIsAuthenticated(true);
-
           const activeEmail = localStorage.getItem('activeEmail');
           if (activeEmail) {
             const stored = localStorage.getItem(getUserKey(activeEmail));
@@ -151,7 +159,6 @@ function App() {
           }
         }
       } catch {
-        // Token invalid or expired and refresh failed — stay logged out
         tokenStorage.clear();
       } finally {
         setSessionChecked(true);
@@ -166,16 +173,12 @@ function App() {
   }, [handleLogout]);
 
   useEffect(() => {
-    if (user?.email) {
-      localStorage.setItem(getUserKey(user.email), JSON.stringify(user));
-    }
+    if (user?.email) localStorage.setItem(getUserKey(user.email), JSON.stringify(user));
   }, [user]);
 
-  // ── Login handler — stores tokens + sets state ────────────────
   const handleLogin = async (userData, firebaseUser = null) => {
     setUser(userData);
     localStorage.setItem('activeEmail', userData.email);
-
     if (firebaseUser) {
       try {
         const res = await authAPI.syncUser({
@@ -183,24 +186,28 @@ function App() {
           firebaseUid: firebaseUser.uid,
           fullName:    firebaseUser.displayName || '',
         });
-        // authAPI.syncUser already stores tokens in tokenStorage
         if (res?.user) {
           setDbUser(res.user);
           if (res.user.kyc_verified) setKycCompleted(true);
         }
-      } catch(e) {
-        console.warn('Backend sync failed:', e?.message || e);
-      }
+      } catch(e) { console.warn('Backend sync failed:', e?.message || e); }
     } else if (userData.accessToken) {
-      // Email/password login — tokens already stored by authAPI.login
-      // but store dbUser if passed directly
       if (userData.dbUser) {
         setDbUser(userData.dbUser);
         if (userData.dbUser.kyc_verified) setKycCompleted(true);
       }
     }
-
     setIsAuthenticated(true);
+
+    // ✅ Check for pending org invite — redirect to join-org after login
+    const pendingToken = sessionStorage.getItem('pending_invite_token');
+    if (pendingToken) {
+      sessionStorage.removeItem('pending_invite_token');
+      // Small delay to let auth state settle
+      setTimeout(() => {
+        window.location.href = `/join-org?token=${pendingToken}`;
+      }, 300);
+    }
   };
 
   const handleKycComplete = (status) => {

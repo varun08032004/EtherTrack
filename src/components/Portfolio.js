@@ -1,19 +1,24 @@
-import React, { useState, useContext, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useContext, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AuthContext } from '../App';
 import { usePortfolio, vintagePenalty } from '../context/PortfolioContext';
 import { txAPI, apiFetch } from '../services/api';
+import { generateReport } from '../services/ReportPDF'; // ✅ PDF generator
 
 // ── Registries ────────────────────────────────────────────────────
 const REGISTRIES = {
-  VCS: { label:'Verra VCS',                color:'#22c55e', bg:'#0d2e1f' },
-  GS:  { label:'Gold Standard',            color:'#facc15', bg:'#1a1500' },
-  CDM: { label:'Clean Dev. Mechanism',     color:'#60a5fa', bg:'#0a1628' },
-  ACR: { label:'American Carbon Registry', color:'#a78bfa', bg:'#120a28' },
-  BEE: { label:'BEE India (CCTS)',         color:'#f97316', bg:'#1a0a00' },
+  VCS: { label:'Verra VCS',                color:'#22c55e', bg:'#0d2e1f',
+         link:'https://registry.verra.org/app/projectDetail/VCS/' },
+  GS:  { label:'Gold Standard',            color:'#facc15', bg:'#1a1500',
+         link:'https://registry.goldstandard.org/projects/details/' },
+  CDM: { label:'Clean Dev. Mechanism',     color:'#60a5fa', bg:'#0a1628',
+         link:'https://cdm.unfccc.int/Projects/DB/details?id=' },
+  ACR: { label:'American Carbon Registry', color:'#a78bfa', bg:'#120a28',
+         link:'https://acr2.apx.com/mymodule/reg/prjView.asp?id1=' },
+  BEE: { label:'BEE India (CCTS)',         color:'#f97316', bg:'#1a0a00',
+         link:'https://beeindia.gov.in/en/ccts/' },
 };
 
-// ── BEE CCTS + Global VCM project types ──────────────────────────
 const PROJECT_TYPES = [
   'Renewable Energy (BEE)','Green Hydrogen (BEE)','Industrial Energy Efficiency (BEE)',
   'Landfill Methane Recovery (BEE)','Mangrove Afforestation (BEE)',
@@ -28,35 +33,42 @@ const CREDIT_TYPES = [
   { value:'compliance', label:'Compliance (CCC)', color:'#f97316', desc:'Carbon Credit Certificate — India CCTS' },
 ];
 
-// ── Gold Standard SDG tags (required for GS credits) ─────────────
 const SDG_OPTIONS = [
-  { id:1,  label:'No Poverty' },
-  { id:3,  label:'Good Health' },
-  { id:6,  label:'Clean Water' },
-  { id:7,  label:'Clean Energy' },
-  { id:8,  label:'Decent Work' },
-  { id:11, label:'Sustainable Cities' },
-  { id:13, label:'Climate Action' },
-  { id:14, label:'Life Below Water' },
+  { id:1,  label:'No Poverty' },    { id:3,  label:'Good Health' },
+  { id:6,  label:'Clean Water' },   { id:7,  label:'Clean Energy' },
+  { id:8,  label:'Decent Work' },   { id:11, label:'Sustainable Cities' },
+  { id:13, label:'Climate Action' },{ id:14, label:'Life Below Water' },
   { id:15, label:'Life on Land' },
 ];
 
-// ── ACVA verification statuses ────────────────────────────────────
 const VERIFICATION_STATUSES = [
-  { value:'pending',     label:'Not Verified',   color:'#86efac33' },
-  { value:'in_progress', label:'In Progress',     color:'#f59e0b' },
-  { value:'verified',    label:'Verified',        color:'#22c55e' },
+  { value:'pending',     label:'Not Verified',  color:'#86efac33' },
+  { value:'in_progress', label:'In Progress',   color:'#f59e0b'   },
+  { value:'verified',    label:'Verified',      color:'#22c55e'   },
 ];
 
-// ── Corresponding Adjustment (Article 6) options ──────────────────
 const CA_OPTIONS = [
-  { value:'none',        label:'None — voluntary only (no CA)',         color:'#86efac44' },
-  { value:'host_issued', label:'Host country CA issued (Art. 6.2)',     color:'#22c55e' },
-  { value:'itmo',        label:'ITMO authorised (Art. 6.4)',            color:'#60a5fa' },
-  { value:'pending',     label:'CA pending host country confirmation',  color:'#f59e0b' },
+  { value:'none',        label:'None — voluntary only (no CA)',        color:'#86efac44' },
+  { value:'host_issued', label:'Host country CA issued (Art. 6.2)',    color:'#22c55e'   },
+  { value:'itmo',        label:'ITMO authorised (Art. 6.4)',           color:'#60a5fa'   },
+  { value:'pending',     label:'CA pending host country confirmation', color:'#f59e0b'   },
 ];
 
-// ── Reference prices (INR/tCO₂) ──────────────────────────────────
+// ✅ ICVCM Core Carbon Principles options
+const ADDITIONALITY_OPTIONS = [
+  { value:'not_specified',  label:'Not specified'         },
+  { value:'regulatory',     label:'Regulatory surplus'    },
+  { value:'financial',      label:'Financial additionality'},
+  { value:'common_practice',label:'Common practice'       },
+];
+
+const PERMANENCE_OPTIONS = [
+  { value:'not_rated',  label:'Not rated'    },
+  { value:'temporary',  label:'Temporary'    },
+  { value:'long_term',  label:'Long-term'    },
+  { value:'permanent',  label:'Permanent'    },
+];
+
 const REFERENCE_PRICES = {
   'Renewable Energy (BEE)':700,'Green Hydrogen (BEE)':1400,'Industrial Energy Efficiency (BEE)':600,
   'Landfill Methane Recovery (BEE)':950,'Mangrove Afforestation (BEE)':1800,
@@ -78,7 +90,6 @@ const getReferencePrice = (projectType, standard, vintageYear) => {
   return Math.round(base * premium * (1 - dep));
 };
 
-// ── Empty form state ──────────────────────────────────────────────
 const emptyForm = {
   projectName:'', location:'', country:'', standard:'VCS', projectType:'',
   developer:'', credits:'', vintageYear:'', expiryDate:'', serialNumber:'',
@@ -86,19 +97,23 @@ const emptyForm = {
   creditType:'voluntary', cbamEligible:false,
   acvaName:'', acvaDate:'', acvaStatus:'pending',
   icmRegistryId:'', bankingStatus:'available',
-  sdgTags:[],
-  correspondingAdjustment:'none',
+  sdgTags:[], correspondingAdjustment:'none',
+  // ✅ New ICVCM fields
+  icvcmCcpEligible:false, icvcmCcpLabel:'', icvcmCcpDate:'',
+  registryLink:'', methodologyId:'',
+  additionalityType:'not_specified', permanenceRating:'not_rated',
+  coBenefitsVerified:false,
 };
 
 // ─────────────────────────────────────────────────────────────────
-// ── Offset Gap Panel ──────────────────────────────────────────────
+// ── Offset Gap Panel
 // ─────────────────────────────────────────────────────────────────
 function OffsetGapPanel({ myCredits, emissionsData }) {
   const totalRetiredTco2 = myCredits.filter(c=>c.status==='RETIRED').reduce((s,c)=>s+(c.totalRetired||c.credits||0),0);
-  const totalEm  = emissionsData?.total||0;
-  const scope1Em = emissionsData?.scope1||0;
-  const scope2Em = emissionsData?.scope2||0;
-  const scope3Em = emissionsData?.scope3||0;
+  const totalEm  = parseFloat(emissionsData?.total||0);
+  const scope1Em = parseFloat(emissionsData?.scope1||0);
+  const scope2Em = parseFloat(emissionsData?.scope2||0);
+  const scope3Em = parseFloat(emissionsData?.scope3||0);
   const gap      = Math.max(0, totalEm - totalRetiredTco2);
   const pct      = totalEm>0 ? Math.min(100,(totalRetiredTco2/totalEm)*100) : 0;
   const needed   = Math.ceil(gap);
@@ -108,7 +123,7 @@ function OffsetGapPanel({ myCredits, emissionsData }) {
     <div style={{background:'#0a0f0c',border:'1px solid #0f2a1a',borderRadius:14,padding:'16px 20px',marginBottom:24,animation:'fu .4s ease both'}}>
       <div style={{fontSize:9,color:'#86efac44',letterSpacing:'.14em',marginBottom:8}}>OFFSET RECONCILIATION · GHG PROTOCOL</div>
       <div style={{fontSize:11,color:'#86efac33',lineHeight:1.8}}>
-        No emission data linked.{' '}<a href="/emissions" style={{color:'#22c55e88',textDecoration:'none'}}>Log GHG emissions →</a>{' '}to calculate your offset gap.
+        No emission data linked.{' '}<a href="/emission-tracking" style={{color:'#22c55e88',textDecoration:'none'}}>Log GHG emissions →</a>
       </div>
     </div>
   );
@@ -118,10 +133,10 @@ function OffsetGapPanel({ myCredits, emissionsData }) {
       <div style={{fontSize:9,color:'#86efac44',letterSpacing:'.14em',marginBottom:16}}>OFFSET RECONCILIATION · GHG PROTOCOL · FY {emissionsData.year||new Date().getFullYear()}</div>
       <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:16}}>
         {[
-          {label:'TOTAL EMISSIONS',val:`${totalEm.toFixed(1)} t`,  color:'#f87171'},
+          {label:'TOTAL EMISSIONS',val:`${totalEm.toFixed(1)} t`,         color:'#f87171'},
           {label:'CREDITS RETIRED',val:`${totalRetiredTco2.toFixed(1)} t`,color:'#22c55e'},
-          {label:'OFFSET GAP',     val:`${gap.toFixed(1)} t`,      color:gap===0?'#22c55e':'#facc15'},
-          {label:'CREDITS NEEDED', val:needed,                     color:'#60a5fa'},
+          {label:'OFFSET GAP',     val:`${gap.toFixed(1)} t`,             color:gap===0?'#22c55e':'#facc15'},
+          {label:'CREDITS NEEDED', val:needed,                            color:'#60a5fa'},
         ].map(({label,val,color})=>(
           <div key={label} style={{background:'#070c09',borderRadius:8,padding:'12px 14px',border:'1px solid #0d1f11'}}>
             <div style={{fontSize:8,color:'#86efac33',letterSpacing:'.12em',marginBottom:6}}>{label}</div>
@@ -150,7 +165,7 @@ function OffsetGapPanel({ myCredits, emissionsData }) {
           </div>
         ))}
       </div>
-      {gap>0 && (
+      {gap>0&&(
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px',background:'#110a00',border:'1px solid #facc1522',borderRadius:8,fontSize:11,flexWrap:'wrap',gap:8}}>
           <span style={{color:'#facc1577'}}>
             ⚠ Need <strong style={{color:'#facc15'}}>{needed} more credits</strong> for net-zero.
@@ -161,7 +176,7 @@ function OffsetGapPanel({ myCredits, emissionsData }) {
           </a>
         </div>
       )}
-      {gap===0 && totalEm>0 && (
+      {gap===0&&totalEm>0&&(
         <div style={{padding:'10px 14px',background:'#051409',border:'1px solid #22c55e33',borderRadius:8,fontSize:11,color:'#22c55e88'}}>
           ✓ Net-zero achieved for this reporting year. All emissions offset.
         </div>
@@ -171,18 +186,19 @@ function OffsetGapPanel({ myCredits, emissionsData }) {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// ── Credit Score Panel ────────────────────────────────────────────
+// ── Credit Score Panel
 // ─────────────────────────────────────────────────────────────────
 function CreditScorePanel({ stats, myCredits, emissionsData }) {
   const total    = stats.totalCredits||0;
   const retired  = stats.retiredCount||0;
   const listed   = stats.listedCount||0;
   const verified = myCredits.filter(c=>c.admin_status==='approved').length;
+  const ccpCount = myCredits.filter(c=>c.icvcm_ccp_eligible).length;
   const totalEm  = emissionsData?.total||0;
   const retiredT = myCredits.filter(c=>c.status==='RETIRED').reduce((s,c)=>s+(c.totalRetired||c.credits||0),0);
   const scope3Covered = totalEm>0 && retiredT>=(emissionsData?.scope3||0) && retiredT>0;
 
-  const score = Math.min(850,Math.round((verified*2.5)+(retired*15)+(listed*10)+(total>0?Math.log(total+1)*40:0)+200));
+  const score = Math.min(850,Math.round((verified*2.5)+(retired*15)+(listed*10)+(total>0?Math.log(total+1)*40:0)+(ccpCount*20)+200));
   const pct   = (score/850)*100;
   const color = score>=700?'#22c55e':score>=500?'#facc15':score>=300?'#f97316':'#f87171';
   const grade = score>=700?'EXCELLENT':score>=500?'GOOD':score>=300?'FAIR':'BUILDING';
@@ -210,10 +226,11 @@ function CreditScorePanel({ stats, myCredits, emissionsData }) {
       <div style={{flex:1,minWidth:200}}>
         <div style={{fontSize:11,color:'#f0fdf4',fontWeight:500,marginBottom:12,letterSpacing:'.04em'}}>Score Breakdown <span style={{fontSize:9,color:'#86efac44'}}>/850</span></div>
         {[
-          {label:'Verified Credits', pts:Math.round(verified*2.5),          color:'#22c55e'},
-          {label:'Credits Retired',  pts:Math.round(retired*15),            color:'#a78bfa'},
-          {label:'Active Listings',  pts:Math.round(listed*10),             color:'#facc15'},
-          {label:'Portfolio Volume', pts:Math.round(Math.log(total+1)*40),  color:'#60a5fa'},
+          {label:'Verified Credits',  pts:Math.round(verified*2.5),         color:'#22c55e'},
+          {label:'Credits Retired',   pts:Math.round(retired*15),           color:'#a78bfa'},
+          {label:'Active Listings',   pts:Math.round(listed*10),            color:'#facc15'},
+          {label:'Portfolio Volume',  pts:Math.round(Math.log(total+1)*40), color:'#60a5fa'},
+          {label:'ICVCM CCP Credits', pts:Math.round(ccpCount*20),          color:'#f97316'},
         ].map(({label,pts,color:c})=>(
           <div key={label} style={{marginBottom:8}}>
             <div style={{display:'flex',justifyContent:'space-between',marginBottom:3}}>
@@ -231,6 +248,7 @@ function CreditScorePanel({ stats, myCredits, emissionsData }) {
           {label:'ESG READY',      ok:score>=400},
           {label:'SCOPE 3 OFFSET', ok:scope3Covered},
           {label:'REGISTRY VERIF', ok:verified>0},
+          {label:'ICVCM CCP',      ok:ccpCount>0},
           {label:'MARKET ACTIVE',  ok:listed>0},
           {label:'NET ZERO PATH',  ok:totalEm>0&&retiredT>0},
         ].map(({label,ok})=>(
@@ -244,12 +262,146 @@ function CreditScorePanel({ stats, myCredits, emissionsData }) {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// ── Retirement Certificate ────────────────────────────────────────
+// ── KYC Expiry Banner
 // ─────────────────────────────────────────────────────────────────
+function KYCExpiryBanner({ navigate }) {
+  const [kycInfo, setKycInfo] = useState(null);
+
+  useEffect(() => {
+    apiFetch('/api/portfolio/kyc-status')
+      .then(d => setKycInfo(d))
+      .catch(() => {});
+  }, []);
+
+  if (!kycInfo?.needsRenewal) return null;
+
+  const isExpired = kycInfo.isExpired;
+  const days      = kycInfo.daysUntilExpiry;
+
+  return (
+    <div style={{
+      marginBottom:20, padding:'14px 18px',
+      background: isExpired ? '#1a0707' : '#110a00',
+      border: `1px solid ${isExpired ? '#f8717133' : '#f59e0b33'}`,
+      borderRadius:10, animation:'fu .4s ease both',
+      display:'flex', alignItems:'center', justifyContent:'space-between', gap:12, flexWrap:'wrap',
+    }}>
+      <div>
+        <div style={{fontSize:12,color:isExpired?'#f87171':'#f59e0b',fontWeight:700,marginBottom:3}}>
+          {isExpired ? '⛔ KYC EXPIRED — Trading suspended' : `⚠️ KYC expires in ${days} days`}
+        </div>
+        <div style={{fontSize:10,color:isExpired?'#f8717166':'#f59e0b66',letterSpacing:'.06em'}}>
+          {isExpired
+            ? 'Your KYC has expired. Submit renewal to restore trading access.'
+            : `KYC valid until ${new Date(kycInfo.kycExpiresAt).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'})}. Renew before it expires to avoid disruption.`
+          }
+        </div>
+      </div>
+      <button
+        onClick={() => navigate('/kyc')}
+        style={{padding:'8px 18px',borderRadius:6,border:'none',background:isExpired?'#dc2626':'#f59e0b',color:'#fff',cursor:'pointer',fontFamily:'DM Mono,monospace',fontSize:10,fontWeight:700,letterSpacing:'.1em',flexShrink:0}}>
+        {isExpired ? 'RENEW KYC NOW →' : 'RENEW KYC →'}
+      </button>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ── Corporate Export Panel
+// ─────────────────────────────────────────────────────────────────
+function CorporateExportPanel({ showToast, myCredits, emissionsData, retirements }) {
+  const [year,    setYear]    = useState(new Date().getFullYear());
+  const [loading, setLoading] = useState('');
+
+  const downloadExport = async (type, label) => {
+    setLoading(type);
+    try {
+      // Build data payload for PDF generator
+      const orgName = 'EtherTrack User'; // replaced by profile.company_name if set
+      const data = {
+        orgName,
+        year,
+        profile:     null,          // fetched inside ReportPDF from emissions profile
+        emissions:   emissionsData?.records || [],
+        retirements: retirements    || [],
+        credits:     myCredits      || [],
+        verifier:    null,          // fetched from org verifiers if connected
+      };
+
+      // ✅ Generate auditor-friendly PDF using jsPDF
+      await generateReport(type, data);
+      showToast(`✅ ${label} PDF exported for FY ${year}`);
+    } catch (e) {
+      showToast(`❌ Export failed: ${e.message}`, 'error');
+    } finally {
+      setLoading('');
+    }
+  };
+
+  return (
+    <div style={{background:'#0a0f0c',border:'1px solid #0f2a1a',borderRadius:14,padding:'20px 24px',marginBottom:24,animation:'fu .4s ease .1s both'}}>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:16,flexWrap:'wrap',gap:10}}>
+        <div>
+          <div style={{fontSize:9,color:'#86efac44',letterSpacing:'.14em',marginBottom:4}}>CORPORATE REPORTING EXPORTS — AUDITOR PDF</div>
+          <div style={{fontSize:11,color:'#f0fdf4'}}>GHG Protocol · BRSR Core · CDP · TCFD</div>
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          <span style={{fontSize:9,color:'#86efac44'}}>FY</span>
+          <select
+            value={year}
+            onChange={e=>setYear(parseInt(e.target.value))}
+            style={{padding:'6px 10px',borderRadius:6,border:'1px solid #0f2a1a',background:'#060a07',color:'#f0fdf4',fontFamily:'DM Mono,monospace',fontSize:11,outline:'none'}}>
+            {[2023,2024,2025,2026].map(y=><option key={y}>{y}</option>)}
+          </select>
+        </div>
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8}}>
+        {[
+          { type:'ghg-protocol', label:'GHG Protocol',  color:'#22c55e', icon:'📊', desc:'ISO 14064-1 · Auditor PDF' },
+          { type:'brsr',         label:'BRSR Core',     color:'#f97316', icon:'🇮🇳', desc:'SEBI Mandatory · Auditor PDF' },
+          { type:'cdp',          label:'CDP Climate',   color:'#60a5fa', icon:'🌍', desc:'CDP Questionnaire · Auditor PDF' },
+          { type:'tcfd',         label:'TCFD',          color:'#a78bfa', icon:'📋', desc:'Climate Risk · Auditor PDF' },
+        ].map(({type,label,color,icon,desc})=>(
+          <button
+            key={type}
+            onClick={()=>downloadExport(type,label)}
+            disabled={!!loading}
+            style={{padding:'14px 10px',borderRadius:8,border:`1px solid ${color}22`,background:loading===type?`${color}11`:'#060a07',cursor:loading?'not-allowed':'pointer',fontFamily:'DM Mono,monospace',transition:'all .2s',textAlign:'center',opacity:loading&&loading!==type?1:.5}}>
+            <div style={{fontSize:20,marginBottom:6}}>{loading===type?'⟳':icon}</div>
+            <div style={{fontSize:10,color,fontWeight:700,marginBottom:3,letterSpacing:'.06em'}}>{label}</div>
+            <div style={{fontSize:8,color:'#86efac33',lineHeight:1.5}}>{desc}</div>
+          </button>
+        ))}
+      </div>
+      <div style={{marginTop:10,fontSize:9,color:'#86efac22',textAlign:'center',letterSpacing:'.06em'}}>
+        ↓ Auditor-ready PDF · Formatted for SEBI/CDP direct submission · Blockchain-verified retirements included
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ── Retirement Certificate
+// ─────────────────────────────────────────────────────────────────
+const VERIFY_BASE_URL = 'https://ethertrackapp.vercel.app/verify';
+
+function QRCodeImg({ value, size=120 }) {
+  const url = `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(value)}&bgcolor=0a0f0c&color=22c55e&margin=2`;
+  return (
+    <div style={{textAlign:'center'}}>
+      <img src={url} alt="QR Code" width={size} height={size}
+        style={{borderRadius:8,border:'1px solid #22c55e22',background:'#0a0f0c'}}
+        onError={e=>{e.target.style.display='none';}}/>
+      <div style={{fontSize:8,color:'#86efac33',marginTop:4,letterSpacing:'.08em'}}>SCAN TO VERIFY</div>
+    </div>
+  );
+}
+
 function RetirementCertificate({ credit, txHash, onClose }) {
   const date           = new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'long',year:'numeric'});
   const tokenDisplay   = credit.tokenHex||(credit.tokenId?`0x${Number(credit.tokenId).toString(16).padStart(8,'0').toUpperCase()}`:'—');
-  const certId         = `CERT-${tokenDisplay.replace('0x','').slice(0,8)||'XXXXXX'}-${Date.now().toString(36).toUpperCase()}`;
+  const certId         = credit.certId || `CERT-${tokenDisplay.replace('0x','').slice(0,8)||'XXXXXX'}-${String(credit.retiredAt||Date.now()).slice(-8)}`;
+  const verifyUrl      = `${VERIFY_BASE_URL}/${certId}`;
   const reg            = REGISTRIES[credit.standard]||REGISTRIES.VCS;
   const scopeLabel     = credit.retireScope?`Scope ${credit.retireScope}`:'Scope 1/2/3';
   const creditTypeLabel= credit.creditType==='compliance'?'CCC — Compliance (India CCTS)':'VCU — Voluntary Carbon Unit';
@@ -257,125 +409,183 @@ function RetirementCertificate({ credit, txHash, onClose }) {
   const caLabel        = CA_OPTIONS.find(o=>o.value===credit.correspondingAdjustment)?.label || 'None';
   const sdgList        = (credit.sdgTags||[]).join(', ') || '—';
 
-  const handleDownload = () => {
-    const content = `ETHERTRACK CARBON RETIREMENT CERTIFICATE
-=========================================
-Certificate ID:              ${certId}
-Token ID:                    ${tokenDisplay}
-Credit Type:                 ${creditTypeLabel}
-Offset Scope:                ${scopeLabel}
-Corresponding Adjustment:    ${caLabel}
-SDG Co-benefits:             ${sdgList}
+  const handleDownloadPDF = async () => {
+    try {
+      const { jsPDF } = await import('jspdf');
+      const doc = new jsPDF({ orientation:'portrait', unit:'mm', format:'a4' });
+      const W=210, ml=20, tw=W-40; let y=20;
+      doc.setFillColor(4,7,6); doc.rect(0,0,W,297,'F');
+      doc.setFillColor(13,46,31); doc.rect(0,0,W,40,'F');
 
-Project Name:                ${credit.projectName}
-Project ID:                  ${credit.projectId||'—'}
-Serial No.:                  ${credit.serialNumber}
-ICM Registry ID:             ${credit.icmRegistryId||'—'}
-Registry:                    ${reg.label}
-Standard:                    ${credit.standard}
-Credits Retired:             ${credit.retiredQty||credit.credits} tCO₂e
-Vintage Year:                ${credit.vintageYear}
-Project Type:                ${credit.projectType}
-Country:                     ${credit.country||credit.location}
-Developer:                   ${credit.developer}
+      // ✅ Add logo safely — skip if fetch fails
+      try {
+        const logoRes  = await fetch('/et_logo_bg.png');
+        if (logoRes.ok) {
+          const logoBlob = await logoRes.blob();
+          const logoB64  = await new Promise((res, rej) => {
+            const r = new FileReader();
+            r.onload  = () => res(r.result);
+            r.onerror = () => rej(new Error('logo read failed'));
+            r.readAsDataURL(logoBlob);
+          });
+          if (logoB64 && logoB64.startsWith('data:image')) {
+            doc.addImage(logoB64, 'PNG', ml, 6, 28, 28);
+          }
+        }
+      } catch { /* logo is optional — continue without it */ }
 
-Verification Status:         ${VERIFICATION_STATUSES.find(s=>s.value===credit.acvaStatus)?.label||'Pending'}
-ACVA Verifier:               ${verifiedBy}
-ACVA Verification Date:      ${credit.acvaDate||'—'}
-CBAM Eligible:               ${credit.cbamEligible?'YES — EU CBAM Article 7 compliant':'NO'}
-
-Retirement Date:             ${date}
-TX Hash:                     ${txHash||'N/A'}
-Chain:                       Ethereum Sepolia
-Methodology:                 ISO 14064-3 · GHG Protocol Corporate Standard
-NDC Contribution:            India NDC — 45% emissions intensity reduction by 2030
-=========================================
-This certificate confirms permanent retirement of ${credit.retiredQty||credit.credits} tCO₂e
-for ${scopeLabel} emission offset under GHG Protocol and TCFD frameworks.
-Issued by EtherTrack — India's blockchain carbon exchange.`.trim();
-    const blob=new Blob([content],{type:'text/plain'});
-    const url=URL.createObjectURL(blob);
-    const a=document.createElement('a');
-    a.href=url; a.download=`${certId}.txt`; a.click(); URL.revokeObjectURL(url);
+      doc.setTextColor(34,197,94); doc.setFontSize(8); doc.setFont('helvetica','normal');
+      doc.text('ETHERTRACK CARBON EXCHANGE — CORPORATE RETIREMENT CERTIFICATE',W/2,y,{align:'center'}); y+=7;
+      doc.setFontSize(16); doc.setFont('helvetica','bold'); doc.setTextColor(240,253,244);
+      doc.text('Carbon Retirement Certificate',W/2,y,{align:'center'}); y+=6;
+      doc.setFontSize(7); doc.setFont('helvetica','normal'); doc.setTextColor(134,239,172);
+      doc.text('VERIFIED · ISO 14064-3 · GHG PROTOCOL · BRSR · CDP · TCFD · ETHEREUM SEPOLIA',W/2,y,{align:'center'}); y+=14;
+      const fields=[
+        ['CERTIFICATE ID',certId],['TOKEN ID',tokenDisplay],
+        ['CREDIT TYPE',creditTypeLabel],['OFFSET SCOPE',scopeLabel],
+        ['ARTICLE 6 / CA',caLabel],['SDG CO-BENEFITS',sdgList],
+        ['PROJECT NAME',credit.projectName||'—'],['SERIAL NO.',credit.serialNumber||'—'],
+        ['REGISTRY',reg.label],['STANDARD',credit.standard||'—'],
+        ['CREDITS RETIRED',`${(credit.retiredQty||credit.credits)?.toLocaleString()} tCO₂e`],
+        ['VINTAGE YEAR',String(credit.vintageYear||'—')],
+        ['COUNTRY',credit.country||'—'],
+        ['BENEFICIARY NAME',credit.beneficiaryName||'—'],
+        ['BENEFICIARY ENTITY',credit.beneficiaryEntity||'—'],
+        ['BENEFICIARY GSTIN',credit.beneficiaryGstin||'—'],
+        ['REPORTING STANDARD',credit.reportingStandard||'GHG Protocol'],
+        ['PURPOSE',credit.purpose||'Voluntary Offset'],
+        ['ACVA VERIFIER',verifiedBy],
+        ['ICVCM CCP',credit.icvcm_ccp_eligible?`Yes — ${credit.icvcm_ccp_label||'CCP Eligible'}`:'Not assessed'],
+        ['RETIREMENT DATE',date],
+        ['CBAM ELIGIBLE',credit.cbamEligible?'YES — EU CBAM Article 7':'NO'],
+      ];
+      const colW=(tw-6)/2;
+      fields.forEach(([label,value],i)=>{
+        const col=i%2, x=ml+col*(colW+6);
+        if(col===0&&i>0) y+=16;
+        doc.setFillColor(10,15,12); doc.roundedRect(x,y,colW,14,1.5,1.5,'F');
+        doc.setDrawColor(15,42,26); doc.roundedRect(x,y,colW,14,1.5,1.5,'S');
+        doc.setFontSize(6.5); doc.setFont('helvetica','normal'); doc.setTextColor(134,239,172);
+        doc.text(label,x+3,y+4.5);
+        doc.setFontSize(8); doc.setFont('helvetica','bold'); doc.setTextColor(240,253,244);
+        doc.text(doc.splitTextToSize(String(value||'—'),colW-6)[0],x+3,y+10);
+      });
+      y+=20;
+      if(txHash){
+        doc.setFillColor(10,22,40); doc.roundedRect(ml,y,tw,14,2,2,'F');
+        doc.setFontSize(6.5); doc.setFont('helvetica','normal'); doc.setTextColor(134,239,172);
+        doc.text('BLOCKCHAIN TX HASH',ml+3,y+4.5);
+        doc.setFontSize(7); doc.setTextColor(96,165,250);
+        doc.text(doc.splitTextToSize(txHash,tw-6)[0],ml+3,y+10); y+=18;
+      }
+      doc.setFillColor(6,10,7); doc.roundedRect(ml,y,tw,14,2,2,'F');
+      doc.setFontSize(6.5); doc.setFont('helvetica','normal'); doc.setTextColor(134,239,172);
+      doc.text('PUBLIC VERIFICATION URL',ml+3,y+4.5);
+      doc.setFontSize(7.5); doc.setTextColor(34,197,94);
+      doc.text(verifyUrl,ml+3,y+10); y+=18;
+      doc.setFontSize(7); doc.setTextColor(134,239,172);
+      doc.text("ETHERTRACK · INDIA'S CARBON EXCHANGE · ISO 14064-3 · GHG PROTOCOL · BRSR · CDP · TCFD · PARIS AGREEMENT ART.6",W/2,y,{align:'center'});
+      doc.save(`${certId}.pdf`);
+    } catch(err) {
+      const content=`EtherTrack Carbon Retirement Certificate\nCertificate ID: ${certId}\nCredits: ${credit.retiredQty||credit.credits} tCO2e\nBeneficiary: ${credit.beneficiaryName||''} ${credit.beneficiaryEntity||''}\nTX: ${txHash||'N/A'}\nVerify: ${verifyUrl}`;
+      const blob=new Blob([content],{type:'text/plain'});
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement('a'); a.href=url; a.download=`${certId}.txt`; a.click(); URL.revokeObjectURL(url);
+    }
   };
-
-  const fields = [
-    {label:'CERTIFICATE ID',  value:certId,                                              color:'#22c55e'},
-    {label:'TOKEN ID',        value:tokenDisplay,                                        color:'#60a5fa'},
-    {label:'CREDIT TYPE',     value:creditTypeLabel,                                     color:credit.creditType==='compliance'?'#f97316':'#22c55e'},
-    {label:'OFFSET SCOPE',    value:scopeLabel,                                          color:'#a78bfa'},
-    {label:'ARTICLE 6 / CA',  value:caLabel,                                             color:credit.correspondingAdjustment==='host_issued'||credit.correspondingAdjustment==='itmo'?'#22c55e':'#86efac44'},
-    {label:'SDG CO-BENEFITS', value:sdgList,                                             color:'#60a5fa'},
-    {label:'PROJECT NAME',    value:credit.projectName,                                  color:'#f0fdf4'},
-    {label:'PROJECT ID',      value:credit.projectId||'—',                               color:'#f0fdf4'},
-    {label:'SERIAL NO.',      value:credit.serialNumber,                                 color:'#f0fdf4'},
-    {label:'ICM REGISTRY ID', value:credit.icmRegistryId||'Pending ICM listing',         color:'#f0fdf4'},
-    {label:'REGISTRY',        value:reg.label,                                           color:reg.color},
-    {label:'STANDARD',        value:credit.standard,                                     color:reg.color},
-    {label:'CREDITS RETIRED', value:`${(credit.retiredQty||credit.credits)?.toLocaleString()} tCO₂e`, color:'#22c55e'},
-    {label:'VINTAGE YEAR',    value:credit.vintageYear,                                  color:'#f0fdf4'},
-    {label:'COUNTRY',         value:credit.country||credit.location,                     color:'#f0fdf4'},
-    {label:'VERIF. STATUS',   value:VERIFICATION_STATUSES.find(s=>s.value===(credit.acvaStatus||'pending'))?.label||'Pending', color:VERIFICATION_STATUSES.find(s=>s.value===(credit.acvaStatus||'pending'))?.color||'#86efac33'},
-    {label:'ACVA VERIFIER',   value:verifiedBy,                                          color:'#facc15'},
-    {label:'RETIREMENT DATE', value:date,                                                color:'#f0fdf4'},
-  ];
 
   return (
     <div style={{background:'linear-gradient(135deg,#060a07 0%,#0a1209 50%,#060a07 100%)',border:'1px solid #22c55e44',borderRadius:16,padding:32,position:'relative',overflow:'hidden'}}>
-      <div style={{position:'absolute',inset:0,opacity:.03,pointerEvents:'none',backgroundImage:'repeating-linear-gradient(45deg,#22c55e 0,#22c55e 1px,transparent 0,transparent 50%)',backgroundSize:'12px 12px'}}/>
-      {[{top:0,left:0},{top:0,right:0},{bottom:0,left:0},{bottom:0,right:0}].map((pos,i)=>(
-        <div key={i} style={{position:'absolute',...pos,width:32,height:32,borderTop:i<2?'2px solid #22c55e66':'none',borderBottom:i>=2?'2px solid #22c55e66':'none',borderLeft:i%2===0?'2px solid #22c55e66':'none',borderRight:i%2===1?'2px solid #22c55e66':'none'}}/>
-      ))}
       <div style={{position:'relative',zIndex:1}}>
         <div style={{textAlign:'center',marginBottom:24}}>
-          <div style={{fontSize:10,color:'#22c55e88',letterSpacing:'.2em',marginBottom:8}}>ETHERTRACK CARBON EXCHANGE</div>
+          <div style={{fontSize:10,color:'#22c55e88',letterSpacing:'.2em',marginBottom:8}}>ETHERTRACK CARBON EXCHANGE — CORPORATE CERTIFICATE</div>
           <div style={{fontSize:22,fontWeight:700,color:'#f0fdf4',fontFamily:'Syne,sans-serif',marginBottom:4}}>Carbon Retirement Certificate</div>
-          <div style={{fontSize:10,color:'#86efac66',letterSpacing:'.12em'}}>VERIFIED PERMANENT OFFSET · ISO 14064-3 · GHG PROTOCOL · ETHEREUM SEPOLIA</div>
+          <div style={{fontSize:10,color:'#86efac66',letterSpacing:'.1em'}}>ISO 14064-3 · GHG PROTOCOL · BRSR · CDP · TCFD · ETHEREUM SEPOLIA</div>
         </div>
-        <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:24}}>
-          <div style={{flex:1,height:1,background:'linear-gradient(90deg,transparent,#22c55e44)'}}/>
-          <span style={{fontSize:18}}>🌿</span>
-          <div style={{flex:1,height:1,background:'linear-gradient(90deg,#22c55e44,transparent)'}}/>
-        </div>
+
+        {/* Beneficiary block — corporate highlight */}
+        {(credit.beneficiaryName||credit.beneficiaryEntity)&&(
+          <div style={{background:'#0a1628',border:'1px solid #60a5fa33',borderRadius:10,padding:'14px 18px',marginBottom:16}}>
+            <div style={{fontSize:9,color:'#60a5fa88',letterSpacing:'.14em',marginBottom:8}}>RETIREMENT BENEFICIARY — CORPORATE ENTITY</div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
+              {[
+                {l:'ENTITY NAME',   v:credit.beneficiaryName||'—'},
+                {l:'COMPANY',       v:credit.beneficiaryEntity||'—'},
+                {l:'GSTIN',         v:credit.beneficiaryGstin||'—'},
+              ].map(({l,v})=>(
+                <div key={l}>
+                  <div style={{fontSize:8,color:'#60a5fa66',letterSpacing:'.1em',marginBottom:3}}>{l}</div>
+                  <div style={{fontSize:11,color:'#f0fdf4',fontWeight:600}}>{v}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ICVCM CCP badge */}
+        {credit.icvcm_ccp_eligible&&(
+          <div style={{background:'#0e1a00',border:'1px solid #84cc1633',borderRadius:8,padding:'10px 14px',marginBottom:12,display:'flex',alignItems:'center',gap:10}}>
+            <span style={{fontSize:16}}>🏅</span>
+            <div>
+              <div style={{fontSize:10,color:'#84cc16',fontWeight:700,marginBottom:2}}>ICVCM CORE CARBON PRINCIPLES (CCP) ELIGIBLE</div>
+              <div style={{fontSize:9,color:'#84cc1666'}}>{credit.icvcm_ccp_label||'Meets ICVCM integrity standards'} · Verified {credit.icvcm_ccp_date||''}</div>
+            </div>
+          </div>
+        )}
+
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:20}}>
-          {fields.map(({label,value,color})=>(
+          {[
+            {label:'CERTIFICATE ID',  value:certId,                                color:'#22c55e'},
+            {label:'TOKEN ID',        value:tokenDisplay,                          color:'#60a5fa'},
+            {label:'CREDIT TYPE',     value:creditTypeLabel,                       color:credit.creditType==='compliance'?'#f97316':'#22c55e'},
+            {label:'OFFSET SCOPE',    value:scopeLabel,                            color:'#a78bfa'},
+            {label:'ARTICLE 6 / CA',  value:caLabel,                              color:'#22c55e'},
+            {label:'SDG CO-BENEFITS', value:sdgList,                              color:'#60a5fa'},
+            {label:'PROJECT NAME',    value:credit.projectName,                   color:'#f0fdf4'},
+            {label:'SERIAL NO.',      value:credit.serialNumber,                  color:'#f0fdf4'},
+            {label:'REGISTRY',        value:reg.label,                            color:reg.color},
+            {label:'CREDITS RETIRED', value:`${(credit.retiredQty||credit.credits)?.toLocaleString()} tCO₂e`, color:'#22c55e'},
+            {label:'VINTAGE YEAR',    value:credit.vintageYear,                   color:'#f0fdf4'},
+            {label:'COUNTRY',         value:credit.country||credit.location,      color:'#f0fdf4'},
+            {label:'REPORTING STD',   value:credit.reportingStandard||'GHG Protocol', color:'#86efac88'},
+            {label:'PURPOSE',         value:credit.purpose||'Voluntary Offset',   color:'#86efac88'},
+            {label:'ACVA VERIFIER',   value:verifiedBy,                           color:'#facc15'},
+            {label:'RETIREMENT DATE', value:date,                                 color:'#f0fdf4'},
+          ].map(({label,value,color})=>(
             <div key={label} style={{background:'#0a0f0c88',borderRadius:8,padding:'10px 14px',border:'1px solid #0f2a1a'}}>
               <div style={{fontSize:8,color:'#86efac55',letterSpacing:'.12em',marginBottom:4}}>{label}</div>
               <div style={{fontSize:11,color,fontWeight:600,wordBreak:'break-all'}}>{value}</div>
             </div>
           ))}
         </div>
-        {credit.cbamEligible&&(
-          <div style={{background:'#0a1628',border:'1px solid #60a5fa33',borderRadius:8,padding:'10px 14px',marginBottom:12,display:'flex',alignItems:'center',gap:10}}>
-            <span style={{fontSize:16}}>🇪🇺</span>
-            <div>
-              <div style={{fontSize:10,color:'#60a5fa',fontWeight:700,marginBottom:2}}>CBAM ELIGIBLE — EU Carbon Border Adjustment Mechanism</div>
-              <div style={{fontSize:9,color:'#60a5fa66'}}>Qualifies for EU CBAM Article 7 compliance reporting from 2026</div>
-            </div>
-          </div>
-        )}
+
         {txHash&&(
           <div style={{background:'#0a0f0c88',borderRadius:8,padding:'10px 14px',border:'1px solid #0f2a1a',marginBottom:16}}>
             <div style={{fontSize:8,color:'#86efac55',letterSpacing:'.12em',marginBottom:4}}>BLOCKCHAIN TX HASH</div>
             <a href={`https://sepolia.etherscan.io/tx/${txHash}`} target="_blank" rel="noreferrer" style={{fontSize:10,color:'#60a5fa',fontFamily:'monospace',wordBreak:'break-all',textDecoration:'none'}}>{txHash}</a>
           </div>
         )}
-        <div style={{background:'#0a1628',border:'1px solid #60a5fa22',borderRadius:8,padding:'12px 16px',marginBottom:16}}>
-          <div style={{fontSize:9,color:'#60a5fa88',letterSpacing:'.12em',marginBottom:8}}>ESG GOVERNANCE DECLARATION</div>
-          <div style={{fontSize:10,color:'#86efac77',lineHeight:1.8}}>
-            This certificate confirms permanent retirement of <strong style={{color:'#22c55e'}}>{(credit.retiredQty||credit.credits)?.toLocaleString()} tCO₂e</strong> from
-            the voluntary carbon market under <strong style={{color:reg.color}}>{reg.label}</strong> registry.
-            Retired for <strong style={{color:'#a78bfa'}}>{scopeLabel}</strong> offset reporting under GHG Protocol and TCFD.
-            Corresponding adjustment status: <strong style={{color:'#22c55e88'}}>{caLabel}</strong>.
-            Contributes to India's NDC target of 45% emissions intensity reduction by 2030.
-            Certificate <strong style={{color:'#f0fdf4'}}>{certId}</strong> immutably recorded on Ethereum Sepolia.
+
+        <div style={{background:'#060a07',border:'1px solid #22c55e22',borderRadius:8,padding:'16px',marginBottom:16,display:'flex',alignItems:'center',gap:20,flexWrap:'wrap'}}>
+          <QRCodeImg value={verifyUrl} size={100}/>
+          <div style={{flex:1}}>
+            <div style={{fontSize:9,color:'#22c55e88',letterSpacing:'.12em',marginBottom:6}}>PUBLIC VERIFICATION URL</div>
+            <div style={{fontSize:10,color:'#22c55e66',wordBreak:'break-all',marginBottom:8,fontFamily:'monospace'}}>{verifyUrl}</div>
+            <div style={{fontSize:9,color:'#86efac33',lineHeight:1.7}}>
+              Scan to independently verify this retirement on-chain. No login required. Suitable for CDP, BRSR, TCFD submissions.
+            </div>
           </div>
         </div>
+
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',paddingTop:16,borderTop:'1px solid #0f2a1a',gap:10,flexWrap:'wrap'}}>
-          <div style={{fontSize:9,color:'#86efac44',letterSpacing:'.08em'}}>ETHERTRACK · INDIA'S CARBON EXCHANGE · ISO 14064-3 · GHG PROTOCOL · PARIS AGREEMENT ART.6</div>
-          <div style={{display:'flex',gap:8}}>
-            <button onClick={handleDownload} style={{padding:'8px 16px',borderRadius:6,border:'1px solid #22c55e44',background:'#051409',color:'#22c55e88',cursor:'pointer',fontFamily:'DM Mono,monospace',fontSize:10}}>↓ DOWNLOAD</button>
-            <button onClick={onClose}       style={{padding:'8px 16px',borderRadius:6,border:'1px solid #22c55e44',background:'#0d2e1f', color:'#22c55e',  cursor:'pointer',fontFamily:'DM Mono,monospace',fontSize:10}}>CLOSE ✕</button>
+          <div style={{fontSize:9,color:'#86efac44',letterSpacing:'.06em'}}>ETHERTRACK · ISO 14064-3 · GHG PROTOCOL · BRSR · CDP · TCFD · PARIS AGREEMENT ART.6</div>
+          <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+            <a href={verifyUrl} target="_blank" rel="noreferrer"
+              style={{padding:'8px 16px',borderRadius:6,border:'1px solid #60a5fa33',background:'#060e18',color:'#60a5fa88',cursor:'pointer',fontFamily:'DM Mono,monospace',fontSize:10,textDecoration:'none',display:'inline-flex',alignItems:'center'}}>
+              🔗 VERIFY PUBLIC
+            </a>
+            <button onClick={handleDownloadPDF} style={{padding:'8px 16px',borderRadius:6,border:'1px solid #22c55e44',background:'#051409',color:'#22c55e88',cursor:'pointer',fontFamily:'DM Mono,monospace',fontSize:10}}>↓ DOWNLOAD PDF</button>
+            <button onClick={onClose} style={{padding:'8px 16px',borderRadius:6,border:'1px solid #22c55e44',background:'#0d2e1f',color:'#22c55e',cursor:'pointer',fontFamily:'DM Mono,monospace',fontSize:10}}>CLOSE ✕</button>
           </div>
         </div>
       </div>
@@ -384,23 +594,44 @@ Issued by EtherTrack — India's blockchain carbon exchange.`.trim();
 }
 
 // ─────────────────────────────────────────────────────────────────
-// ── Retire Modal ─────────────────────────────────────────────────
+// ── ✅ UPDATED Retire Modal — with beneficiary fields
 // ─────────────────────────────────────────────────────────────────
 function RetireModal({ credit, onConfirm, onClose, loading }) {
-  const [qty,   setQty]   = useState(credit.credits);
-  const [scope, setScope] = useState('1');
+  const [qty,               setQty]               = useState(credit.credits);
+  const [scope,             setScope]             = useState('1');
+  const [beneficiaryName,   setBeneficiaryName]   = useState('');
+  const [beneficiaryEntity, setBeneficiaryEntity] = useState('');
+  const [beneficiaryGstin,  setBeneficiaryGstin]  = useState('');
+  const [reportingStd,      setReportingStd]      = useState('GHG_PROTOCOL');
+  const [purpose,           setPurpose]           = useState('voluntary_offset');
+  const isDuplicate = false;
 
-  // Real duplicate-serial check within EtherTrack registry
-  const isDuplicate = false; // replaced by backend check in handleRetireConfirm
+  const REPORTING_STDS = [
+    { value:'GHG_PROTOCOL', label:'GHG Protocol' },
+    { value:'CDP',          label:'CDP'           },
+    { value:'BRSR',         label:'SEBI BRSR'     },
+    { value:'TCFD',         label:'TCFD'          },
+    { value:'ISO_14064',    label:'ISO 14064-3'   },
+  ];
+
+  const PURPOSES = [
+    { value:'voluntary_offset',   label:'Voluntary offset'          },
+    { value:'compliance',         label:'Regulatory compliance'      },
+    { value:'net_zero',           label:'Net zero commitment'        },
+    { value:'supply_chain',       label:'Supply chain decarbonisation'},
+    { value:'product_neutral',    label:'Product carbon neutrality'  },
+    { value:'event_neutral',      label:'Event carbon neutrality'    },
+  ];
 
   return (
     <div className="pt-overlay" onClick={e=>e.target===e.currentTarget&&!loading&&onClose()}>
-      <div className="pt-modal" style={{maxWidth:480}}>
+      <div className="pt-modal" style={{maxWidth:540}}>
         <div className="pt-modal-hdr">
           <span className="pt-modal-title">RETIRE CREDIT PERMANENTLY</span>
           <button className="pt-modal-close" onClick={()=>!loading&&onClose()}>✕</button>
         </div>
         <div className="pt-modal-body">
+          {/* Credit info */}
           <div style={{background:'#060a07',borderRadius:8,padding:'12px 14px',marginBottom:16,border:'1px solid #0d1f11'}}>
             <div style={{fontSize:12,color:'#f0fdf4',fontWeight:700,marginBottom:4}}>{credit.projectName}</div>
             <div style={{display:'flex',gap:8,fontSize:10,color:'#86efac44',flexWrap:'wrap'}}>
@@ -410,7 +641,7 @@ function RetireModal({ credit, onConfirm, onClose, loading }) {
             </div>
           </div>
 
-          {/* Partial qty */}
+          {/* Quantity */}
           <div className="pt-field" style={{marginBottom:16}}>
             <label className="pt-label">QUANTITY TO RETIRE (tCO₂)</label>
             <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:6}}>
@@ -420,18 +651,17 @@ function RetireModal({ credit, onConfirm, onClose, loading }) {
             </div>
             <div style={{fontSize:9,color:'#86efac33'}}>
               Retiring <strong style={{color:'#f87171aa'}}>{qty.toLocaleString()}</strong> of {credit.credits?.toLocaleString()} credits
-              {qty<credit.credits&&<span style={{color:'#22c55e66'}}> · {(credit.credits-qty).toLocaleString()} remain in portfolio</span>}
             </div>
           </div>
 
-          {/* Scope selector — GHG Protocol required */}
+          {/* Scope */}
           <div className="pt-field" style={{marginBottom:16}}>
             <label className="pt-label">RETIREMENT SCOPE (GHG PROTOCOL — REQUIRED)</label>
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8}}>
               {[
-                {val:'1',label:'Scope 1',sub:'Direct emissions',   color:'#f97316'},
-                {val:'2',label:'Scope 2',sub:'Purchased energy',   color:'#3b82f6'},
-                {val:'3',label:'Scope 3',sub:'Value chain',        color:'#a855f7'},
+                {val:'1',label:'Scope 1',sub:'Direct emissions',color:'#f97316'},
+                {val:'2',label:'Scope 2',sub:'Purchased energy',color:'#3b82f6'},
+                {val:'3',label:'Scope 3',sub:'Value chain',     color:'#a855f7'},
               ].map(({val,label,sub,color})=>(
                 <div key={val} onClick={()=>setScope(val)}
                   style={{padding:'10px 12px',borderRadius:8,border:`1px solid ${scope===val?color+'66':'#0d1f11'}`,background:scope===val?`${color}11`:'#060a07',cursor:'pointer',textAlign:'center',transition:'all .2s'}}>
@@ -440,17 +670,58 @@ function RetireModal({ credit, onConfirm, onClose, loading }) {
                 </div>
               ))}
             </div>
-            <div style={{fontSize:9,color:'#86efac22',marginTop:5}}>Required by GHG Protocol, CCTS, CDP, and TCFD for accurate emission offset reporting</div>
           </div>
 
-          {/* Pre-retirement checks */}
+          {/* ✅ NEW: Corporate beneficiary section */}
+          <div style={{background:'#0a1628',border:'1px solid #60a5fa22',borderRadius:8,padding:'14px',marginBottom:16}}>
+            <div style={{fontSize:9,color:'#60a5fa88',letterSpacing:'.14em',marginBottom:12}}>
+              CORPORATE BENEFICIARY — REQUIRED FOR CDP / BRSR / TCFD
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:10}}>
+              <div className="pt-field">
+                <label className="pt-label">BENEFICIARY NAME</label>
+                <input className="pt-input" placeholder="e.g. Rahul Sharma" value={beneficiaryName} onChange={e=>setBeneficiaryName(e.target.value)}/>
+              </div>
+              <div className="pt-field">
+                <label className="pt-label">COMPANY / ENTITY</label>
+                <input className="pt-input" placeholder="e.g. Acme Corp Pvt Ltd" value={beneficiaryEntity} onChange={e=>setBeneficiaryEntity(e.target.value)}/>
+              </div>
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+              <div className="pt-field">
+                <label className="pt-label">GSTIN <span style={{color:'#86efac22'}}>(optional)</span></label>
+                <input className="pt-input" placeholder="e.g. 27AAPFU0939F1ZV" value={beneficiaryGstin} onChange={e=>setBeneficiaryGstin(e.target.value.toUpperCase())} maxLength={15}/>
+              </div>
+              <div className="pt-field">
+                <label className="pt-label">REPORTING PURPOSE</label>
+                <select className="pt-input" value={purpose} onChange={e=>setPurpose(e.target.value)}>
+                  {PURPOSES.map(p=><option key={p.value} value={p.value}>{p.label}</option>)}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          {/* Reporting standard */}
+          <div className="pt-field" style={{marginBottom:16}}>
+            <label className="pt-label">REPORTING FRAMEWORK</label>
+            <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+              {REPORTING_STDS.map(s=>(
+                <div key={s.value} onClick={()=>setReportingStd(s.value)}
+                  style={{padding:'6px 12px',borderRadius:6,border:`1px solid ${reportingStd===s.value?'#22c55e44':'#0d1f11'}`,background:reportingStd===s.value?'#0d2e1f':'#060a07',cursor:'pointer',fontSize:9,color:reportingStd===s.value?'#22c55e':'#86efac44',transition:'all .2s'}}>
+                  {s.label}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Pre-checks */}
           {[
             {label:`Registry: ${REGISTRIES[credit.standard]?.label}`,        ok:true},
             {label:`Serial: ${credit.serialNumber}`,                          ok:true},
-            {label:`Retiring ${qty.toLocaleString()} tCO₂ for ${scope==='1'?'Scope 1 Direct':scope==='2'?'Scope 2 Energy':'Scope 3 Value Chain'}`, ok:true},
-            {label:'Serial not found in prior retirements on EtherTrack',     ok:!isDuplicate},
-            {label:'Token confirmed held in connected wallet',                ok:true},
+            {label:`Retiring ${qty.toLocaleString()} tCO₂ for ${scope==='1'?'Scope 1':scope==='2'?'Scope 2':'Scope 3'}`, ok:true},
+            {label:'Serial not found in prior retirements',                   ok:!isDuplicate},
             {label:'Blockchain burn transaction: READY',                      ok:true},
+            {label:`Reporting framework: ${REPORTING_STDS.find(s=>s.value===reportingStd)?.label}`, ok:true},
           ].map(({label,ok},i)=>(
             <div key={i} style={{display:'flex',alignItems:'center',gap:10,padding:'7px 12px',borderRadius:6,marginBottom:5,background:ok?'#051409':'#1a0707',border:`1px solid ${ok?'#22c55e11':'#f8717122'}`}}>
               <span style={{color:ok?'#22c55e66':'#f87171'}}>{ok?'✓':'✕'}</span>
@@ -459,12 +730,17 @@ function RetireModal({ credit, onConfirm, onClose, loading }) {
           ))}
 
           <div style={{marginTop:14,padding:'10px 12px',background:'#0e0505',borderRadius:6,border:'1px solid #f8717122',fontSize:10,color:'#f8717188',lineHeight:1.6}}>
-            ⚠️ <strong style={{color:'#f87171aa'}}>Irreversible.</strong> Token permanently burned on-chain. ISO 14064-3 retirement certificate with Scope {scope} attribution generated immediately.
+            ⚠️ <strong style={{color:'#f87171aa'}}>Irreversible.</strong> Token permanently burned on-chain. ISO 14064-3 certificate generated immediately.
           </div>
         </div>
         <div className="pt-modal-foot">
           <button className="pt-btn-secondary" onClick={onClose} disabled={loading}>CANCEL</button>
-          <button className="pt-btn-danger" onClick={()=>onConfirm(credit,qty,scope)} disabled={loading||isDuplicate}>
+          <button className="pt-btn-danger"
+            onClick={()=>onConfirm(credit, qty, scope, {
+              beneficiaryName, beneficiaryEntity, beneficiaryGstin,
+              reportingStandard: reportingStd, purpose,
+            })}
+            disabled={loading||isDuplicate}>
             {loading?'⟳ BURNING ON-CHAIN...':`RETIRE ${qty.toLocaleString()} tCO₂ (S${scope}) →`}
           </button>
         </div>
@@ -474,60 +750,55 @@ function RetireModal({ credit, onConfirm, onClose, loading }) {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// ── Main Portfolio Component ──────────────────────────────────────
+// ── Main Portfolio Component
 // ─────────────────────────────────────────────────────────────────
 export default function Portfolio() {
   const navigate = useNavigate();
   const { user, dbUser } = useContext(AuthContext);
-  const { myCredits, stats, loading, walletAddress, isKYCVerified, listCredit, delistCredit, retireCredit, loadMyCredits, refreshKYC } = usePortfolio();
+  const { myCredits, myRetirements, stats, loading, walletAddress, isKYCVerified,
+          listCredit, delistCredit, retireCredit, loadMyCredits, refreshKYC,
+          refreshRetirements } = usePortfolio();
 
-  const [activeTab,       setActiveTab]       = useState('ALL');
-  const [showForm,        setShowForm]        = useState(false);
-  const [showRetire,      setShowRetire]      = useState(null);
-  const [showList,        setShowList]        = useState(null);
-  const [showCert,        setShowCert]        = useState(null);
-  const [listPrice,       setListPrice]       = useState('');
-  const [listQty,         setListQty]         = useState('');
-  const [form,            setForm]            = useState(emptyForm);
-  const [formErrors,      setFormErrors]      = useState({});
-  const [toast,           setToast]           = useState(null);
-  const [txPending,       setTxPending]       = useState('');
-  const [submitting,      setSubmitting]      = useState(false);
-  const [pincodeLoading,  setPincodeLoading]  = useState(false);
-  const [pincodeError,    setPincodeError]    = useState('');
-  const [pendingCredits,  setPendingCredits]  = useState([]);
-  const [emissionsData,   setEmissionsData]   = useState(null);
-  // ✅ Live ETH/INR rate — replaces hardcoded 210000
-  const [ethPriceInr,     setEthPriceInr]     = useState(null);
-  // ✅ Listing price CCTS band warning
-  const [listPriceWarn,   setListPriceWarn]   = useState('');
+  const [activeTab,      setActiveTab]      = useState('ALL');
+  const [showForm,       setShowForm]       = useState(false);
+  const [showRetire,     setShowRetire]     = useState(null);
+  const [showList,       setShowList]       = useState(null);
+  const [showCert,       setShowCert]       = useState(null);
+  const [listPrice,      setListPrice]      = useState('');
+  const [listQty,        setListQty]        = useState('');
+  const [form,           setForm]           = useState(emptyForm);
+  const [formErrors,     setFormErrors]     = useState({});
+  const [toast,          setToast]          = useState(null);
+  const [txPending,      setTxPending]      = useState('');
+  const [submitting,     setSubmitting]     = useState(false);
+  const [pincodeLoading, setPincodeLoading] = useState(false);
+  const [pincodeError,   setPincodeError]   = useState('');
+  const [pendingCredits, setPendingCredits] = useState([]);
+  const [emissionsData,  setEmissionsData]  = useState(null);
+  const [retireSteps,    setRetireSteps]    = useState(null);
+  const [ethPriceInr,    setEthPriceInr]    = useState(null);
+  const [listPriceWarn,  setListPriceWarn]  = useState('');
   const kycIntervalRef = useRef(null);
 
-  // ── KYC polling ───────────────────────────────────────────────
   useEffect(() => {
     if (walletAddress && refreshKYC) {
       refreshKYC();
       if (!isKYCVerified) { kycIntervalRef.current = setInterval(()=>refreshKYC(),10000); }
     }
     return () => { if (kycIntervalRef.current) clearInterval(kycIntervalRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [walletAddress]);
 
   useEffect(() => { if (isKYCVerified && kycIntervalRef.current) clearInterval(kycIntervalRef.current); }, [isKYCVerified]);
-
   useEffect(() => { loadPendingCredits(); loadEmissionsData(); fetchEthPrice(); }, []);
-
-  // ── Refresh ETH price every 5 min ─────────────────────────────
-  useEffect(() => {
-    const id = setInterval(fetchEthPrice, 5*60*1000);
-    return () => clearInterval(id);
-  }, []);
+  useEffect(() => { const id = setInterval(fetchEthPrice, 5*60*1000); return ()=>clearInterval(id); }, []);
 
   const fetchEthPrice = async () => {
     try {
       const r = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=inr');
       const d = await r.json();
       if (d?.ethereum?.inr) setEthPriceInr(d.ethereum.inr);
-    } catch { /* keep previous or null — fallback handled at usage */ }
+    } catch {}
   };
 
   const loadPendingCredits = async () => {
@@ -544,7 +815,6 @@ export default function Portfolio() {
 
   const showToast = (msg, type='success') => { setToast({msg,type}); setTimeout(()=>setToast(null),4500); };
 
-  // ── Pincode → location (India) ────────────────────────────────
   const handlePincode = async (pin) => {
     setForm(f=>({...f,pincode:pin})); setPincodeError('');
     if (pin.length!==6||isNaN(pin)) return;
@@ -557,15 +827,14 @@ export default function Portfolio() {
         setForm(f=>({...f,pincode:pin,location:`${p.Name}, ${p.District}, ${p.State}`,country:'India'}));
       } else { setPincodeError('Invalid pincode — not found'); }
     } catch { setPincodeError('Could not fetch location'); }
-    finally   { setPincodeLoading(false); }
+    finally { setPincodeLoading(false); }
   };
 
-  // ── Toggle SDG tag ────────────────────────────────────────────
   const toggleSdg = (id) => {
-    setForm(f=>({...f, sdgTags: f.sdgTags.includes(id) ? f.sdgTags.filter(s=>s!==id) : [...f.sdgTags,id]}));
+    setForm(f=>({...f, sdgTags: f.sdgTags.includes(id)?f.sdgTags.filter(s=>s!==id):[...f.sdgTags,id]}));
   };
 
-  // ── Build allCredits (on-chain + pending merged) ───────────────
+  // Build allCredits
   const allCredits = [
     ...myCredits,
     ...pendingCredits
@@ -580,6 +849,8 @@ export default function Portfolio() {
         acvaName:p.acva_name||'', acvaDate:p.acva_date||'', acvaStatus:p.acva_status||'pending',
         icmRegistryId:p.icm_registry_id||'', bankingStatus:p.banking_status||'available',
         sdgTags:p.sdg_tags||[], correspondingAdjustment:p.corresponding_adjustment||'none',
+        icvcm_ccp_eligible:p.icvcm_ccp_eligible||false, icvcm_ccp_label:p.icvcm_ccp_label||'',
+        registryLink:p.registry_link||'', methodologyId:p.methodology_id||'',
         isPending:true, isRejected:p.admin_status==='rejected',
       }))
   ];
@@ -592,6 +863,7 @@ export default function Portfolio() {
     if (activeTab==='REJECTED')   return c.isRejected;
     if (activeTab==='COMPLIANCE') return c.creditType==='compliance';
     if (activeTab==='CBAM')       return c.cbamEligible;
+    if (activeTab==='CCP')        return c.icvcm_ccp_eligible;
     return true;
   });
 
@@ -604,24 +876,23 @@ export default function Portfolio() {
     REJECTED:   allCredits.filter(c=>c.isRejected).length,
     COMPLIANCE: allCredits.filter(c=>c.creditType==='compliance').length,
     CBAM:       allCredits.filter(c=>c.cbamEligible).length,
+    CCP:        allCredits.filter(c=>c.icvcm_ccp_eligible).length,
   };
 
-  // ── Form validation ───────────────────────────────────────────
   const validateForm = () => {
     const e={};
-    if (!form.projectName.trim())            e.projectName  = 'Required';
-    if (!form.location.trim())               e.location     = 'Required';
-    if (!form.country.trim())                e.country      = 'Required';
-    if (!form.projectType)                   e.projectType  = 'Required';
-    if (!form.developer.trim())              e.developer    = 'Required';
-    if (!form.credits||+form.credits<=0)     e.credits      = 'Enter valid amount';
+    if (!form.projectName.trim())             e.projectName  = 'Required';
+    if (!form.location.trim())                e.location     = 'Required';
+    if (!form.country.trim())                 e.country      = 'Required';
+    if (!form.projectType)                    e.projectType  = 'Required';
+    if (!form.developer.trim())               e.developer    = 'Required';
+    if (!form.credits||+form.credits<=0)      e.credits      = 'Enter valid amount';
     if (!form.vintageYear||isNaN(form.vintageYear)) e.vintageYear = 'Required';
-    if (!form.expiryDate)                    e.expiryDate   = 'Required';
-    if (!form.serialNumber.trim())           e.serialNumber = 'Required';
-    if (!form.projectId.trim())              e.projectId    = 'Required';
-    if (!form.docFile)                       e.docFile      = 'Ownership proof required';
-    // GS requires at least 1 SDG tag
-    if (form.standard==='GS'&&form.sdgTags.length===0) e.sdgTags = 'Gold Standard credits require at least 1 SDG co-benefit';
+    if (!form.expiryDate)                     e.expiryDate   = 'Required';
+    if (!form.serialNumber.trim())            e.serialNumber = 'Required';
+    if (!form.projectId.trim())               e.projectId    = 'Required';
+    if (!form.docFile)                        e.docFile      = 'Ownership proof required';
+    if (form.standard==='GS'&&form.sdgTags.length===0) e.sdgTags = 'Gold Standard requires at least 1 SDG tag';
     setFormErrors(e);
     return Object.keys(e).length===0;
   };
@@ -654,12 +925,17 @@ export default function Portfolio() {
         acvaName:form.acvaName, acvaDate:form.acvaDate, acvaStatus:form.acvaStatus,
         icmRegistryId:form.icmRegistryId, bankingStatus:form.bankingStatus,
         sdgTags:form.sdgTags, correspondingAdjustment:form.correspondingAdjustment,
+        // ✅ New ICVCM fields
+        icvcmCcpEligible:form.icvcmCcpEligible, icvcmCcpLabel:form.icvcmCcpLabel,
+        icvcmCcpDate:form.icvcmCcpDate, registryLink:form.registryLink,
+        methodologyId:form.methodologyId, additionalityType:form.additionalityType,
+        permanenceRating:form.permanenceRating, coBenefitsVerified:form.coBenefitsVerified,
       })});
       setShowForm(false); setForm(emptyForm); setFormErrors({}); setPincodeError('');
       showToast('✅ Submitted for admin verification! Approval 1–2 business days.');
       await loadPendingCredits();
     } catch(e) { showToast(`❌ ${e.message||'Submission failed'}`,'error'); }
-    finally   { setSubmitting(false); setTxPending(''); }
+    finally { setSubmitting(false); setTxPending(''); }
   };
 
   const handleCancelSubmission = async (id) => {
@@ -669,28 +945,30 @@ export default function Portfolio() {
     } catch(e) { showToast(`❌ ${e.message||'Could not cancel'}`,'error'); }
   };
 
-  // ── Listing price validation with CCTS band warning ───────────
   const handleListPriceChange = (val, credit) => {
     setListPrice(val);
     const p = +val;
     if (!p||!credit) { setListPriceWarn(''); return; }
-    if (credit.creditType==='compliance' && (p<INDIA_CCTS_FLOOR||p>INDIA_CCTS_CEILING)) {
-      setListPriceWarn(`⚠ Price ₹${p.toLocaleString()}/t is outside India CCTS Phase 1 guidance band (₹${INDIA_CCTS_FLOOR}–₹${INDIA_CCTS_CEILING}/t) for compliance credits`);
+    if (credit.creditType==='compliance'&&(p<INDIA_CCTS_FLOOR||p>INDIA_CCTS_CEILING)) {
+      setListPriceWarn(`⚠ Price ₹${p.toLocaleString()}/t outside India CCTS band (₹${INDIA_CCTS_FLOOR}–₹${INDIA_CCTS_CEILING}/t)`);
     } else { setListPriceWarn(''); }
   };
 
   const handleListForSale = async (credit) => {
+    if (!credit.tokenId||credit.isOnChain===false) {
+      showToast('❌ Credit not yet minted on-chain','error'); return;
+    }
     if (!listPrice||isNaN(listPrice)||+listPrice<=0) { showToast('❌ Enter a valid price','error'); return; }
     const qty = parseInt(listQty)||credit.credits;
     if (qty<=0||qty>credit.credits) { showToast(`❌ Quantity must be 1–${credit.credits}`,'error'); return; }
     try {
       setTxPending(`Listing "${credit.projectName}" on blockchain...`);
-      const rate = ethPriceInr || 210000; // live rate or fallback
-      await listCredit(credit.id,qty,(+listPrice/rate).toFixed(6));
+      const rate = ethPriceInr||210000;
+      await listCredit(credit.tokenId, qty, (+listPrice/rate).toFixed(6));
       setShowList(null); setListPrice(''); setListQty(''); setListPriceWarn(''); setActiveTab('LISTED');
       showToast('📈 Listed on blockchain!');
     } catch(e) { showToast(`❌ ${e.reason||e.message||'Transaction failed'}`,'error'); }
-    finally   { setTxPending(''); }
+    finally { setTxPending(''); }
   };
 
   const handleDelist = async (credit) => {
@@ -698,21 +976,23 @@ export default function Portfolio() {
       setTxPending('Cancelling listing on blockchain...');
       await delistCredit(credit.listingId); showToast('Credit removed from marketplace.');
     } catch(e) { showToast(`❌ ${e.reason||e.message||'Transaction failed'}`,'error'); }
-    finally   { setTxPending(''); }
+    finally { setTxPending(''); }
   };
 
-  // ✅ Retire: backend checks for duplicate serial before burning
-  const handleRetireConfirm = async (credit, qty, scope) => {
+  // ✅ Updated retire handler — receives corporate beneficiary data
+  const handleRetireConfirm = async (credit, qty, scope, corporateData) => {
     try {
-      setTxPending('Verifying serial uniqueness in EtherTrack registry...');
-      // ✅ Real duplicate-serial check — replaces fake "CLEAR" label
+      setTxPending('Verifying serial in EtherTrack registry...');
       const dupCheck = await apiFetch(`/api/portfolio/check-duplicate-retirement?serial=${encodeURIComponent(credit.serialNumber)}`);
       if (dupCheck?.found) {
-        showToast('❌ This serial has already been retired in EtherTrack registry. Cannot double-retire.','error');
+        showToast('❌ Serial already retired. Cannot double-retire.','error');
         setTxPending(''); return;
       }
       setTxPending('Burning credit token permanently on blockchain...');
-      const result = await retireCredit(credit.id, qty);
+      const result = await retireCredit(credit.tokenId??credit.id, qty);
+      const retiredAt    = Date.now();
+      const tokenDisplay = credit.tokenHex||(credit.tokenId?`0x${Number(credit.tokenId).toString(16).padStart(8,'0').toUpperCase()}`:'XX');
+      const certId       = `CERT-${tokenDisplay.replace('0x','').slice(0,8).toUpperCase()}-${retiredAt.toString(36).toUpperCase().slice(-6)}`;
       try {
         await txAPI.recordRetirement({
           tokenId:credit.tokenHex||credit.tokenId, projectName:credit.projectName,
@@ -721,14 +1001,25 @@ export default function Portfolio() {
           location:credit.location, country:credit.country, projectType:credit.projectType,
           txHash:result.txHash, beneficiary:user?.email||walletAddress, retireScope:scope,
           correspondingAdjustment:credit.correspondingAdjustment,
+          certificateId:certId, walletAddress,
+          // ✅ Corporate beneficiary data
+          beneficiaryName:   corporateData?.beneficiaryName   || '',
+          beneficiaryEntity: corporateData?.beneficiaryEntity || '',
+          beneficiaryGstin:  corporateData?.beneficiaryGstin  || '',
+          reportingStandard: corporateData?.reportingStandard || 'GHG_PROTOCOL',
+          purpose:           corporateData?.purpose           || 'voluntary_offset',
         });
       } catch(e) { console.warn('Retirement backend sync failed:',e?.message); }
       setShowRetire(null);
-      setShowCert({...credit,txHash:result.txHash,retiredQty:qty,retireScope:scope});
-      showToast('🌿 Credit permanently retired! Certificate generated.');
+      setRetireSteps({
+        show:true, qty, scope, credit, txHash:result.txHash, certId, retiredAt,
+        corporateData,
+      });
       await loadEmissionsData();
+      await loadMyCredits();
+      if (refreshRetirements) await refreshRetirements(); // ✅ update retired tab
     } catch(e) { showToast(`❌ ${e.reason||e.message||'Transaction failed'}`,'error'); }
-    finally   { setTxPending(''); }
+    finally { setTxPending(''); }
   };
 
   const handleRefresh = async () => {
@@ -737,14 +1028,15 @@ export default function Portfolio() {
   };
 
   const handleExportCSV = () => {
-    const headers=['Project Name','Standard','Credit Type','Project Type','Country','Credits (tCO₂)','Vintage','Status','Serial','Project ID','CBAM','Banking','ICM ID','SDG Tags','Corr. Adjustment','ACVA Status'];
+    const headers=['Project Name','Standard','ICVCM CCP','Methodology','Credit Type','Project Type','Country','Credits (tCO₂)','Vintage','Status','Serial','CBAM','Banking','ICM ID','SDG Tags','Corr. Adjustment','ACVA Status','Registry Link'];
     const rows=allCredits.map(c=>[
-      `"${c.projectName}"`,c.standard,c.creditType||'voluntary',c.projectType,c.country,
-      c.credits,c.vintageYear,
-      c.isPending?(c.isRejected?'REJECTED':'PENDING'):c.status,
-      c.serialNumber,c.projectId||'',
-      c.cbamEligible?'YES':'NO',c.bankingStatus||'available',c.icmRegistryId||'',
-      `"${(c.sdgTags||[]).join(';')}"`,c.correspondingAdjustment||'none',c.acvaStatus||'pending',
+      `"${c.projectName}"`,c.standard,
+      c.icvcm_ccp_eligible?'Yes':'No',c.methodologyId||'',
+      c.creditType||'voluntary',c.projectType,c.country,
+      c.credits,c.vintageYear,c.isPending?(c.isRejected?'REJECTED':'PENDING'):c.status,
+      c.serialNumber,c.cbamEligible?'YES':'NO',c.bankingStatus||'available',
+      c.icmRegistryId||'',`"${(c.sdgTags||[]).join(';')}"`,
+      c.correspondingAdjustment||'none',c.acvaStatus||'pending',c.registryLink||'',
     ]);
     const csv=[headers,...rows].map(r=>r.join(',')).join('\n');
     const blob=new Blob([csv],{type:'text/csv'});
@@ -754,7 +1046,6 @@ export default function Portfolio() {
     showToast('✅ Portfolio exported as CSV');
   };
 
-  // ── CSS ───────────────────────────────────────────────────────
   const CSS = `
     @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Syne:wght@700;800&display=swap');
     *{box-sizing:border-box;}
@@ -789,11 +1080,10 @@ export default function Portfolio() {
     .pt-tab.rejected-tab.active{border-color:#f87171;color:#f87171;background:#1a0707;}
     .pt-tab.compliance-tab.active{border-color:#f97316;color:#f97316;background:#1a0a00;}
     .pt-tab.cbam-tab.active{border-color:#60a5fa;color:#60a5fa;background:#060e18;}
+    .pt-tab.ccp-tab.active{border-color:#84cc16;color:#84cc16;background:#0a1400;}
     .pt-tab-count{font-size:9px;background:#0d1f11;padding:1px 6px;border-radius:10px;}
     .pt-tab.active .pt-tab-count{background:#22c55e22;color:#22c55e;}
-    .pt-tab.rejected-tab.active .pt-tab-count{background:#f8717122;color:#f87171;}
-    .pt-tab.compliance-tab.active .pt-tab-count{background:#f9731622;color:#f97316;}
-    .pt-tab.cbam-tab.active .pt-tab-count{background:#60a5fa22;color:#60a5fa;}
+    .pt-tab.ccp-tab.active .pt-tab-count{background:#84cc1622;color:#84cc16;}
     .pt-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;animation:fu .4s ease .2s both;}
     .pt-card{background:#070c09;border:1px solid #0d1f11;border-radius:14px;overflow:hidden;transition:all .25s;position:relative;}
     .pt-card:hover{border-color:#22c55e22;transform:translateY(-3px);box-shadow:0 12px 40px rgba(0,0,0,.6);}
@@ -801,6 +1091,7 @@ export default function Portfolio() {
     .pt-card.pending-approval{border-color:#f59e0b22;}
     .pt-card.rejected{border-color:#f8717133;opacity:.85;}
     .pt-card.compliance{border-color:#f9731633;}
+    .pt-card.ccp{border-color:#84cc1633;}
     .pt-ribbon{position:absolute;top:12px;right:12px;z-index:2;font-size:8px;padding:3px 10px;border-radius:3px;letter-spacing:.12em;font-weight:700;}
     .pt-card-hdr{padding:16px 16px 12px;border-bottom:1px solid #0d1f1122;}
     .pt-card-name{font-size:12px;font-weight:700;color:#f0fdf4;line-height:1.4;margin-bottom:5px;padding-right:70px;}
@@ -811,49 +1102,48 @@ export default function Portfolio() {
     .pt-meta-cell{padding:9px 14px;border-bottom:1px solid #0d1f1114;border-right:1px solid #0d1f1114;}
     .pt-meta-cell:nth-child(even){border-right:none;}
     .pt-meta-cell:nth-last-child(-n+2){border-bottom:none;}
-    .pt-meta-label{font-size:8px;color:#86efac33;letter-spacing:.1em;margin-bottom:3px;}
-    .pt-meta-val{font-size:11px;color:#e2e8e4;font-weight:500;}
+    .pt-meta-label{font-size:9px;color:#86efac55;letter-spacing:.1em;margin-bottom:3px;}
+    .pt-meta-val{font-size:12px;color:#f0fdf4;font-weight:600;}
     .pt-meta-val.green{color:#22c55e;}.pt-meta-val.blue{color:#60a5fa;}.pt-meta-val.yellow{color:#facc15;}.pt-meta-val.purple{color:#a78bfa;}.pt-meta-val.red{color:#f87171;}.pt-meta-val.orange{color:#f97316;}
     .pt-meta-full{grid-column:1/-1;border-right:none!important;}
     .pt-dep-badge,.pt-verify{display:inline-flex;align-items:center;gap:4px;font-size:9px;padding:2px 7px;border-radius:3px;}
     .pt-card-actions{display:flex;gap:6px;padding:12px 14px;border-top:1px solid #0d1f11;background:#050809;flex-wrap:wrap;}
-    .pt-act-btn{flex:1;padding:9px 6px;border-radius:6px;font-size:9px;letter-spacing:.08em;cursor:pointer;font-family:'DM Mono',monospace;border:1px solid #0d1f11;background:#060a07;color:#86efac55;transition:all .2s;font-weight:500;white-space:nowrap;text-align:center;}
-    .pt-act-btn:hover{border-color:#22c55e33;color:#22c55ecc;background:#091409;}
-    .pt-act-btn.sell{background:#0e1200;border-color:#facc1522;color:#facc1577;}.pt-act-btn.sell:hover{border-color:#facc1566;color:#facc15cc;background:#151000;}
-    .pt-act-btn.retire{background:#0e0505;border-color:#f8717122;color:#f8717166;}.pt-act-btn.retire:hover{border-color:#f8717166;color:#f87171cc;background:#1a0707;}
-    .pt-act-btn.delist{background:#0e0800;border-color:#f9731622;color:#f9731655;}.pt-act-btn.delist:hover{border-color:#f9731666;color:#f97316cc;background:#180d00;}
-    .pt-act-btn.cert{background:#0c0828;border-color:#a78bfa22;color:#a78bfa66;}.pt-act-btn.cert:hover{border-color:#a78bfa66;color:#a78bfacc;background:#130a30;}
-    .pt-act-btn.market{background:#060e18;border-color:#60a5fa22;color:#60a5fa55;}.pt-act-btn.market:hover{border-color:#60a5fa55;color:#60a5facc;background:#071020;}
-    .pt-act-btn.cancel{background:#110500;border-color:#f9731622;color:#f9731655;}.pt-act-btn.cancel:hover{border-color:#f9731666;color:#f97316cc;background:#1a0800;}
-    .pt-act-btn.resubmit{background:#060e18;border-color:#60a5fa22;color:#60a5fa55;}.pt-act-btn.resubmit:hover{border-color:#60a5fa66;color:#60a5facc;}
-    .pt-act-btn.doc{background:#0a0c0a;border-color:#22c55e11;color:#22c55e44;}.pt-act-btn.doc:hover{border-color:#22c55e44;color:#22c55e99;}
+    .pt-act-btn{flex:1;padding:10px 6px;border-radius:6px;font-size:10px;letter-spacing:.06em;cursor:pointer;font-family:'DM Mono',monospace;border:1px solid #0d1f11;background:#060a07;color:#86efac77;transition:all .2s;font-weight:600;white-space:nowrap;text-align:center;}
+    .pt-act-btn:hover{border-color:#22c55e44;color:#22c55ecc;background:#091409;}
+    .pt-act-btn.sell{background:#0e1200;border-color:#facc1533;color:#facc1599;}.pt-act-btn.sell:hover{border-color:#facc1566;color:#facc15cc;background:#151000;}
+    .pt-act-btn.retire{background:#0e0505;border-color:#f8717133;color:#f8717188;}.pt-act-btn.retire:hover{border-color:#f8717166;color:#f87171cc;background:#1a0707;}
+    .pt-act-btn.delist{background:#0e0800;border-color:#f9731633;color:#f9731677;}.pt-act-btn.delist:hover{border-color:#f9731666;color:#f97316cc;background:#180d00;}
+    .pt-act-btn.cert{background:#0c0828;border-color:#a78bfa33;color:#a78bfa88;}.pt-act-btn.cert:hover{border-color:#a78bfa66;color:#a78bfacc;background:#130a30;}
+    .pt-act-btn.market{background:#060e18;border-color:#60a5fa33;color:#60a5fa77;}.pt-act-btn.market:hover{border-color:#60a5fa55;color:#60a5facc;background:#071020;}
+    .pt-act-btn.cancel{background:#110500;border-color:#f9731633;color:#f9731677;}.pt-act-btn.cancel:hover{border-color:#f9731666;color:#f97316cc;background:#1a0800;}
+    .pt-act-btn.resubmit{background:#060e18;border-color:#60a5fa33;color:#60a5fa77;}.pt-act-btn.resubmit:hover{border-color:#60a5fa66;color:#60a5facc;}
+    .pt-act-btn.doc{background:#0a0c0a;border-color:#22c55e22;color:#22c55e66;}.pt-act-btn.doc:hover{border-color:#22c55e55;color:#22c55ecc;}
     .pt-act-btn:disabled{opacity:.2;cursor:not-allowed;}
     .pt-empty{grid-column:1/-1;text-align:center;padding:72px 24px;background:#070c09;border:1px solid #0d1f11;border-radius:14px;}
     .pt-skel{background:linear-gradient(90deg,#0d1f11 25%,#0a1a0e 50%,#0d1f11 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:6px;}
-    .pt-tx-banner{position:fixed;top:70px;left:50%;transform:translateX(-50%);z-index:4000;background:#070c09;border:1px solid #22c55e33;border-radius:8px;padding:12px 24px;font-size:11px;color:#22c55e99;font-family:'DM Mono',monospace;display:flex;align-items:center;gap:10px;box-shadow:0 8px 32px rgba(0,0,0,.8);white-space:nowrap;animation:slideDown .3s ease;}
+    .pt-tx-banner{position:fixed;top:70px;left:50%;transform:translateX(-50%);z-index:4000;background:#070c09;border:1px solid #22c55e33;border-radius:8px;padding:12px 24px;font-size:12px;color:#22c55ecc;font-family:'DM Mono',monospace;display:flex;align-items:center;gap:10px;box-shadow:0 8px 32px rgba(0,0,0,.8);white-space:nowrap;animation:slideDown .3s ease;}
     .pt-spinner{width:14px;height:14px;border:2px solid #22c55e11;border-top-color:#22c55e88;border-radius:50%;animation:spin 1s linear infinite;flex-shrink:0;}
     .pt-overlay{position:fixed;inset:0;background:rgba(0,0,0,.88);backdrop-filter:blur(6px);z-index:3000;display:flex;align-items:center;justify-content:center;padding:24px;animation:fadeIn .2s ease;}
     .pt-modal{background:#070c09;border:1px solid #0d1f11;border-radius:16px;width:100%;max-width:580px;max-height:90vh;overflow-y:auto;box-shadow:0 32px 80px rgba(0,0,0,.95);animation:slideUp .25s ease;}
     .pt-modal::-webkit-scrollbar{width:3px;}.pt-modal::-webkit-scrollbar-thumb{background:#0d1f11;}
     .pt-modal-hdr{padding:20px 24px;border-bottom:1px solid #0d1f11;display:flex;align-items:center;justify-content:space-between;}
-    .pt-modal-title{font-size:13px;font-weight:700;color:#f0fdf4;letter-spacing:.1em;}
-    .pt-modal-close{background:none;border:none;color:#86efac33;cursor:pointer;font-size:18px;transition:color .2s;}.pt-modal-close:hover{color:#f87171;}
+    .pt-modal-title{font-size:14px;font-weight:700;color:#f0fdf4;letter-spacing:.1em;}
+    .pt-modal-close{background:none;border:none;color:#86efac44;cursor:pointer;font-size:18px;transition:color .2s;}.pt-modal-close:hover{color:#f87171;}
     .pt-modal-body{padding:24px;}
     .pt-modal-foot{padding:16px 24px;border-top:1px solid #0d1f11;display:flex;gap:10px;background:#050809;}
     .pt-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
     .pt-form-full{grid-column:1/-1;}
     .pt-field{display:flex;flex-direction:column;gap:5px;}
-    .pt-label{font-size:9px;color:#86efac44;letter-spacing:.12em;}
-    .pt-input{padding:10px 12px;border-radius:7px;border:1px solid #0d1f11;background:#040706;color:#f0fdf4;font-family:'DM Mono',monospace;font-size:11px;outline:none;transition:border-color .2s;width:100%;}
-    .pt-input:focus{border-color:#22c55e33;}.pt-input.err{border-color:#dc2626;}
-    .pt-err{font-size:9px;color:#f87171;}
-    .pt-warn{font-size:9px;color:#f59e0b;}
-    .pt-section-divider{font-size:9px;color:#86efac33;letter-spacing:.14em;padding:10px 0 6px;border-top:1px solid #0d1f1166;margin-top:6px;grid-column:1/-1;}
-    .pt-btn-primary{flex:1;padding:12px;border-radius:8px;border:none;background:linear-gradient(135deg,#14532d,#166534);color:#d1fae5;cursor:pointer;font-family:'DM Mono',monospace;font-size:11px;font-weight:700;letter-spacing:.1em;transition:all .2s;}
+    .pt-label{font-size:10px;color:#86efac66;letter-spacing:.12em;}
+    .pt-input{padding:10px 12px;border-radius:7px;border:1px solid #0d1f11;background:#040706;color:#f0fdf4;font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border-color .2s;width:100%;}
+    .pt-input:focus{border-color:#22c55e44;}.pt-input.err{border-color:#dc2626;}
+    .pt-err{font-size:10px;color:#f87171;}
+    .pt-section-divider{font-size:9px;color:#86efac44;letter-spacing:.14em;padding:10px 0 6px;border-top:1px solid #0d1f1166;margin-top:6px;grid-column:1/-1;}
+    .pt-btn-primary{flex:1;padding:12px;border-radius:8px;border:none;background:linear-gradient(135deg,#14532d,#166534);color:#d1fae5;cursor:pointer;font-family:'DM Mono',monospace;font-size:12px;font-weight:700;letter-spacing:.1em;transition:all .2s;}
     .pt-btn-primary:hover{background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;}.pt-btn-primary:disabled{opacity:.3;cursor:not-allowed;}
-    .pt-btn-secondary{flex:1;padding:12px;border-radius:8px;border:1px solid #0d1f11;background:#060a07;color:#86efac44;cursor:pointer;font-family:'DM Mono',monospace;font-size:11px;letter-spacing:.08em;transition:all .2s;}
-    .pt-btn-secondary:hover{border-color:#22c55e22;color:#86efac88;}.pt-btn-secondary:disabled{opacity:.3;cursor:not-allowed;}
-    .pt-btn-danger{flex:1;padding:12px;border-radius:8px;border:1px solid #1f0707;background:#0e0505;color:#f8717166;cursor:pointer;font-family:'DM Mono',monospace;font-size:11px;letter-spacing:.08em;transition:all .2s;}
+    .pt-btn-secondary{flex:1;padding:12px;border-radius:8px;border:1px solid #0d1f11;background:#060a07;color:#86efac66;cursor:pointer;font-family:'DM Mono',monospace;font-size:12px;letter-spacing:.08em;transition:all .2s;}
+    .pt-btn-secondary:hover{border-color:#22c55e33;color:#86efac99;}.pt-btn-secondary:disabled{opacity:.3;cursor:not-allowed;}
+    .pt-btn-danger{flex:1;padding:12px;border-radius:8px;border:1px solid #1f0707;background:#0e0505;color:#f8717188;cursor:pointer;font-family:'DM Mono',monospace;font-size:12px;letter-spacing:.08em;transition:all .2s;}
     .pt-btn-danger:hover:not(:disabled){background:#1a0707;border-color:#dc262666;color:#f87171cc;}.pt-btn-danger:disabled{opacity:.3;cursor:not-allowed;}
     .pt-toast{position:fixed;bottom:24px;right:24px;z-index:9999;background:#070c09;border-radius:8px;padding:12px 20px;font-size:12px;font-family:'DM Mono',monospace;letter-spacing:.06em;box-shadow:0 8px 32px rgba(0,0,0,.8);animation:slideIn .3s ease;}
     .pt-upload-box{position:relative;border:1px dashed #0d1f11;border-radius:8px;padding:20px;text-align:center;background:#040706;cursor:pointer;transition:border-color .2s;}
@@ -862,15 +1152,16 @@ export default function Portfolio() {
     .pt-toggle:hover{border-color:#22c55e22;}
     .pt-toggle-box{width:36px;height:20px;border-radius:10px;background:#0d1f11;position:relative;transition:background .2s;flex-shrink:0;}
     .pt-toggle-box.on{background:#14532d;}
-    .pt-toggle-knob{width:14px;height:14px;border-radius:50%;background:#86efac33;position:absolute;top:3px;left:3px;transition:all .2s;}
+    .pt-toggle-knob{width:14px;height:14px;border-radius:50%;background:#86efac44;position:absolute;top:3px;left:3px;transition:all .2s;}
     .pt-toggle-box.on .pt-toggle-knob{left:19px;background:#22c55e;}
     .pt-qty-row{display:flex;align-items:center;gap:10px;margin-bottom:10px;}
     .pt-qty-slider{flex:1;-webkit-appearance:none;height:4px;background:#0d1f11;border-radius:2px;outline:none;}
     .pt-qty-slider::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:#22c55e;cursor:pointer;}
     .pt-sdg-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;}
-    .pt-sdg-tag{padding:6px 10px;border-radius:6px;border:1px solid #0d1f11;background:#060a07;cursor:pointer;transition:all .2s;text-align:center;font-size:9px;color:#86efac44;}
+    .pt-sdg-tag{padding:6px 10px;border-radius:6px;border:1px solid #0d1f11;background:#060a07;cursor:pointer;transition:all .2s;text-align:center;font-size:9px;color:#86efac55;}
     .pt-sdg-tag.on{border-color:#60a5fa44;background:#060e18;color:#60a5facc;}
     @keyframes fu{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:translateY(0);}}
+    @keyframes fadeSlideUp{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
     @keyframes fadeIn{from{opacity:0;}to{opacity:1;}}
     @keyframes slideUp{from{opacity:0;transform:translateY(16px);}to{opacity:1;transform:translateY(0);}}
     @keyframes slideIn{from{opacity:0;transform:translateX(20px);}to{opacity:1;transform:translateX(0);}}
@@ -887,14 +1178,15 @@ export default function Portfolio() {
       <div className="pt">
         <div className="ptw">
 
-          {/* Header */}
           <div className="pt-hdr">
-            <div className="pt-hdr-label">MY CARBON ASSETS · ETHEREUM SEPOLIA · INDIA CCTS · PARIS AGREEMENT ART.6</div>
+            <div className="pt-hdr-label">MY CARBON ASSETS · ETHEREUM SEPOLIA · INDIA CCTS · ICVCM CCP · PARIS AGREEMENT ART.6</div>
             <div className="pt-hdr-title">Carbon Credit <span>Portfolio</span></div>
-            <div className="pt-hdr-sub">TOKENIZED ON-CHAIN · CCC · VCU · GHG PROTOCOL · ISO 14064-3 · CBAM READY · SDG TAGGED</div>
+            <div className="pt-hdr-sub">ISO 14064-3 · GHG PROTOCOL · BRSR · CDP · TCFD · CBAM · SDG · ICVCM CCP</div>
           </div>
 
-          {/* Top bar */}
+          {/* ✅ KYC Expiry Banner */}
+          <KYCExpiryBanner navigate={navigate}/>
+
           <div className="pt-topbar">
             <div style={{fontSize:11,color:'#86efac33',letterSpacing:'.06em',display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
               {loading.credits
@@ -907,36 +1199,33 @@ export default function Portfolio() {
                   🔗 {walletAddress.slice(0,6)}...{walletAddress.slice(-4)} ↗
                 </a>
               )}
-              {/* ✅ Live ETH price indicator */}
               {ethPriceInr
                 ? <span style={{fontSize:9,color:'#22c55e44'}}>ETH ₹{ethPriceInr.toLocaleString()} live</span>
                 : <span style={{fontSize:9,color:'#f59e0b33'}}>ETH rate: est.</span>
               }
             </div>
             <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
-              <button className="pt-export-btn" onClick={handleExportCSV}>↓ EXPORT CSV</button>
-              <button className="pt-refresh-btn" onClick={handleRefresh} disabled={loading.credits}>{loading.credits?'⟳ Refreshing...':'↻ REFRESH'}</button>
-              <button className="pt-reg-btn" onClick={()=>setShowForm(true)} disabled={submitting||!isKYCVerified} title={!isKYCVerified?'Complete KYC first':''}>
+              <button className="pt-export-btn" onClick={handleExportCSV}>↓ CSV</button>
+              <button className="pt-refresh-btn" onClick={handleRefresh} disabled={loading.credits}>{loading.credits?'⟳':'↻ REFRESH'}</button>
+              <button className="pt-reg-btn" onClick={()=>setShowForm(true)} disabled={submitting||!isKYCVerified}>
                 ⊕ TOKENIZE NEW CREDIT
               </button>
             </div>
           </div>
 
-          {/* KYC warning */}
           {walletAddress&&!isKYCVerified&&(
-            <div style={{marginBottom:20,padding:'12px 16px',background:'#110a00',border:'1px solid #f59e0b33',borderRadius:8,fontSize:11,color:'#f59e0b88',display:'flex',alignItems:'center',gap:10,animation:'fu .4s ease both'}}>
+            <div style={{marginBottom:20,padding:'12px 16px',background:'#110a00',border:'1px solid #f59e0b33',borderRadius:8,fontSize:11,color:'#f59e0b88',display:'flex',alignItems:'center',gap:10}}>
               <span>⚠️</span>
               <span>KYC not verified. <span onClick={()=>refreshKYC&&refreshKYC()} style={{color:'#f59e0b',cursor:'pointer',textDecoration:'underline'}}>Refresh KYC Status</span></span>
             </div>
           )}
 
-          {/* Stats */}
           <div className="pt-stats">
             {[
               {label:'TOTAL CREDITS',      val:loading.credits?'...':`${stats.totalCredits.toLocaleString()} t`, sub:'CO₂ equivalent tokenized',  color:'#22c55e',accent:'linear-gradient(90deg,#052e16,#16a34a)'},
               {label:'PORTFOLIO VALUE',     val:loading.credits?'...':`₹${(stats.totalValue/100000).toFixed(1)}L`,sub:'after vintage depreciation', color:'#60a5fa',accent:'linear-gradient(90deg,#0c1a2e,#3b82f6)'},
-              {label:'LISTED ON MARKET',    val:loading.credits?'...':stats.listedCount,                          sub:'live on marketplace',         color:'#facc15',accent:'linear-gradient(90deg,#1a1000,#ca8a04)'},
-              {label:'PERMANENTLY RETIRED', val:loading.credits?'...':stats.retiredCount,                         sub:'tCO₂ offset on-chain',        color:'#a78bfa',accent:'linear-gradient(90deg,#0f0520,#7c3aed)'},
+              {label:'LISTED ON MARKET',    val:loading.credits?'...':`${stats.listedCount.toLocaleString()} t`,  sub:'tCO₂ live on marketplace',    color:'#facc15',accent:'linear-gradient(90deg,#1a1000,#ca8a04)'},
+              {label:'PERMANENTLY RETIRED', val:loading.credits?'...':`${stats.retiredCount.toLocaleString()} t`,  sub:'tCO₂ offset on-chain',        color:'#a78bfa',accent:'linear-gradient(90deg,#0f0520,#7c3aed)'},
             ].map(({label,val,sub,color,accent})=>(
               <div className="pt-stat" key={label}>
                 <div style={{position:'absolute',top:0,left:0,right:0,height:2,background:accent,borderRadius:'12px 12px 0 0'}}/>
@@ -947,11 +1236,18 @@ export default function Portfolio() {
             ))}
           </div>
 
-          {/* Offset Gap + Score Panels */}
+          {/* ✅ Corporate Export Panel */}
+          <CorporateExportPanel
+            showToast={showToast}
+            myCredits={allCredits}
+            emissionsData={emissionsData}
+            retirements={[]}
+          />
+
           <OffsetGapPanel myCredits={allCredits} emissionsData={emissionsData}/>
           <CreditScorePanel stats={stats} myCredits={allCredits} emissionsData={emissionsData}/>
 
-          {/* Tabs */}
+          {/* Tabs — with new CCP tab */}
           <div className="pt-tabs">
             {[
               {key:'ALL',        label:'ALL',        cls:''},
@@ -959,6 +1255,7 @@ export default function Portfolio() {
               {key:'LISTED',     label:'LISTED',     cls:''},
               {key:'RETIRED',    label:'RETIRED',    cls:''},
               {key:'PENDING',    label:'PENDING',    cls:''},
+              {key:'CCP',        label:'🏅 CCP',     cls:'ccp-tab'},
               {key:'COMPLIANCE', label:'CCC',        cls:'compliance-tab'},
               {key:'CBAM',       label:'CBAM ✓',     cls:'cbam-tab'},
               {key:'REJECTED',   label:'REJECTED',   cls:'rejected-tab'},
@@ -966,10 +1263,11 @@ export default function Portfolio() {
               <button key={key} className={`pt-tab ${cls}${activeTab===key?' active':''}`} onClick={()=>setActiveTab(key)}>
                 {label}
                 <span className="pt-tab-count"
-                  style={key==='PENDING'  &&tabCounts.PENDING>0   ?{background:'#f59e0b22',color:'#f59e0b'}
-                        :key==='REJECTED' &&tabCounts.REJECTED>0  ?{background:'#f8717122',color:'#f87171'}
-                        :key==='COMPLIANCE'&&tabCounts.COMPLIANCE>0?{background:'#f9731622',color:'#f97316'}
-                        :key==='CBAM'    &&tabCounts.CBAM>0       ?{background:'#60a5fa22',color:'#60a5fa'}:{}}>
+                  style={key==='PENDING'  &&tabCounts.PENDING>0    ?{background:'#f59e0b22',color:'#f59e0b'}
+                        :key==='REJECTED' &&tabCounts.REJECTED>0   ?{background:'#f8717122',color:'#f87171'}
+                        :key==='COMPLIANCE'&&tabCounts.COMPLIANCE>0 ?{background:'#f9731622',color:'#f97316'}
+                        :key==='CBAM'    &&tabCounts.CBAM>0        ?{background:'#60a5fa22',color:'#60a5fa'}
+                        :key==='CCP'     &&tabCounts.CCP>0         ?{background:'#84cc1622',color:'#84cc16'}:{}}>
                   {tabCounts[key]}
                 </span>
               </button>
@@ -978,43 +1276,133 @@ export default function Portfolio() {
 
           {/* Credit Grid */}
           <div className="pt-grid">
-            {loading.credits&&allCredits.length===0 ? (
+            {/* ✅ RETIRED TAB — show retirement history cards from DB */}
+            {activeTab === 'RETIRED' ? (
+              myRetirements.length === 0 ? (
+                <div className="pt-empty">
+                  <div style={{fontSize:40,marginBottom:16}}>🔥</div>
+                  <div style={{fontSize:14,color:'#f0fdf4',fontWeight:700,marginBottom:8}}>No retirements yet</div>
+                  <div style={{fontSize:11,color:'#86efac22',lineHeight:1.7}}>
+                    When you retire credits they'll appear here with their certificates
+                  </div>
+                </div>
+              ) : (
+                myRetirements.map((ret, i) => {
+                  const certId   = ret.cert_id || ret.certificate_id || ret.certId;
+                  const verifyUrl = `${window.location.origin}/verify/${certId}`;
+                  return (
+                    <div key={ret.id||i} style={{
+                      background:'#070c09', border:'1px solid #22c55e22',
+                      borderRadius:14, overflow:'hidden',
+                      animation:`fadeSlideUp .3s ease ${i*0.05}s both`,
+                    }}>
+                      {/* Card header */}
+                      <div style={{padding:'14px 16px 10px',borderBottom:'1px solid #0d1f11',display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:8}}>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{fontSize:9,color:'#f8717188',letterSpacing:'.14em',marginBottom:4}}>
+                            🔥 PERMANENTLY RETIRED ON-CHAIN
+                          </div>
+                          <div style={{fontSize:12,color:'#f0fdf4',fontWeight:700,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
+                            {ret.project_name||ret.projectName||'—'}
+                          </div>
+                          <div style={{fontSize:9,color:'#86efac44',marginTop:3}}>
+                            {ret.standard||'VCS'} · {ret.created_at?.slice(0,10)||ret.retired_at?.slice(0,10)||'—'}
+                          </div>
+                        </div>
+                        <div style={{textAlign:'right',flexShrink:0}}>
+                          <div style={{fontSize:22,fontWeight:800,color:'#f87171',fontFamily:'Syne,sans-serif',lineHeight:1}}>
+                            {Number(ret.amount||ret.credits||0).toLocaleString()}
+                          </div>
+                          <div style={{fontSize:9,color:'#f8717144'}}>tCO₂e</div>
+                        </div>
+                      </div>
+                      {/* Card body */}
+                      <div style={{padding:'12px 16px',display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:8}}>
+                        {[
+                          {l:'CERTIFICATE ID', v:certId?.slice(0,20)||'—', color:'#22c55e'},
+                          {l:'TOKEN ID',        v:ret.token_id?`#${ret.token_id}`:'—', color:'#60a5fa'},
+                          {l:'CREDITS RETIRED', v:`${Number(ret.amount||0).toLocaleString()} tCO₂e`, color:'#f87171'},
+                          {l:'OFFSET SCOPE',    v:ret.retire_scope?`Scope ${ret.retire_scope}`:`Scope ${ret.scope||1}`, color:'#a78bfa'},
+                          {l:'PROJECT TYPE',    v:ret.project_type||ret.projectType||'—', color:'#86efac88'},
+                          {l:'BENEFICIARY',     v:ret.beneficiary||ret.beneficiary_name||'Self', color:'#86efac88'},
+                        ].map(({l,v,color})=>(
+                          <div key={l} style={{background:'#060a07',border:'1px solid #0d1f11',borderRadius:6,padding:'8px 10px'}}>
+                            <div style={{fontSize:8,color:'#86efac44',letterSpacing:'.1em',marginBottom:3}}>{l}</div>
+                            <div style={{fontSize:10,color,fontWeight:600,wordBreak:'break-all'}}>{v}</div>
+                          </div>
+                        ))}
+                      </div>
+                      {/* TX hash */}
+                      {ret.tx_hash && (
+                        <div style={{margin:'0 16px 10px',padding:'8px 10px',background:'#0a1628',border:'1px solid #60a5fa22',borderRadius:6}}>
+                          <div style={{fontSize:8,color:'#60a5fa88',letterSpacing:'.1em',marginBottom:3}}>BLOCKCHAIN TX HASH</div>
+                          <div style={{fontSize:9,color:'#60a5fa',fontFamily:'monospace',wordBreak:'break-all'}}>{ret.tx_hash}</div>
+                        </div>
+                      )}
+                      {/* Actions */}
+                      <div style={{padding:'10px 16px',borderTop:'1px solid #0d1f11',display:'flex',gap:8,flexWrap:'wrap'}}>
+                        {certId && (
+                          <>
+                            <a href={verifyUrl} target="_blank" rel="noreferrer"
+                              style={{flex:1,padding:'8px 12px',borderRadius:6,border:'1px solid #22c55e33',background:'#051409',color:'#22c55e88',cursor:'pointer',fontFamily:'DM Mono,monospace',fontSize:10,textAlign:'center',textDecoration:'none',transition:'all .2s'}}>
+                              🔍 VIEW CERTIFICATE
+                            </a>
+                            {ret.tx_hash && (
+                              <a href={`https://sepolia.etherscan.io/tx/${ret.tx_hash}`}
+                                target="_blank" rel="noreferrer"
+                                style={{flex:1,padding:'8px 12px',borderRadius:6,border:'1px solid #60a5fa33',background:'#060e18',color:'#60a5fa88',cursor:'pointer',fontFamily:'DM Mono,monospace',fontSize:10,textAlign:'center',textDecoration:'none',transition:'all .2s'}}>
+                                ⛓ ETHERSCAN ↗
+                              </a>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )
+            ) : loading.credits&&allCredits.length===0 ? (
               [1,2,3].map(i=>(
                 <div key={i} style={{background:'#070c09',border:'1px solid #0d1f11',borderRadius:14,overflow:'hidden'}}>
                   <div style={{padding:16}}>
                     <div className="pt-skel" style={{height:14,width:'70%',marginBottom:10}}/>
                     <div className="pt-skel" style={{height:10,width:'40%',marginBottom:14}}/>
                   </div>
-                  {[1,2,3,4].map(j=>(<div key={j} style={{padding:'10px 14px',borderTop:'1px solid #0d1f1114'}}><div className="pt-skel" style={{height:8,width:'30%',marginBottom:6}}/><div className="pt-skel" style={{height:12,width:'60%'}}/></div>))}
                 </div>
               ))
             ) : filtered.length===0 ? (
               <div className="pt-empty">
                 <div style={{fontSize:40,marginBottom:16}}>🌿</div>
                 <div style={{fontSize:14,color:'#f0fdf4',fontWeight:700,marginBottom:8}}>
-                  {activeTab==='RETIRED'?'No retired credits yet'
-                   :activeTab==='PENDING'?'No pending submissions'
-                   :activeTab==='REJECTED'?'No rejected submissions'
+                  {activeTab==='RETIRED'    ?'No retired credits yet'
+                   :activeTab==='PENDING'   ?'No pending submissions'
+                   :activeTab==='REJECTED'  ?'No rejected submissions'
+                   :activeTab==='CCP'       ?'No ICVCM CCP credits yet'
                    :activeTab==='COMPLIANCE'?'No CCC compliance credits yet'
-                   :activeTab==='CBAM'?'No CBAM-eligible credits yet'
+                   :activeTab==='CBAM'      ?'No CBAM-eligible credits yet'
                    :'No credits found'}
                 </div>
                 <div style={{fontSize:11,color:'#86efac22',lineHeight:1.7}}>
                   {!isKYCVerified?'Complete KYC to start tokenizing'
                    :activeTab==='ALL'?'Click "TOKENIZE NEW CREDIT" to submit your first credit'
-                   :`No credits in this view`}
+                   :'No credits in this view'}
                 </div>
               </div>
-            ) : filtered.map(credit=>{
-              const reg         = REGISTRIES[credit.standard]||REGISTRIES.VCS;
-              const dep         = vintagePenalty(credit.vintageYear);
-              const refPrice    = getReferencePrice(credit.projectType,credit.standard,credit.vintageYear);
-              const adjPrice    = credit.pricePerCredit>0?+((credit.pricePerCredit)*(1-dep/100)).toFixed(0):refPrice;
-              const priceIsRef  = !credit.pricePerCredit||credit.pricePerCredit===0;
-              const expired     = credit.expiryDate&&new Date(credit.expiryDate)<new Date();
-              const isCCC       = credit.creditType==='compliance';
-              const verifStatus = VERIFICATION_STATUSES.find(s=>s.value===(credit.acvaStatus||'pending'));
-              const caInfo      = CA_OPTIONS.find(o=>o.value===(credit.correspondingAdjustment||'none'));
+            ) : filtered.map(credit => {
+              const reg        = REGISTRIES[credit.standard]||REGISTRIES.VCS;
+              const dep        = vintagePenalty(credit.vintageYear);
+              const refPrice   = getReferencePrice(credit.projectType,credit.standard,credit.vintageYear);
+              const adjPrice   = credit.pricePerCredit>0?+((credit.pricePerCredit)*(1-dep/100)).toFixed(0):refPrice;
+              const priceIsRef = !credit.pricePerCredit||credit.pricePerCredit===0;
+              const expired    = credit.expiryDate&&new Date(credit.expiryDate)<new Date();
+              const isCCC      = credit.creditType==='compliance';
+              const isCCP      = credit.icvcm_ccp_eligible;
+              const caInfo     = CA_OPTIONS.find(o=>o.value===(credit.correspondingAdjustment||'none'));
+              const isMinted   = credit.isOnChain !== false && credit.tokenId != null;
+
+              // Build registry verification link
+              const registryVerifyUrl = credit.registryLink ||
+                (reg.link && credit.projectId ? `${reg.link}${credit.projectId}` : null);
 
               const statusStyle = credit.isRejected
                 ? {bg:'#1a0707',color:'#f87171',border:'#f8717133',label:'✕ REJECTED'}
@@ -1027,7 +1415,7 @@ export default function Portfolio() {
                   }[credit.status]||{bg:'#051409',color:'#22c55e',border:'#22c55e22',label:'● HELD'});
 
               return (
-                <div key={credit.id} className={`pt-card${credit.status==='RETIRED'?' retired':''}${credit.isPending&&!credit.isRejected?' pending-approval':''}${credit.isRejected?' rejected':''}${isCCC?' compliance':''}`}>
+                <div key={credit.id} className={`pt-card${credit.status==='RETIRED'?' retired':''}${credit.isPending&&!credit.isRejected?' pending-approval':''}${credit.isRejected?' rejected':''}${isCCC?' compliance':''}${isCCP?' ccp':''}`}>
                   <div className="pt-ribbon" style={{background:statusStyle.bg,color:statusStyle.color,border:`1px solid ${statusStyle.border}`}}>
                     {statusStyle.label}
                   </div>
@@ -1035,41 +1423,32 @@ export default function Portfolio() {
                     <div className="pt-card-name">{credit.projectName}</div>
                     <div className="pt-card-loc">📍 {credit.location}</div>
                     <div className="pt-card-badges">
-                      {/* Registry badge */}
                       <span className="pt-badge" style={{background:reg.bg,color:reg.color,border:`1px solid ${reg.color}22`}}>{credit.standard}</span>
-                      {/* CCC/VCU badge */}
                       <span className="pt-badge" style={{background:isCCC?'#1a0a00':'#0d2e1f',color:isCCC?'#f97316':'#22c55e66',border:`1px solid ${isCCC?'#f9731633':'#22c55e22'}`}}>
                         {isCCC?'CCC':'VCU'}
                       </span>
-                      {/* On-chain / review status */}
+                      {/* ✅ ICVCM CCP badge */}
+                      {isCCP&&(
+                        <span className="pt-badge" style={{background:'#0e1a00',color:'#84cc16',border:'1px solid #84cc1633'}}>🏅 CCP</span>
+                      )}
                       {credit.isRejected
                         ? <span className="pt-badge" style={{background:'#1a070766',color:'#f8717188',border:'1px solid #f8717122'}}>✕ Rejected</span>
                         : credit.isPending
                         ? <span className="pt-badge" style={{background:'#1a0e0066',color:'#f59e0b88',border:'1px solid #f59e0b22'}}>⏳ Admin Review</span>
-                        : <span className="pt-badge" style={{background:'#22c55e0d',color:'#22c55e66',border:'1px solid #22c55e11'}}>⛓ On-Chain</span>
+                        : isMinted
+                        ? <span className="pt-badge" style={{background:'#22c55e0d',color:'#22c55e66',border:'1px solid #22c55e11'}}>⛓ On-Chain</span>
+                        : <span className="pt-badge" style={{background:'#0a162888',color:'#60a5fa88',border:'1px solid #60a5fa22'}}>⏳ Minting</span>
                       }
-                      {/* CBAM */}
                       {credit.cbamEligible&&<span className="pt-badge" style={{background:'#060e18',color:'#60a5fa88',border:'1px solid #60a5fa33'}}>🇪🇺 CBAM</span>}
-                      {/* Vintage depreciation */}
                       {dep>0&&<span className="pt-dep-badge" style={{background:'#11100066',color:'#facc1566',border:'1px solid #facc1511'}}>↓{dep}% vintage</span>}
-                      {/* Banking */}
-                      {credit.bankingStatus==='banked'&&<span className="pt-badge" style={{background:'#0a1628',color:'#60a5fa66',border:'1px solid #60a5fa22'}}>🏦 BANKED</span>}
-                      {/* ACVA verification status */}
-                      {credit.acvaName&&verifStatus&&(
-                        <span className="pt-badge" style={{background:'#070c09',color:verifStatus.color,border:`1px solid ${verifStatus.color}33`}}>
-                          {verifStatus.value==='verified'?'✓':verifStatus.value==='in_progress'?'⟳':'○'} {verifStatus.label}
-                        </span>
-                      )}
                     </div>
                   </div>
 
-                  {/* Pending notice */}
                   {credit.isPending&&!credit.isRejected&&(
                     <div style={{margin:'8px 14px 0',padding:'8px 12px',background:'#110a00',border:'1px solid #f59e0b22',borderRadius:6,fontSize:10,color:'#f59e0b88',lineHeight:1.6}}>
                       🔍 Under admin verification. Approval typically 1–2 business days.
                     </div>
                   )}
-                  {/* Rejection reason */}
                   {credit.isRejected&&(
                     <div style={{margin:'8px 14px 0',padding:'10px 12px',background:'#1a0707',border:'1px solid #f8717122',borderRadius:6,fontSize:10,color:'#f8717188',lineHeight:1.6}}>
                       <div style={{fontWeight:700,color:'#f87171aa',marginBottom:4}}>✕ Submission Rejected</div>
@@ -1080,17 +1459,40 @@ export default function Portfolio() {
                     </div>
                   )}
 
-                  {/* Meta grid */}
+                  {/* Minting notice */}
+                  {!credit.isPending&&!credit.isRejected&&!isMinted&&(
+                    <div style={{margin:'8px 14px 0',padding:'7px 10px',background:'#0a1628',border:'1px solid #60a5fa22',borderRadius:6,fontSize:9,color:'#60a5fa88',display:'flex',alignItems:'center',gap:6}}>
+                      <span>⏳</span><span>Token minting on-chain — list / retire unlocks once confirmed</span>
+                    </div>
+                  )}
+
                   <div className="pt-meta">
                     {!credit.isPending&&(
                       <div className="pt-meta-cell">
                         <div className="pt-meta-label">TOKEN ID</div>
-                        <div className="pt-meta-val blue" style={{fontSize:10,fontFamily:'monospace'}}>{credit.tokenHex||credit.tokenId}</div>
+                        <div className="pt-meta-val blue" style={{fontSize:10,fontFamily:'monospace'}}>
+                          {isMinted?(credit.tokenHex||credit.tokenId):'⏳ Pending'}
+                        </div>
                       </div>
                     )}
                     <div className={`pt-meta-cell${credit.isPending?' pt-meta-full':''}`}>
-                      <div className="pt-meta-label">QUANTITY (tCO₂)</div>
-                      <div className="pt-meta-val green">{credit.credits?.toLocaleString()}</div>
+                      <div className="pt-meta-label">
+                        {credit.status==='LISTED' ? 'LISTED (tCO₂)' : credit.status==='RETIRED' ? 'RETIRED (tCO₂)' : 'HELD (tCO₂)'}
+                      </div>
+                      <div className="pt-meta-val green">
+                        {credit.status==='LISTED'
+                          ? (credit.listedCredits||credit.credits)?.toLocaleString()
+                          : credit.status==='RETIRED'
+                          ? (credit.totalRetired||credit.credits)?.toLocaleString()
+                          : (credit.heldCredits??credit.credits)?.toLocaleString()
+                        }
+                      </div>
+                      {/* Show breakdown if both listed and held */}
+                      {credit.status==='LISTED' && credit.heldCredits > 0 && (
+                        <div style={{fontSize:9,color:'#86efac33',marginTop:2}}>
+                          +{credit.heldCredits} held
+                        </div>
+                      )}
                     </div>
                     <div className="pt-meta-cell"><div className="pt-meta-label">VINTAGE YEAR</div><div className="pt-meta-val">{credit.vintageYear}</div></div>
                     {!credit.isPending&&(
@@ -1111,15 +1513,34 @@ export default function Portfolio() {
                     <div className="pt-meta-cell"><div className="pt-meta-label">PROJECT TYPE</div><div className="pt-meta-val" style={{fontSize:10}}>{credit.projectType}</div></div>
                     <div className="pt-meta-cell"><div className="pt-meta-label">COUNTRY</div><div className="pt-meta-val">{credit.country}</div></div>
 
-                    {/* ✅ Corresponding Adjustment (Article 6) */}
+                    {/* ✅ ICVCM CCP details */}
+                    {isCCP&&(
+                      <div className="pt-meta-cell pt-meta-full">
+                        <div className="pt-meta-label">ICVCM CORE CARBON PRINCIPLES</div>
+                        <div className="pt-meta-val" style={{color:'#84cc16',fontSize:10}}>
+                          🏅 {credit.icvcm_ccp_label||'CCP Eligible'}
+                          {credit.icvcm_ccp_date&&<span style={{color:'#86efac44',marginLeft:6,fontSize:9}}>verified {credit.icvcm_ccp_date}</span>}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* ✅ Registry deep-link */}
+                    {registryVerifyUrl&&!credit.isPending&&(
+                      <div className="pt-meta-cell pt-meta-full">
+                        <div className="pt-meta-label">REGISTRY VERIFICATION</div>
+                        <a href={registryVerifyUrl} target="_blank" rel="noreferrer"
+                          style={{fontSize:10,color:'#60a5fa88',textDecoration:'none',display:'flex',alignItems:'center',gap:4,marginTop:3}}>
+                          🔗 Verify on {reg.label} ↗
+                        </a>
+                      </div>
+                    )}
+
                     {credit.correspondingAdjustment&&credit.correspondingAdjustment!=='none'&&(
                       <div className="pt-meta-cell pt-meta-full">
                         <div className="pt-meta-label">ARTICLE 6 / CORR. ADJUSTMENT</div>
                         <div className="pt-meta-val" style={{color:caInfo?.color||'#86efac44',fontSize:10}}>{caInfo?.label}</div>
                       </div>
                     )}
-
-                    {/* ✅ SDG tags */}
                     {credit.sdgTags&&credit.sdgTags.length>0&&(
                       <div className="pt-meta-cell pt-meta-full">
                         <div className="pt-meta-label">SDG CO-BENEFITS</div>
@@ -1130,25 +1551,16 @@ export default function Portfolio() {
                         </div>
                       </div>
                     )}
-
-                    {/* ✅ ACVA verifier with status */}
-                    {credit.acvaName&&(
+                    {credit.methodologyId&&(
                       <div className="pt-meta-cell pt-meta-full">
-                        <div className="pt-meta-label">ACVA VERIFIER · {verifStatus?.label||'Pending'}</div>
-                        <div className="pt-meta-val yellow" style={{fontSize:10}}>{credit.acvaName}{credit.acvaDate&&<span style={{color:'#86efac44',marginLeft:6}}>{credit.acvaDate}</span>}</div>
-                      </div>
-                    )}
-                    {credit.icmRegistryId&&(
-                      <div className="pt-meta-cell pt-meta-full">
-                        <div className="pt-meta-label">ICM REGISTRY ID</div>
-                        <div className="pt-meta-val orange" style={{fontSize:10}}>{credit.icmRegistryId}</div>
+                        <div className="pt-meta-label">METHODOLOGY</div>
+                        <div className="pt-meta-val" style={{fontSize:10,color:'#86efac88'}}>{credit.methodologyId}</div>
                       </div>
                     )}
                     <div className="pt-meta-cell pt-meta-full"><div className="pt-meta-label">REGISTRY</div><div className="pt-meta-val" style={{color:reg.color}}>{reg.label}</div></div>
                     <div className="pt-meta-cell pt-meta-full" style={{borderBottom:'none'}}><div className="pt-meta-label">SERIAL / CERTIFICATE NO.</div><div className="pt-meta-val blue" style={{fontSize:10}}>{credit.serialNumber}</div></div>
                   </div>
 
-                  {/* India CCTS price band */}
                   {!credit.isPending&&(
                     <div style={{margin:'0 14px 8px',padding:'6px 10px',background:'#0a0f0c',borderRadius:6,border:'1px solid #0d1f11',fontSize:9,color:'#86efac33',display:'flex',justifyContent:'space-between'}}>
                       <span>India CCTS band: ₹{INDIA_CCTS_FLOOR}–₹{INDIA_CCTS_CEILING}/t</span>
@@ -1179,10 +1591,20 @@ export default function Portfolio() {
                     <div className="pt-card-actions">
                       {credit.status==='LISTED'
                         ? <button className="pt-act-btn delist" onClick={()=>handleDelist(credit)} disabled={loading.tx}>DELIST</button>
-                        : <button className="pt-act-btn sell" onClick={()=>{setShowList(credit);setListPrice(refPrice);setListQty(String(credit.credits));setListPriceWarn('');}} disabled={loading.tx}>LIST</button>
+                        : <button className="pt-act-btn sell"
+                            onClick={()=>{setShowList(credit);setListPrice(refPrice);setListQty(String(credit.credits));setListPriceWarn('');}}
+                            disabled={loading.tx||!isMinted}
+                            title={!isMinted?'Awaiting on-chain mint':'List on marketplace'}>
+                            LIST
+                          </button>
                       }
                       <button className="pt-act-btn market" onClick={()=>navigate('/carbon-credits')} disabled={loading.tx}>MARKET</button>
-                      <button className="pt-act-btn retire" onClick={()=>setShowRetire(credit)} disabled={loading.tx}>RETIRE</button>
+                      <button className="pt-act-btn retire"
+                        onClick={()=>setShowRetire(credit)}
+                        disabled={loading.tx||!isMinted}
+                        title={!isMinted?'Awaiting on-chain mint':'Retire credit'}>
+                        RETIRE
+                      </button>
                     </div>
                   ) : (
                     <div className="pt-card-actions">
@@ -1200,10 +1622,9 @@ export default function Portfolio() {
         </div>
       </div>
 
-      {/* TX banner */}
       {txPending&&<div className="pt-tx-banner"><div className="pt-spinner"/>{txPending}</div>}
 
-      {/* ── Submission Form Modal ── */}
+      {/* Submission Form Modal */}
       {showForm&&(
         <div className="pt-overlay" onClick={e=>e.target===e.currentTarget&&!submitting&&setShowForm(false)}>
           <div className="pt-modal">
@@ -1213,7 +1634,7 @@ export default function Portfolio() {
             </div>
             <div className="pt-modal-body">
               <div style={{fontSize:10,color:'#f59e0b88',marginBottom:20,padding:'10px 12px',background:'#110a00',borderRadius:6,border:'1px solid #f59e0b22',lineHeight:1.7}}>
-                ⏳ Reviewed by compliance team within <strong style={{color:'#f59e0b'}}>1–2 business days</strong>. Admin verifies your credit against the original registry before tokenization.
+                ⏳ Reviewed by compliance team within <strong style={{color:'#f59e0b'}}>1–2 business days</strong>.
               </div>
               <div className="pt-form-grid">
 
@@ -1224,7 +1645,7 @@ export default function Portfolio() {
                 </div>
 
                 <div className="pt-field">
-                  <label className="pt-label">PINCODE (AUTO-DETECT LOCATION)</label>
+                  <label className="pt-label">PINCODE (AUTO-DETECT)</label>
                   <input className={`pt-input${pincodeError?' err':''}`} placeholder="e.g. 422013" maxLength={6} value={form.pincode||''} onChange={e=>handlePincode(e.target.value)}/>
                   {pincodeLoading&&<span style={{fontSize:9,color:'#60a5fa88'}}>⟳ Detecting...</span>}
                   {pincodeError&&<span className="pt-err">{pincodeError}</span>}
@@ -1232,7 +1653,7 @@ export default function Portfolio() {
                 </div>
 
                 <div className="pt-field">
-                  <label className="pt-label">LOCATION (EDITABLE)</label>
+                  <label className="pt-label">LOCATION</label>
                   <input className={`pt-input${formErrors.location?' err':''}`} placeholder="e.g. Igatpuri, Nashik, Maharashtra" value={form.location} onChange={e=>setForm({...form,location:e.target.value})}/>
                   {formErrors.location&&<span className="pt-err">{formErrors.location}</span>}
                 </div>
@@ -1256,7 +1677,7 @@ export default function Portfolio() {
 
                 <div className="pt-field">
                   <label className="pt-label">PROJECT ID</label>
-                  <input className={`pt-input${formErrors.projectId?' err':''}`} placeholder="e.g. VCS-1234 or BEE-IN-0042" value={form.projectId} onChange={e=>setForm({...form,projectId:e.target.value})}/>
+                  <input className={`pt-input${formErrors.projectId?' err':''}`} placeholder="e.g. VCS-1234" value={form.projectId} onChange={e=>setForm({...form,projectId:e.target.value})}/>
                   {formErrors.projectId&&<span className="pt-err">{formErrors.projectId}</span>}
                 </div>
 
@@ -1264,10 +1685,10 @@ export default function Portfolio() {
                   <label className="pt-label">PROJECT TYPE</label>
                   <select className={`pt-input${formErrors.projectType?' err':''}`} value={form.projectType} onChange={e=>setForm({...form,projectType:e.target.value})}>
                     <option value="">Select type</option>
-                    <optgroup label="── BEE India CCTS (Official methodologies) ──">
+                    <optgroup label="── BEE India CCTS ──">
                       {PROJECT_TYPES.filter(t=>t.includes('(BEE)')).map(t=><option key={t} value={t}>{t}</option>)}
                     </optgroup>
-                    <optgroup label="── Global VCM types ──">
+                    <optgroup label="── Global VCM ──">
                       {PROJECT_TYPES.filter(t=>!t.includes('(BEE)')).map(t=><option key={t} value={t}>{t}</option>)}
                     </optgroup>
                   </select>
@@ -1292,7 +1713,7 @@ export default function Portfolio() {
                   {formErrors.vintageYear&&<span className="pt-err">{formErrors.vintageYear}</span>}
                   {form.vintageYear&&!isNaN(form.vintageYear)&&(
                     <span style={{fontSize:9,color:vintagePenalty(+form.vintageYear)>0?'#facc1566':'#22c55e66'}}>
-                      {vintagePenalty(+form.vintageYear)>0?`↓ ${vintagePenalty(+form.vintageYear)}% vintage depreciation`:'✓ Current vintage — no depreciation'}
+                      {vintagePenalty(+form.vintageYear)>0?`↓ ${vintagePenalty(+form.vintageYear)}% vintage depreciation`:'✓ No depreciation'}
                     </span>
                   )}
                 </div>
@@ -1309,10 +1730,19 @@ export default function Portfolio() {
                   {formErrors.serialNumber&&<span className="pt-err">{formErrors.serialNumber}</span>}
                 </div>
 
-                {/* ── COMPLIANCE & STANDARDS SECTION ── */}
+                <div className="pt-field">
+                  <label className="pt-label">METHODOLOGY ID <span style={{color:'#86efac22'}}>(optional)</span></label>
+                  <input className="pt-input" placeholder="e.g. VM0007, ACM0002" value={form.methodologyId} onChange={e=>setForm({...form,methodologyId:e.target.value})}/>
+                </div>
+
+                <div className="pt-field">
+                  <label className="pt-label">REGISTRY LINK <span style={{color:'#86efac22'}}>(optional)</span></label>
+                  <input className="pt-input" placeholder="e.g. https://registry.verra.org/..." value={form.registryLink} onChange={e=>setForm({...form,registryLink:e.target.value})}/>
+                </div>
+
+                {/* ── COMPLIANCE SECTION ── */}
                 <div className="pt-section-divider">COMPLIANCE, STANDARDS & ARTICLE 6</div>
 
-                {/* Credit type */}
                 <div className="pt-field pt-form-full">
                   <label className="pt-label">CREDIT TYPE</label>
                   <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
@@ -1326,22 +1756,15 @@ export default function Portfolio() {
                   </div>
                 </div>
 
-                {/* ✅ Corresponding Adjustment (Article 6) */}
                 <div className="pt-field pt-form-full">
                   <label className="pt-label">CORRESPONDING ADJUSTMENT (PARIS AGREEMENT ARTICLE 6)</label>
                   <select className="pt-input" value={form.correspondingAdjustment} onChange={e=>setForm({...form,correspondingAdjustment:e.target.value})}>
                     {CA_OPTIONS.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
                   </select>
-                  <span style={{fontSize:9,color:'#86efac22',marginTop:4}}>
-                    Credits without a CA cannot be used for NDC compliance claims under Art. 6.2/6.4
-                  </span>
                 </div>
 
-                {/* ✅ SDG tags — required for GS, optional for others */}
                 <div className="pt-field pt-form-full">
-                  <label className="pt-label">
-                    SDG CO-BENEFITS {form.standard==='GS'?<span style={{color:'#f59e0b'}}> — REQUIRED FOR GOLD STANDARD</span>:<span style={{color:'#86efac22'}}>(OPTIONAL)</span>}
-                  </label>
+                  <label className="pt-label">SDG CO-BENEFITS {form.standard==='GS'?<span style={{color:'#f59e0b'}}> — REQUIRED</span>:<span style={{color:'#86efac22'}}>(OPTIONAL)</span>}</label>
                   <div className="pt-sdg-grid">
                     {SDG_OPTIONS.map(s=>(
                       <div key={s.id} className={`pt-sdg-tag${form.sdgTags.includes(s.id)?' on':''}`} onClick={()=>toggleSdg(s.id)}>
@@ -1353,9 +1776,64 @@ export default function Portfolio() {
                   {formErrors.sdgTags&&<span className="pt-err">{formErrors.sdgTags}</span>}
                 </div>
 
-                {/* ACVA verifier + status */}
+                {/* ── ICVCM SECTION ── */}
+                <div className="pt-section-divider">ICVCM CORE CARBON PRINCIPLES (CCP)</div>
+
+                <div className="pt-field pt-form-full">
+                  <label className="pt-label">ICVCM CCP ELIGIBILITY</label>
+                  <div className="pt-toggle" onClick={()=>setForm({...form,icvcmCcpEligible:!form.icvcmCcpEligible})}>
+                    <div className={`pt-toggle-box${form.icvcmCcpEligible?' on':''}`}><div className="pt-toggle-knob"/></div>
+                    <div>
+                      <div style={{fontSize:11,color:form.icvcmCcpEligible?'#84cc16':'#86efac44',fontWeight:500}}>
+                        {form.icvcmCcpEligible?'🏅 ICVCM CCP Eligible — meets global integrity standards':'Not CCP assessed'}
+                      </div>
+                      <div style={{fontSize:9,color:'#86efac22',marginTop:2}}>Integrity Council for Voluntary Carbon Markets — global quality baseline from 2023</div>
+                    </div>
+                  </div>
+                </div>
+
+                {form.icvcmCcpEligible&&(
+                  <>
+                    <div className="pt-field">
+                      <label className="pt-label">CCP LABEL</label>
+                      <input className="pt-input" placeholder="e.g. CCP-Approved, CCP-Assessed" value={form.icvcmCcpLabel} onChange={e=>setForm({...form,icvcmCcpLabel:e.target.value})}/>
+                    </div>
+                    <div className="pt-field">
+                      <label className="pt-label">CCP VERIFICATION DATE</label>
+                      <input className="pt-input" type="date" value={form.icvcmCcpDate} onChange={e=>setForm({...form,icvcmCcpDate:e.target.value})}/>
+                    </div>
+                  </>
+                )}
+
                 <div className="pt-field">
-                  <label className="pt-label">ACVA VERIFIER NAME <span style={{color:'#86efac22'}}>(OPTIONAL)</span></label>
+                  <label className="pt-label">ADDITIONALITY TYPE</label>
+                  <select className="pt-input" value={form.additionalityType} onChange={e=>setForm({...form,additionalityType:e.target.value})}>
+                    {ADDITIONALITY_OPTIONS.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                </div>
+
+                <div className="pt-field">
+                  <label className="pt-label">PERMANENCE RATING</label>
+                  <select className="pt-input" value={form.permanenceRating} onChange={e=>setForm({...form,permanenceRating:e.target.value})}>
+                    {PERMANENCE_OPTIONS.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                </div>
+
+                <div className="pt-field pt-form-full">
+                  <label className="pt-label">CO-BENEFITS VERIFIED BY THIRD PARTY</label>
+                  <div className="pt-toggle" onClick={()=>setForm({...form,coBenefitsVerified:!form.coBenefitsVerified})}>
+                    <div className={`pt-toggle-box${form.coBenefitsVerified?' on':''}`}><div className="pt-toggle-knob"/></div>
+                    <div style={{fontSize:11,color:form.coBenefitsVerified?'#22c55e':'#86efac44'}}>
+                      {form.coBenefitsVerified?'✓ Co-benefits independently verified':'Not verified'}
+                    </div>
+                  </div>
+                </div>
+
+                {/* ── OTHER FIELDS ── */}
+                <div className="pt-section-divider">VERIFICATION & BANKING</div>
+
+                <div className="pt-field">
+                  <label className="pt-label">ACVA VERIFIER <span style={{color:'#86efac22'}}>(OPTIONAL)</span></label>
                   <input className="pt-input" placeholder="e.g. Bureau Veritas, DNV, TÜV SÜD" value={form.acvaName} onChange={e=>setForm({...form,acvaName:e.target.value})}/>
                 </div>
 
@@ -1374,32 +1852,26 @@ export default function Portfolio() {
                 <div className="pt-field">
                   <label className="pt-label">ICM REGISTRY ID <span style={{color:'#86efac22'}}>(OPTIONAL)</span></label>
                   <input className="pt-input" placeholder="e.g. ICM-IN-2025-00142" value={form.icmRegistryId} onChange={e=>setForm({...form,icmRegistryId:e.target.value})}/>
-                  <span style={{fontSize:9,color:'#86efac22'}}>Official BEE/GCI registry ID — available mid-2026</span>
                 </div>
 
                 <div className="pt-field">
-                  <label className="pt-label">BANKING STATUS (CCTS)</label>
+                  <label className="pt-label">BANKING STATUS</label>
                   <select className="pt-input" value={form.bankingStatus} onChange={e=>setForm({...form,bankingStatus:e.target.value})}>
                     <option value="available">Available — ready for trading / retirement</option>
                     <option value="banked">Banked — reserved for future compliance cycle</option>
                   </select>
                 </div>
 
-                {/* CBAM */}
                 <div className="pt-field pt-form-full">
-                  <label className="pt-label">CBAM ELIGIBILITY (EU CARBON BORDER ADJUSTMENT)</label>
+                  <label className="pt-label">CBAM ELIGIBILITY (EU)</label>
                   <div className="pt-toggle" onClick={()=>setForm({...form,cbamEligible:!form.cbamEligible})}>
                     <div className={`pt-toggle-box${form.cbamEligible?' on':''}`}><div className="pt-toggle-knob"/></div>
-                    <div>
-                      <div style={{fontSize:11,color:form.cbamEligible?'#60a5fa':'#86efac44',fontWeight:500}}>
-                        {form.cbamEligible?'✓ CBAM Eligible — EU Article 7 compliant':'Not CBAM eligible'}
-                      </div>
-                      <div style={{fontSize:9,color:'#86efac22',marginTop:2}}>Required for Indian exporters to the EU from 2026 under CBAM transition regulations</div>
+                    <div style={{fontSize:11,color:form.cbamEligible?'#60a5fa':'#86efac44'}}>
+                      {form.cbamEligible?'✓ CBAM Eligible — EU Article 7 compliant':'Not CBAM eligible'}
                     </div>
                   </div>
                 </div>
 
-                {/* Document upload */}
                 <div className="pt-field pt-form-full">
                   <label className="pt-label">OWNERSHIP PROOF DOCUMENT</label>
                   <div className={`pt-upload-box${formErrors.docFile?' err':''}`}>
@@ -1418,17 +1890,73 @@ export default function Portfolio() {
             <div className="pt-modal-foot">
               <button className="pt-btn-secondary" onClick={()=>{setShowForm(false);setFormErrors({});setPincodeError('');setForm(emptyForm);}} disabled={submitting}>CANCEL</button>
               <button className="pt-btn-primary" onClick={handleRegister} disabled={submitting}>
-                {submitting ? `⟳ ${txPending||'SUBMITTING...'}` : 'SUBMIT FOR VERIFICATION →'}
+                {submitting?`⟳ ${txPending||'SUBMITTING...'}`:'SUBMIT FOR VERIFICATION →'}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ── Retire Modal ── */}
       {showRetire&&<RetireModal credit={showRetire} onConfirm={handleRetireConfirm} onClose={()=>setShowRetire(null)} loading={loading.tx}/>}
 
-      {/* ── List Modal ── */}
+      {retireSteps?.show&&(
+        <div className="pt-overlay" onClick={e=>e.target===e.currentTarget&&setRetireSteps(null)}>
+          <div className="pt-modal" style={{maxWidth:480}}>
+            <div className="pt-modal-hdr">
+              <span className="pt-modal-title">🌿 RETIREMENT COMPLETE</span>
+            </div>
+            <div className="pt-modal-body">
+              {[
+                {label:`${Number(retireSteps.qty).toLocaleString()} tCO₂e permanently burned on Ethereum Sepolia`},
+                {label:`Token destroyed — credits cannot be reused or transferred`},
+                {label:`Certificate ${retireSteps.certId} issued and saved to registry`},
+                {label:`Offset recorded for Scope ${retireSteps.scope} · ${new Date(retireSteps.retiredAt).getFullYear()} · ${retireSteps.corporateData?.reportingStandard||'GHG Protocol'}`},
+              ].map(({label},i)=>(
+                <div key={i} style={{display:'flex',alignItems:'flex-start',gap:12,padding:'12px 14px',borderRadius:8,marginBottom:8,background:'#051409',border:'1px solid #22c55e22'}}>
+                  <div style={{width:22,height:22,borderRadius:'50%',background:'#0d2e1f',border:'1px solid #22c55e44',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,fontSize:11,color:'#22c55e'}}>✓</div>
+                  <span style={{fontSize:11,color:'#86efac88',lineHeight:1.6}}>{label}</span>
+                </div>
+              ))}
+              {retireSteps.corporateData?.beneficiaryEntity&&(
+                <div style={{padding:'10px 14px',background:'#0a1628',border:'1px solid #60a5fa22',borderRadius:8,marginTop:8,fontSize:10,color:'#60a5fa88'}}>
+                  🏢 Retired on behalf of: <strong style={{color:'#60a5fa'}}>{retireSteps.corporateData.beneficiaryEntity}</strong>
+                  {retireSteps.corporateData.beneficiaryGstin&&<span style={{marginLeft:8,color:'#60a5fa66'}}>GSTIN: {retireSteps.corporateData.beneficiaryGstin}</span>}
+                </div>
+              )}
+              {retireSteps.txHash&&(
+                <div style={{marginTop:12,padding:'10px 14px',background:'#060e18',border:'1px solid #60a5fa22',borderRadius:8}}>
+                  <div style={{fontSize:8,color:'#60a5fa66',letterSpacing:'.12em',marginBottom:4}}>BLOCKCHAIN TX HASH</div>
+                  <a href={`https://sepolia.etherscan.io/tx/${retireSteps.txHash}`} target="_blank" rel="noreferrer"
+                    style={{fontSize:10,color:'#60a5fa',fontFamily:'monospace',wordBreak:'break-all',textDecoration:'none'}}>
+                    {retireSteps.txHash}
+                  </a>
+                </div>
+              )}
+            </div>
+            <div className="pt-modal-foot">
+              <button className="pt-btn-secondary" onClick={()=>setRetireSteps(null)}>CLOSE</button>
+              <button className="pt-btn-primary" onClick={()=>{
+                setShowCert({
+                  ...retireSteps.credit,
+                  txHash:retireSteps.txHash, retiredQty:retireSteps.qty,
+                  retireScope:retireSteps.scope, certId:retireSteps.certId,
+                  retiredAt:retireSteps.retiredAt,
+                  beneficiaryName:   retireSteps.corporateData?.beneficiaryName,
+                  beneficiaryEntity: retireSteps.corporateData?.beneficiaryEntity,
+                  beneficiaryGstin:  retireSteps.corporateData?.beneficiaryGstin,
+                  reportingStandard: retireSteps.corporateData?.reportingStandard,
+                  purpose:           retireSteps.corporateData?.purpose,
+                });
+                setRetireSteps(null);
+              }}>
+                📜 VIEW CERTIFICATE →
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* List Modal */}
       {showList&&(
         <div className="pt-overlay" onClick={e=>e.target===e.currentTarget&&setShowList(null)}>
           <div className="pt-modal" style={{maxWidth:440}}>
@@ -1443,14 +1971,9 @@ export default function Portfolio() {
               </div>
               {vintagePenalty(showList.vintageYear)>0&&(
                 <div style={{padding:'8px 12px',background:'#110e00',border:'1px solid #facc1511',borderRadius:6,marginBottom:10,fontSize:10,color:'#facc1555'}}>
-                  ↓ {vintagePenalty(showList.vintageYear)}% vintage depreciation applied to display price
+                  ↓ {vintagePenalty(showList.vintageYear)}% vintage depreciation applied
                 </div>
               )}
-              <div style={{padding:'8px 12px',background:'#0a0f0c',border:'1px solid #0d1f11',borderRadius:6,marginBottom:14,fontSize:10,color:'#86efac44',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-                <span>India CCTS guidance band</span>
-                <span style={{color:'#22c55e88',fontWeight:700}}>₹{INDIA_CCTS_FLOOR}–₹{INDIA_CCTS_CEILING}/t</span>
-              </div>
-
               <div className="pt-field" style={{marginBottom:14}}>
                 <label className="pt-label">QUANTITY TO LIST (tCO₂)</label>
                 <div className="pt-qty-row">
@@ -1458,22 +1981,14 @@ export default function Portfolio() {
                   <input className="pt-input" type="number" min="1" max={showList.credits} style={{width:80}} value={listQty||showList.credits} onChange={e=>setListQty(e.target.value)}/>
                 </div>
               </div>
-
               <div className="pt-field" style={{marginBottom:4}}>
                 <label className="pt-label">ASKING PRICE PER CREDIT (₹)</label>
-                <input className="pt-input" type="number" placeholder="e.g. 850" value={listPrice}
-                  onChange={e=>handleListPriceChange(e.target.value,showList)}/>
+                <input className="pt-input" type="number" placeholder="e.g. 850" value={listPrice} onChange={e=>handleListPriceChange(e.target.value,showList)}/>
                 <span style={{fontSize:9,color:'#86efac22',marginTop:4}}>
-                  Suggested: ₹{getReferencePrice(showList.projectType,showList.standard,showList.vintageYear).toLocaleString()} (market reference)
+                  Suggested: ₹{getReferencePrice(showList.projectType,showList.standard,showList.vintageYear).toLocaleString()}
                 </span>
               </div>
-              {/* ✅ CCTS band warning for compliance credits */}
-              {listPriceWarn&&(
-                <div style={{padding:'8px 12px',background:'#110a00',border:'1px solid #f59e0b22',borderRadius:6,marginBottom:10,fontSize:9,color:'#f59e0b88'}}>
-                  {listPriceWarn}
-                </div>
-              )}
-
+              {listPriceWarn&&<div style={{padding:'8px 12px',background:'#110a00',border:'1px solid #f59e0b22',borderRadius:6,marginBottom:10,fontSize:9,color:'#f59e0b88'}}>{listPriceWarn}</div>}
               {listPrice&&!isNaN(listPrice)&&+listPrice>0&&(
                 <div style={{background:'#040706',borderRadius:6,padding:'10px 12px',fontSize:10,color:'#86efac66',border:'1px solid #0d1f11',marginTop:10}}>
                   <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}>
@@ -1484,15 +1999,9 @@ export default function Portfolio() {
                     <span>Platform fee (0.5%)</span>
                     <span style={{color:'#facc1566'}}>₹{(+listPrice*(+(listQty||showList.credits))*0.005).toLocaleString()}</span>
                   </div>
-                  <div style={{display:'flex',justifyContent:'space-between',paddingTop:6,marginTop:4,borderTop:'1px solid #0d1f11'}}>
+                  <div style={{display:'flex',justifyContent:'space-between',paddingTop:6,borderTop:'1px solid #0d1f11'}}>
                     <span>On-chain price</span>
-                    <span style={{color:'#60a5fa66'}}>
-                      {(+listPrice/(ethPriceInr||210000)).toFixed(6)} ETH/credit
-                      {ethPriceInr
-                        ? <span style={{fontSize:8,color:'#60a5fa33',marginLeft:4}}>@ live ₹{ethPriceInr.toLocaleString()}</span>
-                        : <span style={{fontSize:8,color:'#f59e0b33',marginLeft:4}}>est. rate</span>
-                      }
-                    </span>
+                    <span style={{color:'#60a5fa66'}}>{(+listPrice/(ethPriceInr||210000)).toFixed(6)} ETH/credit</span>
                   </div>
                 </div>
               )}
@@ -1507,10 +2016,10 @@ export default function Portfolio() {
         </div>
       )}
 
-      {/* ── Certificate Modal ── */}
+      {/* Certificate Modal */}
       {showCert&&(
         <div className="pt-overlay" onClick={e=>e.target===e.currentTarget&&setShowCert(null)}>
-          <div className="pt-modal" style={{maxWidth:640}}>
+          <div className="pt-modal" style={{maxWidth:680}}>
             <div className="pt-modal-hdr">
               <span className="pt-modal-title">📜 RETIREMENT CERTIFICATE</span>
               <button className="pt-modal-close" onClick={()=>setShowCert(null)}>✕</button>
@@ -1522,7 +2031,6 @@ export default function Portfolio() {
         </div>
       )}
 
-      {/* Toast */}
       {toast&&(
         <div className="pt-toast" style={{border:`1px solid ${toast.type==='error'?'#f8717122':'#22c55e22'}`,color:toast.type==='error'?'#f8717199':'#22c55e88'}}>
           {toast.msg}

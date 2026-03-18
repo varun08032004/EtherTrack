@@ -50,9 +50,7 @@ const Header = () => {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  // ── Auto-bind wallet to account after MetaMask connects ──────
   const silentBind = async (walletAddress) => {
-    // Skip if already bound
     if (dbUser?.wallet_address) return;
     if (bindDone) return;
 
@@ -75,19 +73,15 @@ const Header = () => {
       setBindDone(true);
       console.log('✅ Wallet auto-bound to account');
     } catch (e) {
-      // Non-fatal — wallet still works for blockchain, just not bound in DB
       console.warn('Auto wallet bind skipped:', e?.message || e);
     } finally {
       setBinding(false);
     }
   };
 
-  // ── Connect + auto-bind ───────────────────────────────────────
   const handleConnect = async () => {
     try {
-      await connect(); // existing useWallet connect
-      // address updates asynchronously via useWallet hook
-      // so we read from MetaMask directly for the bind call
+      await connect();
       if (window.ethereum) {
         const accounts = await window.ethereum.request({ method: 'eth_accounts' });
         if (accounts?.[0]) silentBind(accounts[0]);
@@ -97,7 +91,6 @@ const Header = () => {
     }
   };
 
-  // Also bind if wallet already connected when component mounts
   useEffect(() => {
     if (isConnected && address && !dbUser?.wallet_address && !bindDone) {
       silentBind(address);
@@ -113,16 +106,17 @@ const Header = () => {
 
   const isActive = (path) => location.pathname === path;
 
+  // ✅ TEAM link added
   const navLinks = [
     { to: '/dashboard',         label: 'DASHBOARD' },
-    { to: '/portfolio',         label: 'PORTFOLIO' },
-    { to: '/carbon-credits',    label: 'MARKET'    },
-    { to: '/emission-tracking', label: 'EMISSIONS' },
-    { to: '/trading-history',   label: 'HISTORY'   },
-    { to: '/profile',           label: 'PROFILE'   },
+    { to: '/portfolio',         label: 'PORTFOLIO'  },
+    { to: '/carbon-credits',    label: 'MARKET'     },
+    { to: '/emission-tracking', label: 'EMISSIONS'  },
+    { to: '/trading-history',   label: 'HISTORY'    },
+    { to: '/team',              label: 'TEAM'       },
+    { to: '/profile',           label: 'PROFILE'    },
   ];
 
-  // Wallet already bound badge
   const walletBound = !!dbUser?.wallet_address || bindDone;
 
   return (
@@ -308,8 +302,6 @@ const Header = () => {
         .et-header-spacer { height: 60px; }
       `}</style>
 
-      C:\Users\ASUS\Desktop\EtherTrack\src\Images\et_logo_bg.png
-
       <header className={`et-header${scrolled ? ' scrolled' : ''}`}>
         <div className="et-header-inner">
 
@@ -383,7 +375,6 @@ const Header = () => {
                     {isConnected
                       ? <>
                           {`WALLET · ${shortAddress}`}
-                          {/* Show bound indicator */}
                           {walletBound && <span className="et-bind-pill">BOUND</span>}
                           {binding && <span className="et-bind-pill" style={{color:'#facc15',borderColor:'#facc1522'}}>BINDING...</span>}
                         </>
