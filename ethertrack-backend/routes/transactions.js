@@ -8,12 +8,12 @@ router.get('/stats', async (req, res) => {
   try {
     const [trades, retired, volume, users] = await Promise.all([
       query(`SELECT COUNT(*) FROM registry_transactions
-             WHERE tx_type IN ('buy','sell')
-                OR type::text IN ('buy','sell')`),
+             WHERE tx_type IN ('BUY','SELL','buy','sell')
+                OR type::text IN ('BUY','SELL','buy','sell')`),
       query(`SELECT COALESCE(SUM(retired_credits),0) AS total FROM carbon_batches`),
       query(`SELECT COALESCE(SUM(total_price_inr),0) AS total
              FROM registry_transactions
-             WHERE tx_type IN ('buy','sell')`),
+             WHERE tx_type IN ('BUY','SELL','buy','sell')`),
       query(`SELECT COUNT(*) FROM users WHERE kyc_verified=TRUE`),
     ]);
     res.json({
@@ -104,7 +104,7 @@ router.get('/retirements', authenticate, async (req, res) => {
          rt.created_at             AS retired_at
        FROM registry_transactions rt
        WHERE (rt.from_user_id=$1 OR rt.user_id=$1)
-         AND (rt.tx_type='retire' OR rt.type::text='retire')
+         AND (rt.tx_type='RETIRE' OR rt.type::text='RETIRE')
        ORDER BY rt.created_at DESC NULLS LAST`,
       [req.user.id]
     );
@@ -149,10 +149,10 @@ router.post('/retirements', authenticate, async (req, res) => {
     const certId = `CERT-${(tokenId||'').toString().slice(0,8)||'XXXXXX'}-${Date.now().toString(36).toUpperCase()}`;
     const { rows } = await query(
       `INSERT INTO registry_transactions
-         (user_id, from_user_id, tx_hash, tx_type, token_id, amount,
+         (user_id, from_user_id, tx_hash, tx_type, type, token_id, amount,
           project_name, standard, cert_id, beneficiary,
           serial_number, developer, location, project_type, total_price_inr)
-       VALUES ($1,$1,$2,'retire',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,0)
+       VALUES ($1,$1,$2,'RETIRE','RETIRE',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,0)
        ON CONFLICT (tx_hash) DO NOTHING
        RETURNING id, cert_id`,
       [
