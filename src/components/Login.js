@@ -20,12 +20,12 @@ const Login = () => {
     setLoading(true); setError(""); setMessage("");
     try {
       const userCredential = await signInWithEmailAndPassword(auth, email, password);
-      // ← Only change from original: pass firebaseUser as second arg for backend sync
-      handleLogin(
+      await handleLogin(                        // ✅ awaited — dbUser is set before navigate
         { email: userCredential.user.email },
         userCredential.user
       );
-      navigate("/dashboard");
+      navigate("/dashboard");                   // ✅ only fires after auth state is fully settled
+                                                // ✅ no setLoading(false) here — component unmounts, no flash
     } catch (err) {
       switch (err.code) {
         case "auth/invalid-credential":   setError("Incorrect email or password."); break;
@@ -34,7 +34,8 @@ const Login = () => {
         case "auth/too-many-requests":    setError("Too many attempts. Reset your password."); break;
         default:                          setError("Login failed. Please try again.");
       }
-    } finally { setLoading(false); }
+      setLoading(false);                        // ✅ only resets on error, not on success
+    }
   };
 
   const handleForgotPassword = async () => {
@@ -54,7 +55,6 @@ const Login = () => {
 
   const handleKeyDown = (e) => { if (e.key === "Enter") handleLoginClick(); };
 
-  // ── JSX identical to original ─────────────────────────────────
   return (
     <>
       <style>{`

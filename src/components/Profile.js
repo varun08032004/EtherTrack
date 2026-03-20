@@ -9,7 +9,6 @@ const Profile = () => {
   const navigate = useNavigate();
   const [walletCopied, setWalletCopied] = useState(false);
 
-  // ── Source of truth: dbUser (PostgreSQL) ─────────────────────
   const name        = dbUser?.full_name    || user?.name  || '—';
   const email       = dbUser?.email        || user?.email || '—';
   const company     = dbUser?.company_name || '—';
@@ -27,11 +26,10 @@ const Profile = () => {
     ? name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2)
     : '?';
 
-  // ── Real stats from PortfolioContext ──────────────────────────
-  const totalCreditsOwned  = stats?.totalCredits   || 0;
-  const totalTradesCount   = tradeHistory?.length   || 0;
-  const totalRetiredCount  = myCredits?.reduce((s, c) => s + (c.totalRetired || 0), 0) || 0;
-  const portfolioValue     = stats?.totalValue      || 0;
+  const totalCreditsOwned = stats?.totalCredits  || 0;
+  const totalTradesCount  = tradeHistory?.length  || 0;
+  const totalRetiredCount = myCredits?.reduce((s, c) => s + (c.totalRetired || 0), 0) || 0;
+  const portfolioValue    = stats?.totalValue     || 0;
 
   const copyWallet = () => {
     if (!wallet) return;
@@ -48,20 +46,14 @@ const Profile = () => {
       background-image:linear-gradient(rgba(34,197,94,0.025) 1px,transparent 1px),linear-gradient(90deg,rgba(34,197,94,0.025) 1px,transparent 1px);
       background-size:44px 44px;pointer-events:none;}
     .ep-wrap{position:relative;z-index:1;max-width:860px;margin:0 auto;padding:40px 24px 80px;}
-
-    /* Header */
     .ep-label{font-size:9px;color:#4ade8077;letter-spacing:.2em;margin-bottom:6px;}
     .ep-title{font-size:28px;font-weight:500;color:#f0fdf4;margin-bottom:2px;letter-spacing:.02em;}
     .ep-title span{color:#22c55e;}
     .ep-sub{font-size:10px;color:#4ade8066;letter-spacing:.1em;margin-bottom:32px;}
-
-    /* Hero card */
     .ep-hero{background:#080c0a;border:1px solid #0f2a1a;border-radius:16px;padding:28px 32px;
-      display:flex;align-items:center;gap:24px;margin-bottom:16px;
-      animation:fadeUp .35s ease both;}
+      display:flex;align-items:center;gap:24px;margin-bottom:16px;animation:fadeUp .35s ease both;}
     .ep-avatar{width:76px;height:76px;border-radius:50%;flex-shrink:0;
-      background:linear-gradient(135deg,#16a34a,#052e16);
-      border:2px solid #22c55e44;
+      background:linear-gradient(135deg,#16a34a,#052e16);border:2px solid #22c55e44;
       display:flex;align-items:center;justify-content:center;
       font-size:26px;font-weight:500;color:#22c55e;position:relative;}
     .ep-avatar-ring{position:absolute;inset:-4px;border-radius:50%;
@@ -70,8 +62,7 @@ const Profile = () => {
     .ep-name{font-size:22px;font-weight:500;color:#f0fdf4;margin-bottom:3px;letter-spacing:.01em;}
     .ep-email{font-size:11px;color:#86efac88;margin-bottom:10px;}
     .ep-badges{display:flex;gap:6px;flex-wrap:wrap;align-items:center;}
-    .ep-badge{display:inline-flex;align-items:center;gap:4px;font-size:9px;
-      padding:3px 9px;border-radius:4px;letter-spacing:.08em;}
+    .ep-badge{display:inline-flex;align-items:center;gap:4px;font-size:9px;padding:3px 9px;border-radius:4px;letter-spacing:.08em;}
     .ep-badge-kyc-ok{background:#0d2e1f;color:#22c55e;border:1px solid #22c55e33;}
     .ep-badge-kyc-no{background:#1a1500;color:#facc15;border:1px solid #facc1533;cursor:pointer;}
     .ep-badge-chain{background:#0a1628;color:#60a5faaa;border:1px solid #60a5fa22;}
@@ -81,73 +72,41 @@ const Profile = () => {
       background:transparent;color:#22c55e;cursor:pointer;
       font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.08em;transition:all .2s;}
     .ep-edit-btn:hover{background:#0d2e1f;border-color:#22c55e;}
-
-    /* Stats grid */
-    .ep-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;
-      animation:fadeUp .35s ease .06s both;}
-    .ep-stat{background:#080c0a;border:1px solid #0f2a1a;border-radius:12px;padding:18px 14px;text-align:center;
-      transition:border-color .2s;cursor:default;}
+    .ep-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;animation:fadeUp .35s ease .06s both;}
+    .ep-stat{background:#080c0a;border:1px solid #0f2a1a;border-radius:12px;padding:18px 14px;text-align:center;transition:border-color .2s;cursor:default;}
     .ep-stat:hover{border-color:#22c55e22;}
     .ep-stat-icon{font-size:22px;margin-bottom:8px;}
     .ep-stat-val{font-size:20px;font-weight:500;margin-bottom:3px;letter-spacing:.02em;}
     .ep-stat-lbl{font-size:8px;color:#86efac66;letter-spacing:.12em;}
-
-    /* Info table */
-    .ep-table{background:#080c0a;border:1px solid #0f2a1a;border-radius:12px;
-      overflow:hidden;margin-bottom:16px;animation:fadeUp .35s ease .12s both;}
-    .ep-table-hdr{padding:14px 20px;border-bottom:1px solid #0f2a1a;
-      font-size:10px;color:#f0fdf4;font-weight:500;letter-spacing:.12em;
-      display:flex;align-items:center;justify-content:space-between;}
-    .ep-row{display:flex;align-items:center;justify-content:space-between;
-      padding:13px 20px;border-bottom:1px solid #0f2a1a0a;transition:background .15s;}
+    .ep-table{background:#080c0a;border:1px solid #0f2a1a;border-radius:12px;overflow:hidden;margin-bottom:16px;animation:fadeUp .35s ease .12s both;}
+    .ep-table-hdr{padding:14px 20px;border-bottom:1px solid #0f2a1a;font-size:10px;color:#f0fdf4;font-weight:500;letter-spacing:.12em;display:flex;align-items:center;justify-content:space-between;}
+    .ep-row{display:flex;align-items:center;justify-content:space-between;padding:13px 20px;border-bottom:1px solid #0f2a1a0a;transition:background .15s;}
     .ep-row:hover{background:#0f1a1218;}
     .ep-row:last-child{border-bottom:none;}
     .ep-row-key{font-size:9px;color:#86efac77;letter-spacing:.12em;}
     .ep-row-val{font-size:11px;color:#f0fdf4;font-weight:500;display:flex;align-items:center;gap:8px;}
     .ep-row-val.green{color:#22c55e;}
     .ep-row-val.muted{color:#86efac99;}
-
-    /* Wallet copy */
-    .ep-copy-btn{background:none;border:1px solid #0f2a1a;border-radius:4px;
-      color:#4ade8044;cursor:pointer;padding:2px 7px;font-size:9px;
-      font-family:'DM Mono',monospace;transition:all .15s;letter-spacing:.06em;}
+    .ep-copy-btn{background:none;border:1px solid #0f2a1a;border-radius:4px;color:#4ade8044;cursor:pointer;padding:2px 7px;font-size:9px;font-family:'DM Mono',monospace;transition:all .15s;letter-spacing:.06em;}
     .ep-copy-btn:hover{border-color:#22c55e33;color:#22c55e;}
     .ep-copy-btn.copied{border-color:#22c55e44;color:#22c55e;}
-
-    /* Quick actions */
-    .ep-actions{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px;
-      animation:fadeUp .35s ease .18s both;}
-    .ep-action{background:#080c0a;border:1px solid #0f2a1a;border-radius:10px;
-      padding:16px;text-align:center;cursor:pointer;transition:all .2s;}
+    /* Quick actions — 4 cols to fit Help */
+    .ep-actions{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;animation:fadeUp .35s ease .18s both;}
+    .ep-action{background:#080c0a;border:1px solid #0f2a1a;border-radius:10px;padding:16px;text-align:center;cursor:pointer;transition:all .2s;}
     .ep-action:hover{border-color:#22c55e22;background:#0d2e1f1a;transform:translateY(-1px);}
+    .ep-action.help{border-color:#60a5fa22;}
+    .ep-action.help:hover{border-color:#60a5fa55;background:#0a162822;}
     .ep-action-icon{font-size:20px;margin-bottom:6px;}
     .ep-action-lbl{font-size:9px;color:#86efac88;letter-spacing:.1em;}
-
-    /* Bottom row */
-    .ep-bottom{display:grid;grid-template-columns:1fr 1fr;gap:10px;
-      animation:fadeUp .35s ease .22s both;}
-    .ep-logout{padding:12px;border-radius:8px;border:1px solid #dc262633;
-      background:transparent;color:#f8717199;cursor:pointer;
-      font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.08em;transition:all .2s;}
+    .ep-action.help .ep-action-lbl{color:#60a5fa88;}
+    .ep-bottom{display:grid;grid-template-columns:1fr 1fr;gap:10px;animation:fadeUp .35s ease .22s both;}
+    .ep-logout{padding:12px;border-radius:8px;border:1px solid #dc262633;background:transparent;color:#f8717199;cursor:pointer;font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.08em;transition:all .2s;}
     .ep-logout:hover{background:#450a0a;border-color:#dc2626;color:#f87171;}
-    .ep-delete{padding:12px;border-radius:8px;border:1px solid #7c3aed22;
-      background:transparent;color:#7c3aed99;cursor:pointer;
-      font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.08em;transition:all .2s;}
+    .ep-delete{padding:12px;border-radius:8px;border:1px solid #7c3aed22;background:transparent;color:#7c3aed99;cursor:pointer;font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.08em;transition:all .2s;}
     .ep-delete:hover{background:#1a0a2e;border-color:#7c3aed55;color:#a78bfa;}
-
-    /* Privacy notice */
-    .ep-privacy{margin-top:12px;padding:14px 16px;border-radius:8px;
-      background:#040706;border:1px solid #0f2a1a08;
-      font-size:9px;color:#86efac55;line-height:1.9;letter-spacing:.03em;
-      animation:fadeUp .35s ease .26s both;}
+    .ep-privacy{margin-top:12px;padding:14px 16px;border-radius:8px;background:#040706;border:1px solid #0f2a1a08;font-size:9px;color:#86efac55;line-height:1.9;letter-spacing:.03em;animation:fadeUp .35s ease .26s both;}
     .ep-privacy b{color:#22c55e99;}
-
-    /* Member since strip */
-    .ep-member{margin-bottom:16px;padding:10px 16px;border-radius:8px;
-      background:#040706;border:1px solid #0f2a1a;
-      display:flex;justify-content:space-between;align-items:center;
-      font-size:9px;animation:fadeUp .35s ease .09s both;}
-
+    .ep-member{margin-bottom:16px;padding:10px 16px;border-radius:8px;background:#040706;border:1px solid #0f2a1a;display:flex;justify-content:space-between;align-items:center;font-size:9px;animation:fadeUp .35s ease .09s both;}
     @keyframes fadeUp{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
     @keyframes ringPulse{0%,100%{opacity:.3;}50%{opacity:.7;}}
     @media(max-width:640px){
@@ -209,13 +168,13 @@ const Profile = () => {
             <span style={{ color:'#60a5fa99' }}>ETHEREUM SEPOLIA</span>
           </div>
 
-          {/* Stats — real data from PortfolioContext */}
+          {/* Stats */}
           <div className="ep-stats">
             {[
-              { icon:'🔐', label:'KYC STATUS',       val: kycVerified ? 'VERIFIED' : 'PENDING', color: kycVerified ? '#22c55e' : '#facc15' },
-              { icon:'🌿', label:'CREDITS OWNED',     val: totalCreditsOwned || '—',             color:'#22c55e' },
-              { icon:'📈', label:'TRADES EXECUTED',   val: totalTradesCount  || '—',             color:'#60a5fa' },
-              { icon:'🔥', label:'tCO₂ RETIRED',      val: totalRetiredCount || '—',             color:'#f87171' },
+              { icon:'🔐', label:'KYC STATUS',     val: kycVerified ? 'VERIFIED' : 'PENDING', color: kycVerified ? '#22c55e' : '#facc15' },
+              { icon:'🌿', label:'CREDITS OWNED',   val: totalCreditsOwned || '—',             color:'#22c55e' },
+              { icon:'📈', label:'TRADES EXECUTED', val: totalTradesCount  || '—',             color:'#60a5fa' },
+              { icon:'🔥', label:'tCO₂ RETIRED',    val: totalRetiredCount || '—',             color:'#f87171' },
             ].map(({ icon, label, val, color }) => (
               <div className="ep-stat" key={label}>
                 <div className="ep-stat-icon">{icon}</div>
@@ -235,23 +194,20 @@ const Profile = () => {
                 </span>
               )}
             </div>
-
             {[
-              { key:'FULL NAME',    val: name },
-              { key:'EMAIL',        val: email },
-              { key:'COMPANY',      val: company },
-              { key:'ROLE',         val: role.toUpperCase(), muted: true },
-              { key:'KYC STATUS',   val: kycVerified ? '✅ VERIFIED' : '⏳ PENDING', green: kycVerified },
-              { key:'KYC DATE',     val: kycDate, muted: true },
-              { key:'PORTFOLIO',    val: portfolioValue > 0 ? `₹${portfolioValue.toLocaleString('en-IN', { maximumFractionDigits:0 })}` : '—', muted: true },
+              { key:'FULL NAME',  val: name },
+              { key:'EMAIL',      val: email },
+              { key:'COMPANY',    val: company },
+              { key:'ROLE',       val: role.toUpperCase(), muted: true },
+              { key:'KYC STATUS', val: kycVerified ? '✅ VERIFIED' : '⏳ PENDING', green: kycVerified },
+              { key:'KYC DATE',   val: kycDate, muted: true },
+              { key:'PORTFOLIO',  val: portfolioValue > 0 ? `₹${portfolioValue.toLocaleString('en-IN', { maximumFractionDigits:0 })}` : '—', muted: true },
             ].map(({ key, val, green, muted }) => (
               <div className="ep-row" key={key}>
                 <span className="ep-row-key">{key}</span>
                 <span className={`ep-row-val${green ? ' green' : muted ? ' muted' : ''}`}>{val}</span>
               </div>
             ))}
-
-            {/* Wallet row — special with copy button */}
             <div className="ep-row">
               <span className="ep-row-key">WALLET</span>
               <span className="ep-row-val">
@@ -260,16 +216,10 @@ const Profile = () => {
                     <span style={{ fontSize:10, fontFamily:'monospace', color:'#86efaccc' }}>
                       {wallet.slice(0,6)}...{wallet.slice(-4)}
                     </span>
-                    <button
-                      className={`ep-copy-btn${walletCopied ? ' copied' : ''}`}
-                      onClick={copyWallet}
-                      title="Copy full address"
-                    >
+                    <button className={`ep-copy-btn${walletCopied ? ' copied' : ''}`} onClick={copyWallet} title="Copy full address">
                       {walletCopied ? '✓ COPIED' : 'COPY'}
                     </button>
-                    {kycVerified && (
-                      <span style={{ fontSize:8, color:'#22c55e99', letterSpacing:'.06em' }}>⛓ ON-CHAIN</span>
-                    )}
+                    {kycVerified && <span style={{ fontSize:8, color:'#22c55e99', letterSpacing:'.06em' }}>⛓ ON-CHAIN</span>}
                   </>
                 ) : (
                   <span style={{ color:'#86efac66', fontSize:10 }}>NOT CONNECTED</span>
@@ -278,17 +228,19 @@ const Profile = () => {
             </div>
           </div>
 
-          {/* Quick actions */}
+          {/* Quick actions — 4 cols (7 items + Help) */}
           <div className="ep-actions">
             {[
-              { icon:'📈', label:'MARKET',    path:'/carbon-credits'    },
-              { icon:'🌿', label:'EMISSIONS', path:'/emission-tracking' },
-              { icon:'📊', label:'HISTORY',   path:'/trading-history'   },
-              { icon:'💼', label:'PORTFOLIO', path:'/portfolio'         },
-              { icon:'🔔', label:'ALERTS',    path:'/notifications'     },
-              { icon:'⚙️', label:'SETTINGS',  path:'/settings'          },
-            ].map(({ icon, label, path }) => (
-              <div key={label} className="ep-action" onClick={() => navigate(path)}>
+              { icon:'📈', label:'MARKET',    path:'/carbon-credits',    cls:'' },
+              { icon:'🌿', label:'EMISSIONS', path:'/emission-tracking', cls:'' },
+              { icon:'📊', label:'HISTORY',   path:'/trading-history',   cls:'' },
+              { icon:'💼', label:'PORTFOLIO', path:'/portfolio',         cls:'' },
+              { icon:'🔔', label:'ALERTS',    path:'/notifications',     cls:'' },
+              { icon:'⚙️', label:'SETTINGS',  path:'/settings',          cls:'' },
+              { icon:'💰', label:'WALLET',    path:'/wallet',            cls:'' },
+              { icon:'📘', label:'HELP',      path:'/help',              cls:'help' },
+            ].map(({ icon, label, path, cls }) => (
+              <div key={label} className={`ep-action${cls ? ` ${cls}` : ''}`} onClick={() => navigate(path)}>
                 <div className="ep-action-icon">{icon}</div>
                 <div className="ep-action-lbl">{label}</div>
               </div>

@@ -19,6 +19,7 @@ import AdminDashboard     from './components/AdminDashboard';
 import VerifyCertificate  from './components/VerifyCertificate';
 import TeamManagement     from './components/TeamManagement';   // ✅ NEW
 import JoinOrg            from './components/JoinOrg';          // ✅ NEW
+import Wallet             from './components/Wallet';
 
 import { NotificationProvider } from './context/NotificationContext';
 import { PortfolioProvider }    from './context/PortfolioContext';
@@ -107,6 +108,7 @@ function AppInner({ isAuthenticated, user, setUser, kycCompleted, handleLogin, h
                   <Route path="/portfolio"          element={<KYCGate><Portfolio /></KYCGate>} />
                   <Route path="/carbon-credits"     element={<KYCGate><CarbonCredits /></KYCGate>} />
                   <Route path="/emission-tracking"  element={<KYCGate><EmissionTracking /></KYCGate>} />
+                  <Route path="/wallet" element={<KYCGate><Wallet /></KYCGate>} />
                   <Route path="/trading-history"    element={<KYCGate><TradingHistory /></KYCGate>} />
                   <Route path="/transaction-status" element={<KYCGate><TransactionStatus /></KYCGate>} />
                 </>
