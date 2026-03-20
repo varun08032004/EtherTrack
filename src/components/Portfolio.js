@@ -121,16 +121,16 @@ function OffsetGapPanel({ myCredits, emissionsData }) {
 
   if (!emissionsData || totalEm===0) return (
     <div style={{background:'#0a0f0c',border:'1px solid #0f2a1a',borderRadius:14,padding:'16px 20px',marginBottom:24,animation:'fu .4s ease both'}}>
-      <div style={{fontSize:9,color:'#86efac44',letterSpacing:'.14em',marginBottom:8}}>OFFSET RECONCILIATION · GHG PROTOCOL</div>
-      <div style={{fontSize:11,color:'#86efac33',lineHeight:1.8}}>
-        No emission data linked.{' '}<a href="/emission-tracking" style={{color:'#22c55e88',textDecoration:'none'}}>Log GHG emissions →</a>
+      <div style={{fontSize:9,color:'#86efac77',letterSpacing:'.14em',marginBottom:8}}>OFFSET RECONCILIATION · GHG PROTOCOL</div>
+      <div style={{fontSize:12,color:'#86efac88',lineHeight:1.8}}>
+        No emission data linked.{' '}<a href="/emission-tracking" style={{color:'#22c55e',textDecoration:'none'}}>Log GHG emissions →</a>
       </div>
     </div>
   );
 
   return (
     <div style={{background:'#0a0f0c',border:'1px solid #0f2a1a',borderRadius:14,padding:'20px 24px',marginBottom:24,animation:'fu .4s ease .06s both'}}>
-      <div style={{fontSize:9,color:'#86efac44',letterSpacing:'.14em',marginBottom:16}}>OFFSET RECONCILIATION · GHG PROTOCOL · FY {emissionsData.year||new Date().getFullYear()}</div>
+      <div style={{fontSize:9,color:'#86efac77',letterSpacing:'.14em',marginBottom:16}}>OFFSET RECONCILIATION · GHG PROTOCOL · FY {emissionsData.year||new Date().getFullYear()}</div>
       <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:16}}>
         {[
           {label:'TOTAL EMISSIONS',val:`${totalEm.toFixed(1)} t`,         color:'#f87171'},
@@ -139,13 +139,13 @@ function OffsetGapPanel({ myCredits, emissionsData }) {
           {label:'CREDITS NEEDED', val:needed,                            color:'#60a5fa'},
         ].map(({label,val,color})=>(
           <div key={label} style={{background:'#070c09',borderRadius:8,padding:'12px 14px',border:'1px solid #0d1f11'}}>
-            <div style={{fontSize:8,color:'#86efac33',letterSpacing:'.12em',marginBottom:6}}>{label}</div>
+            <div style={{fontSize:9,color:'#86efac66',letterSpacing:'.12em',marginBottom:6}}>{label}</div>
             <div style={{fontSize:18,fontWeight:700,color,fontFamily:'Syne,sans-serif'}}>{val}</div>
           </div>
         ))}
       </div>
       <div style={{marginBottom:16}}>
-        <div style={{display:'flex',justifyContent:'space-between',fontSize:9,color:'#86efac44',marginBottom:6}}>
+        <div style={{display:'flex',justifyContent:'space-between',fontSize:10,color:'#86efac77',marginBottom:6}}>
           <span>OFFSET PROGRESS</span>
           <span style={{color:pct>=100?'#22c55e':'#facc15'}}>{pct.toFixed(1)}% covered</span>
         </div>
@@ -316,22 +316,33 @@ function CorporateExportPanel({ showToast, myCredits, emissionsData, retirements
   const downloadExport = async (type, label) => {
     setLoading(type);
     try {
-      // Build data payload for PDF generator
-      const orgName = 'EtherTrack User'; // replaced by profile.company_name if set
+      // ✅ Fetch full emissions records and profile for PDF
+      let emissions = [];
+      let profile   = null;
+      try {
+        const [emRes, profileRes] = await Promise.all([
+          apiFetch(`/api/emissions/my`),
+          apiFetch(`/api/auth/me`),
+        ]);
+        emissions = emRes?.activities || emRes?.emissions || [];
+        profile   = profileRes || null;
+      } catch {}
+
       const data = {
-        orgName,
+        orgName:     profile?.company_name || profile?.full_name || 'Organisation',
         year,
-        profile:     null,          // fetched inside ReportPDF from emissions profile
-        emissions:   emissionsData?.records || [],
-        retirements: retirements    || [],
-        credits:     myCredits      || [],
-        verifier:    null,          // fetched from org verifiers if connected
+        profile,
+        emissions,
+        retirements: retirements || [],
+        credits:     myCredits   || [],
+        verifier:    null,
       };
 
-      // ✅ Generate auditor-friendly PDF using jsPDF
       await generateReport(type, data);
       showToast(`✅ ${label} PDF exported for FY ${year}`);
     } catch (e) {
+      console.error('Export error full:', e);
+      console.error('Stack:', e.stack);
       showToast(`❌ Export failed: ${e.message}`, 'error');
     } finally {
       setLoading('');
@@ -342,11 +353,11 @@ function CorporateExportPanel({ showToast, myCredits, emissionsData, retirements
     <div style={{background:'#0a0f0c',border:'1px solid #0f2a1a',borderRadius:14,padding:'20px 24px',marginBottom:24,animation:'fu .4s ease .1s both'}}>
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:16,flexWrap:'wrap',gap:10}}>
         <div>
-          <div style={{fontSize:9,color:'#86efac44',letterSpacing:'.14em',marginBottom:4}}>CORPORATE REPORTING EXPORTS — AUDITOR PDF</div>
-          <div style={{fontSize:11,color:'#f0fdf4'}}>GHG Protocol · BRSR Core · CDP · TCFD</div>
+          <div style={{fontSize:9,color:'#86efac77',letterSpacing:'.14em',marginBottom:4}}>CORPORATE REPORTING EXPORTS — AUDITOR PDF</div>
+          <div style={{fontSize:12,color:'#f0fdf4',fontWeight:600}}>GHG Protocol · BRSR Core · CDP · TCFD</div>
         </div>
         <div style={{display:'flex',alignItems:'center',gap:8}}>
-          <span style={{fontSize:9,color:'#86efac44'}}>FY</span>
+          <span style={{fontSize:10,color:'#86efac88'}}>FY</span>
           <select
             value={year}
             onChange={e=>setYear(parseInt(e.target.value))}
@@ -369,11 +380,11 @@ function CorporateExportPanel({ showToast, myCredits, emissionsData, retirements
             style={{padding:'14px 10px',borderRadius:8,border:`1px solid ${color}22`,background:loading===type?`${color}11`:'#060a07',cursor:loading?'not-allowed':'pointer',fontFamily:'DM Mono,monospace',transition:'all .2s',textAlign:'center',opacity:loading&&loading!==type?1:.5}}>
             <div style={{fontSize:20,marginBottom:6}}>{loading===type?'⟳':icon}</div>
             <div style={{fontSize:10,color,fontWeight:700,marginBottom:3,letterSpacing:'.06em'}}>{label}</div>
-            <div style={{fontSize:8,color:'#86efac33',lineHeight:1.5}}>{desc}</div>
+            <div style={{fontSize:9,color:'#86efac66',lineHeight:1.5}}>{desc}</div>
           </button>
         ))}
       </div>
-      <div style={{marginTop:10,fontSize:9,color:'#86efac22',textAlign:'center',letterSpacing:'.06em'}}>
+      <div style={{marginTop:10,fontSize:10,color:'#86efac55',textAlign:'center',letterSpacing:'.06em'}}>
         ↓ Auditor-ready PDF · Formatted for SEBI/CDP direct submission · Blockchain-verified retirements included
       </div>
     </div>
@@ -392,7 +403,7 @@ function QRCodeImg({ value, size=120 }) {
       <img src={url} alt="QR Code" width={size} height={size}
         style={{borderRadius:8,border:'1px solid #22c55e22',background:'#0a0f0c'}}
         onError={e=>{e.target.style.display='none';}}/>
-      <div style={{fontSize:8,color:'#86efac33',marginTop:4,letterSpacing:'.08em'}}>SCAN TO VERIFY</div>
+      <div style={{fontSize:9,color:'#86efac66',marginTop:4,letterSpacing:'.08em'}}>SCAN TO VERIFY</div>
     </div>
   );
 }
@@ -400,7 +411,8 @@ function QRCodeImg({ value, size=120 }) {
 function RetirementCertificate({ credit, txHash, onClose }) {
   const date           = new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'long',year:'numeric'});
   const tokenDisplay   = credit.tokenHex||(credit.tokenId?`0x${Number(credit.tokenId).toString(16).padStart(8,'0').toUpperCase()}`:'—');
-  const certId         = credit.certId || `CERT-${tokenDisplay.replace('0x','').slice(0,8)||'XXXXXX'}-${String(credit.retiredAt||Date.now()).slice(-8)}`;
+  // ✅ FIX: Always use certId passed from retirement flow — never re-generate
+  const certId         = credit.certId || credit.certificate_id || `CERT-${String(credit.tokenId||'').padStart(8,'0')}-${String(credit.retiredAt||Date.now()).toString(36).toUpperCase().slice(-6)}`;
   const verifyUrl      = `${VERIFY_BASE_URL}/${certId}`;
   const reg            = REGISTRIES[credit.standard]||REGISTRIES.VCS;
   const scopeLabel     = credit.retireScope?`Scope ${credit.retireScope}`:'Scope 1/2/3';
@@ -417,22 +429,35 @@ function RetirementCertificate({ credit, txHash, onClose }) {
       doc.setFillColor(4,7,6); doc.rect(0,0,W,297,'F');
       doc.setFillColor(13,46,31); doc.rect(0,0,W,40,'F');
 
-      // ✅ Add logo safely — skip if fetch fails
+      // ✅ Add logo safely via canvas conversion — avoids jsPDF PNG issues
       try {
-        const logoRes  = await fetch('/et_logo_bg.png');
+        const logoRes = await fetch('/et_logo.png');
         if (logoRes.ok) {
-          const logoBlob = await logoRes.blob();
-          const logoB64  = await new Promise((res, rej) => {
-            const r = new FileReader();
-            r.onload  = () => res(r.result);
-            r.onerror = () => rej(new Error('logo read failed'));
-            r.readAsDataURL(logoBlob);
+          const blob = await logoRes.blob();
+          const logoB64 = await new Promise((resolve) => {
+            const img = new Image();
+            const url = URL.createObjectURL(blob);
+            img.onload = () => {
+              try {
+                const canvas = document.createElement('canvas');
+                canvas.width  = img.naturalWidth  || 200;
+                canvas.height = img.naturalHeight || 200;
+                const ctx = canvas.getContext('2d');
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(img, 0, 0);
+                URL.revokeObjectURL(url);
+                resolve(canvas.toDataURL('image/jpeg', 0.92));
+              } catch { URL.revokeObjectURL(url); resolve(null); }
+            };
+            img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+            img.src = url;
           });
-          if (logoB64 && logoB64.startsWith('data:image')) {
-            doc.addImage(logoB64, 'PNG', ml, 6, 28, 28);
+          if (logoB64 && logoB64.startsWith('data:image/jpeg')) {
+            doc.addImage(logoB64, 'JPEG', ml, 6, 28, 28);
           }
         }
-      } catch { /* logo is optional — continue without it */ }
+      } catch { /* logo optional */ }
 
       doc.setTextColor(34,197,94); doc.setFontSize(8); doc.setFont('helvetica','normal');
       doc.text('ETHERTRACK CARBON EXCHANGE — CORPORATE RETIREMENT CERTIFICATE',W/2,y,{align:'center'}); y+=7;
@@ -571,7 +596,7 @@ function RetirementCertificate({ credit, txHash, onClose }) {
           <div style={{flex:1}}>
             <div style={{fontSize:9,color:'#22c55e88',letterSpacing:'.12em',marginBottom:6}}>PUBLIC VERIFICATION URL</div>
             <div style={{fontSize:10,color:'#22c55e66',wordBreak:'break-all',marginBottom:8,fontFamily:'monospace'}}>{verifyUrl}</div>
-            <div style={{fontSize:9,color:'#86efac33',lineHeight:1.7}}>
+            <div style={{fontSize:9,color:'#86efac66',lineHeight:1.7}}>
               Scan to independently verify this retirement on-chain. No login required. Suitable for CDP, BRSR, TCFD submissions.
             </div>
           </div>
@@ -991,11 +1016,13 @@ export default function Portfolio() {
       }
       setTxPending('Burning credit token permanently on blockchain...');
       const result = await retireCredit(credit.tokenId??credit.id, qty);
-      const retiredAt    = Date.now();
-      const tokenDisplay = credit.tokenHex||(credit.tokenId?`0x${Number(credit.tokenId).toString(16).padStart(8,'0').toUpperCase()}`:'XX');
-      const certId       = `CERT-${tokenDisplay.replace('0x','').slice(0,8).toUpperCase()}-${retiredAt.toString(36).toUpperCase().slice(-6)}`;
+      const retiredAt = Date.now();
+      // ✅ FIX: Start with a local certId as fallback
+      const rawTokenId = credit.tokenId != null ? String(credit.tokenId).padStart(8,'0') : 'XXXXXXXX';
+      let certId = `CERT-${rawTokenId}-${retiredAt.toString(36).toUpperCase().slice(-6)}`;
       try {
-        await txAPI.recordRetirement({
+        // ✅ Use certId returned from backend — it's the one stored in DB
+        const retirementRes = await txAPI.recordRetirement({
           tokenId:          credit.tokenHex||credit.tokenId,
           projectName:      credit.projectName,
           standard:         credit.standard,
@@ -1007,19 +1034,19 @@ export default function Portfolio() {
           country:          credit.country,
           projectType:      credit.projectType,
           txHash:           result.txHash,
-          blockNumber:      result.blockNumber || null, // ✅ save block number
+          blockNumber:      result.blockNumber || null,
           beneficiary:      user?.email||walletAddress,
           retireScope:      scope,
           correspondingAdjustment: credit.correspondingAdjustment,
-          certificateId:    certId,
           walletAddress,
-          // ✅ Corporate beneficiary data
           beneficiaryName:   corporateData?.beneficiaryName   || '',
           beneficiaryEntity: corporateData?.beneficiaryEntity || '',
           beneficiaryGstin:  corporateData?.beneficiaryGstin  || '',
           reportingStandard: corporateData?.reportingStandard || 'GHG_PROTOCOL',
           purpose:           corporateData?.purpose           || 'voluntary_offset',
         });
+        // ✅ Override with backend certId — this is what verify.js will find
+        if (retirementRes?.certId) certId = retirementRes.certId;
       } catch(e) { console.warn('Retirement backend sync failed:',e?.message); }
       setShowRetire(null);
       setRetireSteps({
@@ -1064,26 +1091,26 @@ export default function Portfolio() {
     .pt::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;background-image:linear-gradient(rgba(34,197,94,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(34,197,94,.025) 1px,transparent 1px);background-size:40px 40px;}
     .ptw{position:relative;z-index:1;max-width:1200px;margin:0 auto;padding:32px 24px 80px;}
     .pt-hdr{margin-bottom:28px;animation:fu .4s ease both;}
-    .pt-hdr-label{font-size:9px;color:#86efac44;letter-spacing:.2em;margin-bottom:6px;}
+    .pt-hdr-label{font-size:11px;color:#86efac88;letter-spacing:.2em;margin-bottom:6px;}
     .pt-hdr-title{font-family:'Syne',sans-serif;font-size:30px;font-weight:800;color:#f0fdf4;margin-bottom:4px;}
     .pt-hdr-title span{color:#22c55e;}
-    .pt-hdr-sub{font-size:10px;color:#86efac33;letter-spacing:.1em;}
+    .pt-hdr-sub{font-size:11px;color:#86efac66;letter-spacing:.1em;}
     .pt-topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px;animation:fu .4s ease .05s both;}
     .pt-reg-btn{padding:11px 22px;border-radius:8px;border:none;background:linear-gradient(135deg,#14532d,#166534);color:#d1fae5;cursor:pointer;font-family:'DM Mono',monospace;font-size:11px;font-weight:700;letter-spacing:.1em;transition:all .2s;box-shadow:0 4px 20px rgba(0,0,0,.5);}
     .pt-reg-btn:hover{background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;transform:translateY(-1px);}
     .pt-reg-btn:disabled{opacity:.3;cursor:not-allowed;transform:none;}
     .pt-refresh-btn,.pt-export-btn{padding:10px 16px;border-radius:8px;cursor:pointer;font-family:'DM Mono',monospace;font-size:11px;letter-spacing:.08em;transition:all .2s;}
-    .pt-refresh-btn{border:1px solid #0f2a1a;background:#060a07;color:#86efac44;}
-    .pt-refresh-btn:hover:not(:disabled){border-color:#22c55e33;color:#22c55e88;}
+    .pt-refresh-btn{border:1px solid #22c55e33;background:#060a07;color:#86efac88;}
+    .pt-refresh-btn:hover:not(:disabled){border-color:#22c55e66;color:#22c55ecc;}
     .pt-refresh-btn:disabled{opacity:.3;cursor:not-allowed;}
-    .pt-export-btn{border:1px solid #60a5fa22;background:#060e18;color:#60a5fa55;}
-    .pt-export-btn:hover{border-color:#60a5fa55;color:#60a5facc;}
+    .pt-export-btn{border:1px solid #60a5fa44;background:#060e18;color:#60a5fa99;}
+    .pt-export-btn:hover{border-color:#60a5fa77;color:#60a5fadd;}
     .pt-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px;animation:fu .4s ease .1s both;}
     .pt-stat{background:#070c09;border:1px solid #0d1f11;border-radius:12px;padding:18px;position:relative;overflow:hidden;transition:border-color .2s;}
     .pt-stat:hover{border-color:#22c55e22;}
-    .pt-stat-label{font-size:9px;color:#86efac44;letter-spacing:.14em;margin-bottom:8px;}
+    .pt-stat-label{font-size:10px;color:#86efac77;letter-spacing:.14em;margin-bottom:8px;}
     .pt-stat-val{font-family:'Syne',sans-serif;font-size:24px;font-weight:800;line-height:1;margin-bottom:4px;}
-    .pt-stat-sub{font-size:9px;color:#86efac33;letter-spacing:.06em;}
+    .pt-stat-sub{font-size:10px;color:#86efac55;letter-spacing:.06em;}
     .pt-tabs{display:flex;gap:5px;margin-bottom:20px;animation:fu .4s ease .15s both;flex-wrap:wrap;}
     .pt-tab{padding:8px 14px;border-radius:6px;border:1px solid #1a2e1a;background:#0a0f0a;cursor:pointer;font-family:'DM Mono',monospace;font-size:11px;letter-spacing:.07em;color:#86efacaa;transition:all .2s;display:flex;align-items:center;gap:6px;}
     .pt-tab:hover{border-color:#22c55e44;color:#86efacdd;}
@@ -1106,7 +1133,7 @@ export default function Portfolio() {
     .pt-ribbon{position:absolute;top:12px;right:12px;z-index:2;font-size:8px;padding:3px 10px;border-radius:3px;letter-spacing:.12em;font-weight:700;}
     .pt-card-hdr{padding:16px 16px 12px;border-bottom:1px solid #0d1f1122;}
     .pt-card-name{font-size:14px;font-weight:700;color:#f0fdf4;line-height:1.4;margin-bottom:5px;padding-right:70px;}
-    .pt-card-loc{font-size:11px;color:#86efac88;margin-bottom:8px;}
+    .pt-card-loc{font-size:11px;color:#86efac99;margin-bottom:8px;}
     .pt-badge{font-size:9px;padding:2px 7px;border-radius:3px;letter-spacing:.04em;}
     .pt-card-badges{display:flex;gap:5px;flex-wrap:wrap;align-items:center;}
     .pt-badge{font-size:9px;padding:2px 7px;border-radius:3px;letter-spacing:.04em;}
@@ -1114,13 +1141,13 @@ export default function Portfolio() {
     .pt-meta-cell{padding:9px 14px;border-bottom:1px solid #0d1f1114;border-right:1px solid #0d1f1114;}
     .pt-meta-cell:nth-child(even){border-right:none;}
     .pt-meta-cell:nth-last-child(-n+2){border-bottom:none;}
-    .pt-meta-label{font-size:10px;color:#86efac99;letter-spacing:.1em;margin-bottom:4px;}
+    .pt-meta-label{font-size:10px;color:#86efac77;letter-spacing:.1em;margin-bottom:4px;}
     .pt-meta-val{font-size:13px;color:#f0fdf4;font-weight:600;}
     .pt-meta-val.green{color:#4ade80;}.pt-meta-val.blue{color:#93c5fd;}.pt-meta-val.yellow{color:#fde047;}.pt-meta-val.purple{color:#c4b5fd;}.pt-meta-val.red{color:#fca5a5;}.pt-meta-val.orange{color:#fdba74;}
     .pt-meta-full{grid-column:1/-1;border-right:none!important;}
     .pt-dep-badge,.pt-verify{display:inline-flex;align-items:center;gap:4px;font-size:9px;padding:2px 7px;border-radius:3px;}
     .pt-card-actions{display:flex;gap:6px;padding:12px 14px;border-top:1px solid #0d1f11;background:#050809;flex-wrap:wrap;}
-    .pt-act-btn{flex:1;padding:10px 6px;border-radius:6px;font-size:11px;letter-spacing:.06em;cursor:pointer;font-family:'DM Mono',monospace;border:1px solid #1a2e1a;background:#0a0f0a;color:#86efacaa;transition:all .2s;font-weight:600;white-space:nowrap;text-align:center;}
+    .pt-act-btn{flex:1;padding:10px 6px;border-radius:6px;font-size:12px;letter-spacing:.06em;cursor:pointer;font-family:'DM Mono',monospace;border:1px solid #1a2e1a;background:#0a0f0a;color:#86efacc0;transition:all .2s;font-weight:600;white-space:nowrap;text-align:center;}
     .pt-act-btn:hover{border-color:#22c55e55;color:#4ade80;background:#0d1a0d;}
     .pt-act-btn.sell{background:#0e1200;border-color:#facc1544;color:#fde04799;}.pt-act-btn.sell:hover{border-color:#facc1577;color:#fde047cc;}
     .pt-act-btn.retire{background:#0e0505;border-color:#f8717144;color:#fca5a599;}.pt-act-btn.retire:hover{border-color:#f8717177;color:#fca5a5cc;}
@@ -1200,20 +1227,20 @@ export default function Portfolio() {
           <KYCExpiryBanner navigate={navigate}/>
 
           <div className="pt-topbar">
-            <div style={{fontSize:11,color:'#86efac33',letterSpacing:'.06em',display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+            <div style={{fontSize:11,color:'#86efac77',letterSpacing:'.06em',display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
               {loading.credits
-                ? <span style={{color:'#22c55e44'}}>⟳ Loading from blockchain...</span>
-                : <span>{myCredits.filter(c=>c.status!=='RETIRED').length} active tokens on Sepolia</span>
+                ? <span style={{color:'#22c55e88'}}>⟳ Loading from blockchain...</span>
+                : <span style={{color:'#86efac99'}}>{myCredits.filter(c=>c.status!=='RETIRED').length} active tokens on Sepolia</span>
               }
               {walletAddress&&(
                 <a href={`https://sepolia.etherscan.io/address/${walletAddress}`} target="_blank" rel="noreferrer"
-                  style={{color:'#86efac22',textDecoration:'none',fontSize:10}}>
+                  style={{color:'#60a5fa88',textDecoration:'none',fontSize:11}}>
                   🔗 {walletAddress.slice(0,6)}...{walletAddress.slice(-4)} ↗
                 </a>
               )}
               {ethPriceInr
-                ? <span style={{fontSize:9,color:'#22c55e44'}}>ETH ₹{ethPriceInr.toLocaleString()} live</span>
-                : <span style={{fontSize:9,color:'#f59e0b33'}}>ETH rate: est.</span>
+                ? <span style={{fontSize:10,color:'#22c55e77'}}>ETH ₹{ethPriceInr.toLocaleString()} live</span>
+                : <span style={{fontSize:10,color:'#f59e0b55'}}>ETH rate: est.</span>
               }
             </div>
             <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>

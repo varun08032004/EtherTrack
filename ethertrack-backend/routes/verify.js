@@ -18,11 +18,12 @@ router.get('/:certId', async (req, res) => {
          r.standard, r.corresponding_adjustment,
          r.beneficiary_name, r.beneficiary_entity, r.beneficiary_gstin,
          r.reporting_standard, r.purpose,
-         r.icvcm_ccp_eligible,
+         COALESCE(cb.icvcm_ccp_eligible, false) AS icvcm_ccp_eligible,
          r.wallet_address,
          u.wallet_address AS user_wallet
        FROM retirements r
        LEFT JOIN users u ON u.id = r.retired_by
+       LEFT JOIN carbon_batches cb ON cb.token_id = r.token_id
        WHERE r.certificate_id = $1
        LIMIT 1`,
       [certId]
@@ -79,6 +80,52 @@ router.get('/:certId', async (req, res) => {
     );
 
     if (!txRows.length) {
+      // ✅ Fallback: try partial match on cert_id (handles format mismatches)
+      const { rows: fuzzyRows } = await query(
+        `SELECT
+           rt.cert_id              AS certificate_id,
+           rt.tx_hash, rt.block_number, rt.amount,
+           '1'                     AS retire_scope,
+           rt.created_at           AS retired_at,
+           rt.project_name, rt.project_type, rt.serial_number,
+           rt.developer, rt.location, rt.standard,
+           rt.beneficiary          AS beneficiary_name,
+           cb.vintage_year, cb.country,
+           cb.corresponding_adjustment, cb.icvcm_ccp_eligible,
+           COALESCE(rt.from_wallet, u.wallet_address) AS wallet_address
+         FROM registry_transactions rt
+         LEFT JOIN carbon_batches cb ON cb.token_id = rt.token_id
+         LEFT JOIN users u ON u.id = COALESCE(rt.from_user_id, rt.user_id)
+         WHERE rt.cert_id ILIKE $1
+         LIMIT 1`,
+        [`%${certId.slice(-8)}%`]
+      );
+      if (fuzzyRows.length) {
+        const r = fuzzyRows[0];
+        return res.json({
+          certificate_id:           r.certificate_id || certId,
+          tx_hash:                  r.tx_hash,
+          block_number:             r.block_number,
+          amount:                   r.amount,
+          retire_scope:             '1',
+          retired_at:               r.retired_at,
+          project_name:             r.project_name || '—',
+          project_type:             r.project_type || '—',
+          vintage_year:             r.vintage_year || '—',
+          serial_number:            r.serial_number || '—',
+          developer:                r.developer || '—',
+          location:                 r.location || '—',
+          country:                  r.country || '—',
+          standard:                 r.standard || 'VCS',
+          corresponding_adjustment: r.corresponding_adjustment || 'none',
+          beneficiary_name:         r.beneficiary_name || '',
+          beneficiary_entity:       '',
+          beneficiary_gstin:        '',
+          icvcm_ccp_eligible:       r.icvcm_ccp_eligible || false,
+          wallet_address:           r.wallet_address || '',
+          source:                   'registry_transactions_fuzzy',
+        });
+      }
       return res.status(404).json({ error: 'Certificate not found' });
     }
 

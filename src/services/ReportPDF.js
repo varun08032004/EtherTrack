@@ -92,12 +92,12 @@ const drawHeader = (doc, title, subtitle, reportType, orgName, year, color=C.gre
   doc.setFillColor(...C.surface); doc.rect(0,2,W,44,'F');
 
   // ✅ Logo top left — only add if valid base64 image
-  if (logo && typeof logo === 'string' && logo.startsWith('data:image')) {
-    try { doc.addImage(logo, 'PNG', 18, 6, 32, 32); } catch {}
+  if (logo && logo.data && typeof logo.data === 'string' && logo.data.startsWith('data:image')) {
+    try { doc.addImage(logo.data, logo.format || 'JPEG', 18, 6, 32, 32); } catch {}
   }
 
   // Shift text right if logo present
-  const textX = logo ? 54 : 20;
+  const textX = (logo && logo.data) ? 54 : 20;
 
   doc.setFontSize(8); doc.setFont('helvetica','normal'); doc.setTextColor(...color);
   doc.text(`ETHERTRACK CARBON EXCHANGE  ·  ${reportType}  ·  FY ${year}`, textX, 14);
@@ -179,7 +179,7 @@ const drawVerifierBlock = (doc, verifier, y) => {
   } else {
     doc.setFont('helvetica','normal'); doc.setTextColor(...C.muted);
     doc.text('Verification pending — EtherTrack will connect an accredited verifier on your behalf', ml+4, y+11);
-    doc.setTextColor([245,158,11]);
+    doc.setTextColor(245,158,11);
     doc.text('⏳ PENDING  ·  Contact: hello@ethertrack.in  ·  Bureau Veritas / DNV / EY available', ml+4, y+17);
   }
   return y+24;

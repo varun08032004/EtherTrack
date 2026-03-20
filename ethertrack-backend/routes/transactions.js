@@ -79,7 +79,6 @@ router.post('/sync', authenticate, async (req, res) => {
 });
 
 // ── GET /api/transactions/retirements ─────────────────────────────
-// ✅ Reads from registry_transactions + joins carbon_batches for full metadata
 router.get('/retirements', authenticate, async (req, res) => {
   try {
     const { rows } = await query(
@@ -101,7 +100,6 @@ router.get('/retirements', authenticate, async (req, res) => {
          rt.beneficiary            AS beneficiary_name,
          rt.created_at,
          rt.created_at             AS retired_at,
-         -- ✅ Join carbon_batches for missing fields
          cb.vintage_year,
          cb.country,
          cb.expiry_date,
@@ -110,7 +108,6 @@ router.get('/retirements', authenticate, async (req, res) => {
          cb.corresponding_adjustment,
          cb.sdg_tags,
          cb.credit_type,
-         -- wallet from user
          u.wallet_address
        FROM registry_transactions rt
        LEFT JOIN carbon_batches cb ON cb.token_id = rt.token_id
@@ -122,31 +119,30 @@ router.get('/retirements', authenticate, async (req, res) => {
     );
 
     const retirements = rows.map(r => ({
-      id:                     r.id,
-      certificate_id:         r.cert_id || r.certificate_id,
-      cert_id:                r.cert_id,
-      token_id:               r.token_id,
-      amount:                 parseInt(r.amount) || 0,
-      tx_hash:                r.tx_hash,
-      block_number:           r.block_number,
-      project_name:           r.project_name || '—',
-      project_type:           r.project_type || '—',
-      standard:               r.standard || 'VCS',
-      serial_number:          r.serial_number || r.registry_serial || '—',
-      developer:              r.developer || '—',
-      location:               r.location || '—',
-      // ✅ Now populated from carbon_batches
-      vintage_year:           r.vintage_year || '—',
-      country:                r.country || '—',
-      beneficiary:            r.beneficiary || '',
-      beneficiary_name:       r.beneficiary || '',
-      retire_scope:           '1',
-      retired_at:             r.created_at,
-      created_at:             r.created_at,
-      icvcm_ccp_eligible:     r.icvcm_ccp_eligible || false,
+      id:                       r.id,
+      certificate_id:           r.cert_id || r.certificate_id,
+      cert_id:                  r.cert_id,
+      token_id:                 r.token_id,
+      amount:                   parseInt(r.amount) || 0,
+      tx_hash:                  r.tx_hash,
+      block_number:             r.block_number,
+      project_name:             r.project_name || '—',
+      project_type:             r.project_type || '—',
+      standard:                 r.standard || 'VCS',
+      serial_number:            r.serial_number || r.registry_serial || '—',
+      developer:                r.developer || '—',
+      location:                 r.location || '—',
+      vintage_year:             r.vintage_year || '—',
+      country:                  r.country || '—',
+      beneficiary:              r.beneficiary || '',
+      beneficiary_name:         r.beneficiary || '',
+      retire_scope:             '1',
+      retired_at:               r.created_at,
+      created_at:               r.created_at,
+      icvcm_ccp_eligible:       r.icvcm_ccp_eligible || false,
       corresponding_adjustment: r.corresponding_adjustment || 'none',
-      credit_type:            r.credit_type || 'voluntary',
-      wallet_address:         r.wallet_address || '',
+      credit_type:              r.credit_type || 'voluntary',
+      wallet_address:           r.wallet_address || '',
     }));
 
     res.json({ retirements });
@@ -162,7 +158,6 @@ router.post('/retirements', authenticate, async (req, res) => {
     tokenId, projectName, standard, credits, vintageYear,
     serialNumber, developer, location, country, projectType,
     txHash, beneficiary,
-    // ✅ Corporate fields
     beneficiaryName, beneficiaryEntity, beneficiaryGstin,
     reportingStandard, purpose, retireScope,
     correspondingAdjustment, blockNumber, walletAddress,
@@ -171,7 +166,7 @@ router.post('/retirements', authenticate, async (req, res) => {
   try {
     const certId = `CERT-${(tokenId||'').toString().slice(0,8)||'XXXXXX'}-${Date.now().toString(36).toUpperCase()}`;
 
-    // ✅ Write to registry_transactions (for backwards compat)
+    // ✅ Write to registry_transactions (primary source for GET /retirements)
     const { rows } = await query(
       `INSERT INTO registry_transactions
          (user_id, from_user_id, tx_hash, tx_type, type, token_id, amount,
@@ -187,8 +182,8 @@ router.post('/retirements', authenticate, async (req, res) => {
       ]
     );
 
-    // ✅ Also write to retirements table with FULL corporate data
-    // This is what verify.js reads for the public certificate page
+    // ✅ Also write to retirements table for public verify page
+    // Wrapped in try/catch — failure here doesn't block the response
     try {
       await query(
         `INSERT INTO retirements
@@ -210,8 +205,7 @@ router.post('/retirements', authenticate, async (req, res) => {
            $19, $20,
            $21, $22,
            true, NOW()
-         )
-         ON CONFLICT DO NOTHING`,
+         )`,
         [
           req.user.id,
           walletAddress || null,
@@ -238,11 +232,10 @@ router.post('/retirements', authenticate, async (req, res) => {
         ]
       );
     } catch (retErr) {
-      // Log but don't fail — registry_transactions insert already succeeded
-      console.warn('Retirements table insert failed:', retErr.message);
+      console.warn('Retirements table insert failed (non-fatal):', retErr.message);
     }
 
-    // ✅ Update carbon_batches available_credits
+    // ✅ Update carbon_batches status after retirement
     if (tokenId != null) {
       await query(
         `UPDATE carbon_batches
