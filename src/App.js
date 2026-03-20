@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { BrowserRouter as Router, Route, Routes, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Route, Routes, Navigate, useNavigate } from 'react-router-dom';
 import './App.css';
 import './index.css';
 
@@ -17,17 +17,16 @@ import Portfolio          from './components/Portfolio';
 import KYCGate            from './components/KYCGate';
 import AdminDashboard     from './components/AdminDashboard';
 import VerifyCertificate  from './components/VerifyCertificate';
-import TeamManagement     from './components/TeamManagement';   // ✅ NEW
-import JoinOrg            from './components/JoinOrg';          // ✅ NEW
+import TeamManagement     from './components/TeamManagement';
+import JoinOrg            from './components/JoinOrg';
 import Wallet             from './components/Wallet';
 
 import { NotificationProvider } from './context/NotificationContext';
 import { PortfolioProvider }    from './context/PortfolioContext';
 import { authAPI, tokenStorage } from './services/api';
 
-// ── Optional components — safe fallbacks if file doesn't exist ────
+// ── Optional components — safe fallbacks ─────────────────────────
 let Settings, Notifications, WalletMismatchBanner, Help, Feedback, TransactionStatus, NotFound;
-
 try { Settings             = require('./components/Settings').default;             } catch { Settings             = () => <div style={{color:'#22c55e',fontFamily:'monospace',padding:40}}>Settings coming soon</div>; }
 try { Notifications        = require('./components/Notifications').default;        } catch { Notifications        = () => <div style={{color:'#22c55e',fontFamily:'monospace',padding:40}}>Notifications coming soon</div>; }
 try { WalletMismatchBanner = require('./components/WalletMismatchBanner').default; } catch { WalletMismatchBanner = () => null; }
@@ -40,91 +39,181 @@ export const AuthContext = React.createContext();
 
 const getUserKey = (email) => `user_${email}`;
 
-const AdminGuard = ({ dbUser, children }) => {
-  if (!dbUser)                 return <Navigate to="/dashboard" />;
-  if (dbUser.role !== 'admin') return <Navigate to="/dashboard" />;
+// ── Guards ────────────────────────────────────────────────────────
+
+// Waits for dbUser to load before deciding — no flash redirects
+const AdminGuard = ({ dbUser, sessionChecked, children }) => {
+  if (!sessionChecked) return null;                      // still loading
+  if (!dbUser)         return <Navigate to="/login" replace />;
+  if (dbUser.role !== 'admin') return <Navigate to="/dashboard" replace />;
   return children;
 };
 
-function AppInner({ isAuthenticated, user, setUser, kycCompleted, handleLogin, handleLogout, handleKycComplete, dbUser, setDbUser }) {
+// Redirects unauthenticated users to login
+const UserGuard = ({ isAuthenticated, sessionChecked, children }) => {
+  if (!sessionChecked) return null;                      // still loading
+  if (!isAuthenticated) return <Navigate to="/login" replace />;
+  return children;
+};
+
+// ── Spinner ───────────────────────────────────────────────────────
+const FullPageSpinner = () => (
+  <div style={{ minHeight:'100vh', background:'#080c0a', display:'flex', alignItems:'center', justifyContent:'center' }}>
+    <div style={{ width:20, height:20, border:'2px solid #22c55e22', borderTopColor:'#22c55e', borderRadius:'50%', animation:'spin 1s linear infinite' }}/>
+    <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+  </div>
+);
+
+// ── AppInner ──────────────────────────────────────────────────────
+function AppInner({ isAuthenticated, sessionChecked, user, setUser, kycCompleted, handleLogin, handleLogout, handleKycComplete, dbUser, setDbUser }) {
   const isAdmin = dbUser?.role === 'admin';
+
+  // Show spinner until session is resolved
+  if (!sessionChecked) return <FullPageSpinner />;
 
   return (
     <AuthContext.Provider value={{
       isAuthenticated, user, setUser, kycCompleted,
       handleLogin, handleLogout, handleKycComplete, dbUser, setDbUser,
     }}>
-      {!isAdmin && <Header />}
+      {/* Header only for regular users */}
+      {isAuthenticated && !isAdmin && <Header />}
       {isAuthenticated && !isAdmin && <WalletMismatchBanner />}
-      <div className="main-content" style={{ paddingTop: isAdmin ? '0' : '60px', background:'#080c0a', minHeight:'100vh' }}>
+
+      <div className="main-content" style={{
+        paddingTop:  isAuthenticated && !isAdmin ? '60px' : '0',
+        background:  '#080c0a',
+        minHeight:   '100vh',
+      }}>
         <Routes>
 
-          {/* ── Fully public routes — no auth required ── */}
+          {/* ── Public routes ── */}
           <Route path="/verify/:certId" element={<VerifyCertificate />} />
           <Route path="/help"           element={<Help />} />
           <Route path="/feedback"       element={<Feedback />} />
 
-          <Route path="/"       element={isAuthenticated ? <Navigate to={isAdmin ? '/admin' : '/dashboard'} /> : <Navigate to="/signup" />} />
-          <Route path="/login"  element={isAuthenticated ? <Navigate to={isAdmin ? '/admin' : '/dashboard'} /> : <Login />} />
-          <Route path="/signup" element={isAuthenticated ? <Navigate to={isAdmin ? '/admin' : '/dashboard'} /> : <Signup />} />
-
-          {/* ✅ Join org — requires auth but NOT KYC */}
-          <Route path="/join-org" element={
-            isAuthenticated
-              ? <JoinOrg />
-              : (() => {
-                  // Save token to sessionStorage before redirecting to login
-                  const token = new URLSearchParams(window.location.search).get('token');
-                  if (token) sessionStorage.setItem('pending_invite_token', token);
-                  return <Navigate to="/login" />;
-                })()
+          {/* ── Root redirect ── */}
+          <Route path="/" element={
+            !isAuthenticated
+              ? <Navigate to="/signup" replace />
+              : isAdmin
+                ? <Navigate to="/admin" replace />
+                : <Navigate to="/dashboard" replace />
           } />
 
-          {isAuthenticated ? (
-            <>
-              <Route path="/admin" element={
-                <AdminGuard dbUser={dbUser}>
-                  <AdminDashboard />
-                </AdminGuard>
-              } />
+          {/* ── Auth routes — redirect if already logged in ── */}
+          <Route path="/login" element={
+            isAuthenticated
+              ? <Navigate to={isAdmin ? '/admin' : '/dashboard'} replace />
+              : <Login />
+          } />
+          <Route path="/signup" element={
+            isAuthenticated
+              ? <Navigate to={isAdmin ? '/admin' : '/dashboard'} replace />
+              : <Signup />
+          } />
 
-              {!isAdmin && (
-                <>
-                  <Route path="/dashboard"          element={<Dashboard />} />
-                  <Route path="/profile"            element={<Profile />} />
-                  <Route path="/edit-profile"       element={<EditProfile />} />
-                  <Route path="/settings"           element={<Settings />} />
-                  <Route path="/notifications"      element={<Notifications />} />
+          {/* ── Admin routes ── */}
+          <Route path="/admin" element={
+            <AdminGuard dbUser={dbUser} sessionChecked={sessionChecked}>
+              <AdminDashboard />
+            </AdminGuard>
+          } />
+          <Route path="/admin/*" element={
+            <AdminGuard dbUser={dbUser} sessionChecked={sessionChecked}>
+              <AdminDashboard />
+            </AdminGuard>
+          } />
 
-                  <Route path="/kyc" element={
-                    kycCompleted
-                      ? <Navigate to="/dashboard" />
-                      : <KYCForm onComplete={handleKycComplete} />
-                  } />
+          {/* ── Join org — auth required, no KYC gate ── */}
+          <Route path="/join-org" element={
+            <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
+              <JoinOrg />
+            </UserGuard>
+          } />
 
-                  {/* ✅ Team management — auth required, no KYC gate */}
-                  <Route path="/team"               element={<TeamManagement />} />
+          {/* ── User routes — auth + not admin ── */}
+          <Route path="/dashboard" element={
+            <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
+              {isAdmin ? <Navigate to="/admin" replace /> : <Dashboard />}
+            </UserGuard>
+          } />
+          <Route path="/profile" element={
+            <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
+              <Profile />
+            </UserGuard>
+          } />
+          <Route path="/edit-profile" element={
+            <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
+              <EditProfile />
+            </UserGuard>
+          } />
+          <Route path="/settings" element={
+            <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
+              <Settings />
+            </UserGuard>
+          } />
+          <Route path="/notifications" element={
+            <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
+              <Notifications />
+            </UserGuard>
+          } />
+          <Route path="/kyc" element={
+            <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
+              {kycCompleted
+                ? <Navigate to="/dashboard" replace />
+                : <KYCForm onComplete={handleKycComplete} />
+              }
+            </UserGuard>
+          } />
+          <Route path="/team" element={
+            <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
+              <TeamManagement />
+            </UserGuard>
+          } />
 
-                  <Route path="/portfolio"          element={<KYCGate><Portfolio /></KYCGate>} />
-                  <Route path="/carbon-credits"     element={<KYCGate><CarbonCredits /></KYCGate>} />
-                  <Route path="/emission-tracking"  element={<KYCGate><EmissionTracking /></KYCGate>} />
-                  <Route path="/wallet" element={<KYCGate><Wallet /></KYCGate>} />
-                  <Route path="/trading-history"    element={<KYCGate><TradingHistory /></KYCGate>} />
-                  <Route path="/transaction-status" element={<KYCGate><TransactionStatus /></KYCGate>} />
-                </>
-              )}
-            </>
-          ) : (
-            <Route path="*" element={<Navigate to="/login" />} />
-          )}
+          {/* ── KYC gated routes ── */}
+          <Route path="/portfolio" element={
+            <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
+              <KYCGate><Portfolio /></KYCGate>
+            </UserGuard>
+          } />
+          <Route path="/carbon-credits" element={
+            <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
+              <KYCGate><CarbonCredits /></KYCGate>
+            </UserGuard>
+          } />
+          <Route path="/emission-tracking" element={
+            <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
+              <KYCGate><EmissionTracking /></KYCGate>
+            </UserGuard>
+          } />
+          <Route path="/wallet" element={
+            <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
+              <KYCGate><Wallet /></KYCGate>
+            </UserGuard>
+          } />
+          <Route path="/trading-history" element={
+            <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
+              <KYCGate><TradingHistory /></KYCGate>
+            </UserGuard>
+          } />
+          <Route path="/transaction-status" element={
+            <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
+              <KYCGate><TransactionStatus /></KYCGate>
+            </UserGuard>
+          } />
 
+          {/* ── 404 ── */}
           <Route path="*" element={<NotFound />} />
+
         </Routes>
       </div>
     </AuthContext.Provider>
   );
 }
 
+// ── App ───────────────────────────────────────────────────────────
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [user,            setUser]            = useState(null);
@@ -141,6 +230,7 @@ function App() {
     localStorage.removeItem('activeEmail');
   }, []);
 
+  // ── Restore session on mount ──────────────────────────────────
   useEffect(() => {
     const restoreSession = async () => {
       const hasToken = !!tokenStorage.getAccess();
@@ -169,18 +259,24 @@ function App() {
     restoreSession();
   }, []);
 
+  // ── Listen for forced logout events (e.g. token expired) ─────
   useEffect(() => {
     window.addEventListener('auth:logout', handleLogout);
     return () => window.removeEventListener('auth:logout', handleLogout);
   }, [handleLogout]);
 
+  // ── Persist user to localStorage ─────────────────────────────
   useEffect(() => {
     if (user?.email) localStorage.setItem(getUserKey(user.email), JSON.stringify(user));
   }, [user]);
 
+  // ── Login handler ─────────────────────────────────────────────
   const handleLogin = async (userData, firebaseUser = null) => {
     setUser(userData);
     localStorage.setItem('activeEmail', userData.email);
+
+    let resolvedDbUser = null;
+
     if (firebaseUser) {
       try {
         const res = await authAPI.syncUser({
@@ -189,27 +285,39 @@ function App() {
           fullName:    firebaseUser.displayName || '',
         });
         if (res?.user) {
+          resolvedDbUser = res.user;
           setDbUser(res.user);
           if (res.user.kyc_verified) setKycCompleted(true);
         }
       } catch(e) { console.warn('Backend sync failed:', e?.message || e); }
     } else if (userData.accessToken) {
       if (userData.dbUser) {
+        resolvedDbUser = userData.dbUser;
         setDbUser(userData.dbUser);
         if (userData.dbUser.kyc_verified) setKycCompleted(true);
       }
     }
+
     setIsAuthenticated(true);
 
-    // ✅ Check for pending org invite — redirect to join-org after login
+    // ── Navigate based on role using resolvedDbUser (not state) ──
+    if (resolvedDbUser?.role === 'admin') {
+      window.location.replace('/admin');
+      return;
+    }
+
+    // ── Check for pending org invite ──────────────────────────
     const pendingToken = sessionStorage.getItem('pending_invite_token');
     if (pendingToken) {
       sessionStorage.removeItem('pending_invite_token');
-      // Small delay to let auth state settle
       setTimeout(() => {
-        window.location.href = `/join-org?token=${pendingToken}`;
+        window.location.replace(`/join-org?token=${pendingToken}`);
       }, 300);
+      return;
     }
+
+    // ── Regular user goes to dashboard ────────────────────────
+    window.location.replace('/dashboard');
   };
 
   const handleKycComplete = (status) => {
@@ -217,22 +325,15 @@ function App() {
     setDbUser(prev => prev ? { ...prev, kyc_verified: status } : prev);
   };
 
-  if (!sessionChecked) {
-    return (
-      <div style={{ minHeight:'100vh', background:'#080c0a', display:'flex', alignItems:'center', justifyContent:'center' }}>
-        <div style={{ width:20, height:20, border:'2px solid #22c55e22', borderTopColor:'#22c55e', borderRadius:'50%', animation:'spin 1s linear infinite' }}/>
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-      </div>
-    );
-  }
-
   return (
     <NotificationProvider>
       <PortfolioProvider>
         <Router>
           <AppInner
             isAuthenticated={isAuthenticated}
-            user={user} setUser={setUser}
+            sessionChecked={sessionChecked}
+            user={user}
+            setUser={setUser}
             kycCompleted={kycCompleted}
             handleLogin={handleLogin}
             handleLogout={handleLogout}
