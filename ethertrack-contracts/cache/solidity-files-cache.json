@@ -904,8 +904,8 @@
       ]
     },
     "C:\\Users\\ASUS\\Desktop\\EtherTrack\\ethertrack-contracts\\contracts\\Marketplace.sol": {
-      "lastModificationDate": 1772942559174,
-      "contentHash": "7944c62b3ee236e6a3056a19eaac43b1",
+      "lastModificationDate": 1777440893375,
+      "contentHash": "1f59fb90a4f7b4b98c4e215e20cfdee9",
       "sourceName": "contracts/Marketplace.sol",
       "solcConfig": {
         "version": "0.8.26",

@@ -9,69 +9,41 @@ import "./CarbonCreditToken.sol";
 import "./KYCRegistry.sol";
 import "./Treasury.sol";
 
-/**
- * @title Marketplace
- * @author EtherTrack
- * @notice Hybrid Order Book + AMM marketplace for carbon credits.
- *
- * ARCHITECTURE:
- *   Layer 1 — Sell Orders (listings)    : seller deposits credits → escrow
- *   Layer 2 — Buy Orders (bids)         : buyer deposits ETH → escrow
- *   Layer 3 — Matching Engine           : auto-matches bids vs asks on-chain
- *   Layer 4 — AMM Pool interface        : routes small orders to AMMPool.sol
- *
- * ORDER FLOW:
- *   Seller lists → credits locked in contract
- *   Buyer bids   → ETH locked in contract
- *   Match found  → atomic settlement (credits + ETH swap in one tx)
- *   Fee          → 0.5% to Treasury
- *
- * BLOCKCHAIN MIGRATION:
- *   openOrders state     → on-chain orders mapping
- *   trades history       → CreditTraded events
- *   handleConfirmTrade() → buyCredit() / matchOrder()
- *   cancelOrder()        → cancelOrder() on-chain
- */
 contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
 
     CarbonCreditToken public creditToken;
     KYCRegistry       public kycRegistry;
     Treasury          public treasury;
 
-    // ── Enums ─────────────────────────────────────────────
     enum OrderSide   { BUY, SELL }
     enum OrderStatus { OPEN, FILLED, PARTIALLY_FILLED, CANCELLED, EXPIRED }
 
-    // ── Structs ───────────────────────────────────────────
-
-    // Sell-side: credits in escrow
     struct Listing {
         uint256     listingId;
         address     seller;
         uint256     tokenId;
         uint256     amount;
         uint256     amountRemaining;
-        uint256     pricePerUnit;    // ETH wei per credit
+        uint256     pricePerUnit;     // ETH wei per credit
+        uint256     pricePerUnitINR;  // ✅ NEW: INR price (scaled x100, e.g. 1200 = ₹12.00)
         uint256     listedAt;
         uint256     expiresAt;
         bool        active;
     }
 
-    // Buy-side: ETH in escrow
     struct BuyOrder {
         uint256     orderId;
         address     buyer;
         uint256     tokenId;
-        uint256     amount;          // credits wanted
-        uint256     amountFilled;    // credits received so far
-        uint256     limitPrice;      // max ETH wei per credit (0 = market)
-        uint256     ethEscrowed;     // ETH locked in contract
+        uint256     amount;
+        uint256     amountFilled;
+        uint256     limitPrice;
+        uint256     ethEscrowed;
         OrderStatus status;
         uint256     createdAt;
         uint256     expiresAt;
     }
 
-    // Completed trade record
     struct Trade {
         uint256 tradeId;
         uint256 listingId;
@@ -81,13 +53,15 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
         uint256 tokenId;
         uint256 amount;
         uint256 pricePerUnit;
+        uint256 pricePerUnitINR;  // ✅ NEW
         uint256 totalPrice;
-        uint256 fee;
+        uint256 buyerFee;         // ✅ NEW: 0.5% from buyer
+        uint256 sellerFee;        // ✅ NEW: 0.5% from seller
+        uint256 totalFee;         // ✅ NEW: 1% total
         uint256 tradedAt;
         bool    isAMM;
     }
 
-    // ── State ─────────────────────────────────────────────
     uint256 private _nextListingId;
     uint256 private _nextOrderId;
     uint256 private _nextTradeId;
@@ -100,17 +74,15 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
     mapping(address => uint256[]) public buyerOrders;
     mapping(address => uint256[]) public buyerTrades;
     mapping(address => uint256[]) public sellerTrades;
-    mapping(uint256 => uint256[]) public tokenListings;   // tokenId → listingIds
-    mapping(uint256 => uint256[]) public tokenBuyOrders;  // tokenId → buyOrderIds
+    mapping(uint256 => uint256[]) public tokenListings;
+    mapping(uint256 => uint256[]) public tokenBuyOrders;
 
-    // AMM pool address (set after AMMPool.sol deployed)
     address public ammPool;
-
-    // AMM threshold — orders below this use AMM, above use order book
-    // Default: 100 credits
     uint256 public ammThreshold = 100;
 
-    uint256 public constant PLATFORM_FEE_BPS = 50;   // 0.5%
+    // ✅ FIXED: 0.5% each side = 1% total
+    uint256 public constant BUYER_FEE_BPS    = 50;   // 0.5%
+    uint256 public constant SELLER_FEE_BPS   = 50;   // 0.5%
     uint256 public constant BPS_DENOMINATOR  = 10000;
     uint256 public constant MAX_DURATION     = 90 days;
     uint256 public constant DEFAULT_DURATION = 30 days;
@@ -121,10 +93,11 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
         address indexed seller,
         uint256 indexed tokenId,
         uint256 amount,
-        uint256 pricePerUnit
+        uint256 pricePerUnit,
+        uint256 pricePerUnitINR  // ✅ NEW
     );
     event ListingCancelled(uint256 indexed listingId, address indexed seller);
-    event ListingUpdated(uint256 indexed listingId, uint256 newPrice);
+    event ListingUpdated(uint256 indexed listingId, uint256 newPrice, uint256 newPriceINR);
 
     event BuyOrderPlaced(
         uint256 indexed orderId,
@@ -146,8 +119,11 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
         uint256 tokenId,
         uint256 amount,
         uint256 pricePerUnit,
+        uint256 pricePerUnitINR,  // ✅ NEW
         uint256 totalPrice,
-        uint256 fee,
+        uint256 buyerFee,         // ✅ NEW
+        uint256 sellerFee,        // ✅ NEW
+        uint256 totalFee,         // ✅ NEW
         bool    isAMM
     );
 
@@ -155,26 +131,31 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
     event AMMThresholdUpdated(uint256 newThreshold);
     event MatchExecuted(uint256 listingId, uint256 buyOrderId, uint256 amount, uint256 price);
 
-    // ── Modifiers ─────────────────────────────────────────
+    // ✅ FIXED: KYC check is now real
     modifier onlyKYCVerified() {
-        // KYC verified at wallet connection — no per-tx check
+        require(
+            kycRegistry.isKYCVerified(msg.sender),
+            "Not authorized: wallet not KYC verified"
+        );
         _;
     }
 
     modifier listingExists(uint256 listingId) {
-        require(listings[listingId].active, "Listing not active or already cancelled");
-        require(block.timestamp < listings[listingId].expiresAt, "Listing has expired, please re-list");
+        require(listings[listingId].active, "Listing not active");
+        require(block.timestamp < listings[listingId].expiresAt, "Listing expired");
         _;
     }
 
     modifier buyOrderExists(uint256 orderId) {
-        require(buyOrders[orderId].status == OrderStatus.OPEN ||
-                buyOrders[orderId].status == OrderStatus.PARTIALLY_FILLED, "Buy order not open");
+        require(
+            buyOrders[orderId].status == OrderStatus.OPEN ||
+            buyOrders[orderId].status == OrderStatus.PARTIALLY_FILLED,
+            "Buy order not open"
+        );
         require(block.timestamp < buyOrders[orderId].expiresAt, "Buy order expired");
         _;
     }
 
-    // ── Constructor ───────────────────────────────────────
     constructor(
         address initialOwner,
         address creditTokenAddress,
@@ -186,25 +167,20 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
         treasury    = Treasury(payable(treasuryAddress));
     }
 
-    // ═══════════════════════════════════════════════════════
-    // SELL SIDE — List credits for sale
-    // ═══════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
+    // LIST CREDITS
+    // ═══════════════════════════════════════════════════
 
-    /**
-     * @notice List carbon credits for sale
-     * @dev    Credits transferred to escrow immediately.
-     *         After listing, auto-scans open buy orders for instant match.
-     *
-     * BLOCKCHAIN MIGRATION: Replaces handleListForSale() in Portfolio.js
-     */
     function listCredit(
         uint256 tokenId,
         uint256 amount,
-        uint256 pricePerUnit,
+        uint256 pricePerUnit,    // ETH wei per credit
+        uint256 pricePerUnitINR, // ✅ NEW: INR price (whole rupees, e.g. 1200 = ₹1200)
         uint256 duration
     ) external onlyKYCVerified whenNotPaused returns (uint256 listingId) {
         require(amount > 0,       "Amount must be > 0");
-        require(pricePerUnit > 0, "Price must be > 0");
+        require(pricePerUnit > 0, "ETH price must be > 0");
+        require(pricePerUnitINR > 0, "INR price must be > 0");
         require(
             creditToken.balanceOf(msg.sender, tokenId) >= amount,
             "Insufficient credits"
@@ -223,6 +199,7 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
             amount:          amount,
             amountRemaining: amount,
             pricePerUnit:    pricePerUnit,
+            pricePerUnitINR: pricePerUnitINR,  // ✅ store INR price
             listedAt:        block.timestamp,
             expiresAt:       block.timestamp + dur,
             active:          true
@@ -231,66 +208,46 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
         sellerListings[msg.sender].push(listingId);
         tokenListings[tokenId].push(listingId);
 
-        // Lock credits in escrow
         creditToken.safeTransferFrom(msg.sender, address(this), tokenId, amount, "");
 
-        emit CreditListed(listingId, msg.sender, tokenId, amount, pricePerUnit);
+        emit CreditListed(listingId, msg.sender, tokenId, amount, pricePerUnit, pricePerUnitINR);
 
-        // ── AUTO-MATCH: scan open buy orders for this tokenId ──
         _tryMatchListing(listingId);
     }
 
-    /**
-     * @notice Update listing price
-     */
     function updateListingPrice(
         uint256 listingId,
-        uint256 newPrice
+        uint256 newPriceEth,
+        uint256 newPriceINR
     ) external listingExists(listingId) {
         require(listings[listingId].seller == msg.sender, "Not your listing");
-        require(newPrice > 0, "Price must be > 0");
-        listings[listingId].pricePerUnit = newPrice;
-        emit ListingUpdated(listingId, newPrice);
-        // Try matching at new price
+        require(newPriceEth > 0 && newPriceINR > 0, "Price must be > 0");
+        listings[listingId].pricePerUnit    = newPriceEth;
+        listings[listingId].pricePerUnitINR = newPriceINR;
+        emit ListingUpdated(listingId, newPriceEth, newPriceINR);
         _tryMatchListing(listingId);
     }
 
-    /**
-     * @notice Cancel listing — returns credits to seller
-     * BLOCKCHAIN MIGRATION: Replaces handleDelist() in Portfolio.js
-     */
     function cancelListing(uint256 listingId) external listingExists(listingId) {
         Listing storage listing = listings[listingId];
         require(
             listing.seller == msg.sender || msg.sender == owner(),
             "Not your listing"
         );
-
         listing.active = false;
-
         if (listing.amountRemaining > 0) {
             creditToken.safeTransferFrom(
-                address(this),
-                listing.seller,
-                listing.tokenId,
-                listing.amountRemaining,
-                ""
+                address(this), listing.seller,
+                listing.tokenId, listing.amountRemaining, ""
             );
         }
-
         emit ListingCancelled(listingId, msg.sender);
     }
 
-    // ═══════════════════════════════════════════════════════
-    // BUY SIDE — Place buy orders / bids
-    // ═══════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
+    // BUY CREDIT — ETH payment
+    // ═══════════════════════════════════════════════════
 
-    /**
-     * @notice Instant market buy — buy credits at current listing price
-     * @dev    For orders above ammThreshold. Below threshold → use AMM.
-     *
-     * BLOCKCHAIN MIGRATION: Replaces handleConfirmTrade() market order in CarbonCredits.js
-     */
     function buyCredit(
         uint256 listingId,
         uint256 amount
@@ -301,17 +258,20 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
         require(amount > 0,                        "Amount must be > 0");
         require(amount <= listing.amountRemaining, "Exceeds available amount");
 
-        uint256 totalPrice   = amount * listing.pricePerUnit;
-        uint256 fee          = (totalPrice * PLATFORM_FEE_BPS) / BPS_DENOMINATOR;
-        uint256 sellerAmount = totalPrice - fee;
+        uint256 subtotal   = amount * listing.pricePerUnit;
 
-        require(msg.value >= totalPrice + fee, "Insufficient ETH");
+        // ✅ FIXED: 0.5% from buyer + 0.5% from seller = 1% total
+        uint256 buyerFee   = (subtotal * BUYER_FEE_BPS)  / BPS_DENOMINATOR;
+        uint256 sellerFee  = (subtotal * SELLER_FEE_BPS) / BPS_DENOMINATOR;
+        uint256 totalFee   = buyerFee + sellerFee;
+        uint256 sellerGets = subtotal - sellerFee;
+        uint256 buyerPays  = subtotal + buyerFee;
 
-        // Update listing
+        require(msg.value >= buyerPays, "Insufficient ETH: send subtotal + 0.5% fee");
+
         listing.amountRemaining -= amount;
         if (listing.amountRemaining == 0) listing.active = false;
 
-        // Record trade
         uint256 tradeId = _recordTrade(
             listingId,
             type(uint256).max,
@@ -320,8 +280,11 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
             listing.tokenId,
             amount,
             listing.pricePerUnit,
-            totalPrice,
-            fee,
+            listing.pricePerUnitINR,
+            subtotal,
+            buyerFee,
+            sellerFee,
+            totalFee,
             false
         );
 
@@ -330,34 +293,25 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
             address(this), msg.sender, listing.tokenId, amount, ""
         );
 
-        // Pay seller
-        (bool paid,) = listing.seller.call{value: sellerAmount}("");
+        // ✅ Pay seller: subtotal - 0.5% seller fee
+        (bool paid,) = listing.seller.call{value: sellerGets}("");
         require(paid, "Seller payment failed");
 
-        // Fee to Treasury
-        treasury.depositFee{value: fee}();
+        // ✅ Platform gets 1% total (buyer fee + seller fee)
+        treasury.depositFee{value: totalFee}();
 
         // Refund excess ETH
-        uint256 excess = msg.value - (totalPrice + fee);
+        uint256 excess = msg.value - buyerPays;
         if (excess > 0) {
             (bool refunded,) = msg.sender.call{value: excess}("");
             require(refunded, "Refund failed");
         }
     }
 
-    /**
-     * @notice Place a limit BUY order — ETH locked in escrow
-     * @dev    Buyer deposits ETH upfront. Engine auto-matches when
-     *         a listing appears at or below limitPrice.
-     *
-     * This is the KEY function that completes the order book.
-     * BLOCKCHAIN MIGRATION: Replaces openOrders React state → on-chain
-     *
-     * @param tokenId    Which carbon credit token to buy
-     * @param amount     How many credits to buy
-     * @param limitPrice Max price per credit in ETH wei (0 = market, match any)
-     * @param duration   Order validity (0 = 7 days default)
-     */
+    // ═══════════════════════════════════════════════════
+    // PLACE BID
+    // ═══════════════════════════════════════════════════
+
     function placeBuyOrder(
         uint256 tokenId,
         uint256 amount,
@@ -366,18 +320,16 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
     ) external payable onlyKYCVerified whenNotPaused returns (uint256 orderId) {
         require(amount > 0, "Amount must be > 0");
 
-        // If limitPrice=0 treat as market — use best ask price
-        // Buyer must deposit enough ETH
         uint256 effectivePrice = limitPrice;
         if (effectivePrice == 0) {
-            // Find best ask for this tokenId
             effectivePrice = _getBestAsk(tokenId);
-            require(effectivePrice > 0, "No listings available for market order");
+            require(effectivePrice > 0, "No listings available");
         }
 
         uint256 totalCost = amount * effectivePrice;
-        uint256 fee       = (totalCost * PLATFORM_FEE_BPS) / BPS_DENOMINATOR;
-        require(msg.value >= totalCost + fee, "Insufficient ETH escrowed");
+        // ✅ Buyer locks subtotal + 0.5% buyer fee
+        uint256 buyerFee  = (totalCost * BUYER_FEE_BPS) / BPS_DENOMINATOR;
+        require(msg.value >= totalCost + buyerFee, "Insufficient ETH escrowed");
 
         orderId = _nextOrderId++;
 
@@ -399,14 +351,9 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
 
         emit BuyOrderPlaced(orderId, msg.sender, tokenId, amount, buyOrders[orderId].limitPrice, msg.value);
 
-        // ── AUTO-MATCH: immediately try to fill against existing listings ──
         _tryMatchBuyOrder(orderId);
     }
 
-    /**
-     * @notice Cancel an open buy order — refunds escrowed ETH
-     * BLOCKCHAIN MIGRATION: Replaces cancelOrder() in CarbonCredits.js
-     */
     function cancelBuyOrder(uint256 orderId) external nonReentrant {
         BuyOrder storage order = buyOrders[orderId];
         require(order.buyer == msg.sender, "Not your order");
@@ -418,13 +365,11 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
 
         order.status = OrderStatus.CANCELLED;
 
-        // Refund remaining escrowed ETH
-        uint256 filledCost    = order.amountFilled * order.limitPrice;
-        uint256 filledFee     = (filledCost * PLATFORM_FEE_BPS) / BPS_DENOMINATOR;
-        uint256 amountSpent   = filledCost + filledFee;
-        uint256 refundAmount  = order.ethEscrowed > amountSpent
-            ? order.ethEscrowed - amountSpent
-            : 0;
+        uint256 filledCost   = order.amountFilled * order.limitPrice;
+        uint256 filledFee    = (filledCost * BUYER_FEE_BPS) / BPS_DENOMINATOR;
+        uint256 amountSpent  = filledCost + filledFee;
+        uint256 refundAmount = order.ethEscrowed > amountSpent
+            ? order.ethEscrowed - amountSpent : 0;
 
         if (refundAmount > 0) {
             (bool refunded,) = msg.sender.call{value: refundAmount}("");
@@ -434,106 +379,72 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
         emit BuyOrderCancelled(orderId, msg.sender, refundAmount);
     }
 
-    // ═══════════════════════════════════════════════════════
-    // MATCHING ENGINE — Internal
-    // ═══════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
+    // MATCHING ENGINE
+    // ═══════════════════════════════════════════════════
 
-    /**
-     * @notice Try to match a new listing against existing buy orders
-     * @dev    Called automatically after listCredit() and updateListingPrice()
-     *         Scans open buy orders for this tokenId with limitPrice >= listing.pricePerUnit
-     *         Matches best (highest) bid first — price-time priority
-     */
     function _tryMatchListing(uint256 listingId) internal {
         Listing storage listing = listings[listingId];
         if (!listing.active || listing.amountRemaining == 0) return;
 
         uint256[] storage orderIds = tokenBuyOrders[listing.tokenId];
-
         for (uint256 i = 0; i < orderIds.length; i++) {
             if (listing.amountRemaining == 0) break;
-
             BuyOrder storage order = buyOrders[orderIds[i]];
-
-            // Skip non-open orders
             if (order.status != OrderStatus.OPEN &&
                 order.status != OrderStatus.PARTIALLY_FILLED) continue;
             if (block.timestamp >= order.expiresAt) continue;
-            if (order.buyer == listing.seller) continue; // no self-match
-
-            // Price check: buyer's limit >= seller's ask
+            if (order.buyer == listing.seller) continue;
             if (order.limitPrice < listing.pricePerUnit) continue;
-
-            // Match size
             uint256 matchAmount = _min(
                 order.amount - order.amountFilled,
                 listing.amountRemaining
             );
             if (matchAmount == 0) continue;
-
-            // Execute at listing price (seller's ask — better for buyer)
             _executeMatch(listingId, orderIds[i], matchAmount, listing.pricePerUnit);
         }
     }
 
-    /**
-     * @notice Try to match a new buy order against existing listings
-     * @dev    Called automatically after placeBuyOrder()
-     *         Scans active listings for this tokenId with price <= order.limitPrice
-     *         Matches best (lowest) ask first
-     */
     function _tryMatchBuyOrder(uint256 orderId) internal {
         BuyOrder storage order = buyOrders[orderId];
         if (order.status != OrderStatus.OPEN &&
             order.status != OrderStatus.PARTIALLY_FILLED) return;
 
         uint256[] storage listingIds = tokenListings[order.tokenId];
-
         for (uint256 i = 0; i < listingIds.length; i++) {
             if (order.amountFilled >= order.amount) break;
-
             Listing storage listing = listings[listingIds[i]];
-
             if (!listing.active) continue;
             if (block.timestamp >= listing.expiresAt) continue;
-            if (listing.seller == order.buyer) continue; // no self-match
-
-            // Price check: seller's ask <= buyer's limit
+            if (listing.seller == order.buyer) continue;
             if (listing.pricePerUnit > order.limitPrice) continue;
-
             uint256 matchAmount = _min(
                 order.amount - order.amountFilled,
                 listing.amountRemaining
             );
             if (matchAmount == 0) continue;
-
-            // Execute at listing price (best for buyer)
             _executeMatch(listingIds[i], orderId, matchAmount, listing.pricePerUnit);
         }
     }
 
-    /**
-     * @notice Core settlement — atomic swap of credits + ETH
-     * @dev    Both credits AND ETH already in escrow — pure state update + transfer
-     */
     function _executeMatch(
         uint256 listingId,
         uint256 buyOrderId,
         uint256 amount,
         uint256 price
-    ) internal nonReentrant {
+    ) internal {
         Listing  storage listing = listings[listingId];
         BuyOrder storage order   = buyOrders[buyOrderId];
 
-        uint256 totalPrice   = amount * price;
-        uint256 fee          = (totalPrice * PLATFORM_FEE_BPS) / BPS_DENOMINATOR;
-        uint256 sellerAmount = totalPrice - fee;
+        uint256 subtotal   = amount * price;
+        uint256 buyerFee   = (subtotal * BUYER_FEE_BPS)  / BPS_DENOMINATOR;
+        uint256 sellerFee  = (subtotal * SELLER_FEE_BPS) / BPS_DENOMINATOR;
+        uint256 totalFee   = buyerFee + sellerFee;
+        uint256 sellerGets = subtotal - sellerFee;
 
-        // Update listing
         listing.amountRemaining -= amount;
         if (listing.amountRemaining == 0) listing.active = false;
 
-        // Update buy order
         order.amountFilled += amount;
         if (order.amountFilled >= order.amount) {
             order.status = OrderStatus.FILLED;
@@ -541,60 +452,45 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
             order.status = OrderStatus.PARTIALLY_FILLED;
         }
 
-        // Record trade
         _recordTrade(
-            listingId,
-            buyOrderId,
-            order.buyer,
-            listing.seller,
-            listing.tokenId,
-            amount,
-            price,
-            totalPrice,
-            fee,
+            listingId, buyOrderId,
+            order.buyer, listing.seller,
+            listing.tokenId, amount,
+            price, listing.pricePerUnitINR,
+            subtotal, buyerFee, sellerFee, totalFee,
             false
         );
 
-        // Transfer credits from escrow to buyer
+        // Transfer credits
         creditToken.safeTransferFrom(
-            address(this),
-            order.buyer,
-            listing.tokenId,
-            amount,
-            ""
+            address(this), order.buyer,
+            listing.tokenId, amount, ""
         );
 
-        // Pay seller from buyer's escrowed ETH
-        (bool paid,) = listing.seller.call{value: sellerAmount}("");
+        // Pay seller
+        (bool paid,) = listing.seller.call{value: sellerGets}("");
         require(paid, "Seller payment failed");
 
-        // Fee to Treasury
-        treasury.depositFee{value: fee}();
+        // Platform fee
+        treasury.depositFee{value: totalFee}();
 
-        // Refund excess ETH to buyer if matched at lower price than their limit
-        uint256 actualCost    = totalPrice + fee;
-        uint256 expectedCost  = amount * order.limitPrice;
-        uint256 expectedFee   = (expectedCost * PLATFORM_FEE_BPS) / BPS_DENOMINATOR;
-        uint256 budgeted      = expectedCost + expectedFee;
+        // Refund excess to buyer if matched below limit
+        uint256 budgeted   = (amount * order.limitPrice) + ((amount * order.limitPrice * BUYER_FEE_BPS) / BPS_DENOMINATOR);
+        uint256 actualCost = subtotal + buyerFee;
         if (budgeted > actualCost) {
             uint256 refund = budgeted - actualCost;
             order.ethEscrowed -= refund;
             (bool refunded,) = order.buyer.call{value: refund}("");
-            // Non-critical: refund failure doesn't revert trade
         }
 
         emit MatchExecuted(listingId, buyOrderId, amount, price);
         emit BuyOrderFilled(buyOrderId, amount, order.amount - order.amountFilled);
     }
 
-    // ═══════════════════════════════════════════════════════
-    // VIEW FUNCTIONS — Used by React frontend
-    // ═══════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
+    // VIEW FUNCTIONS
+    // ═══════════════════════════════════════════════════
 
-    /**
-     * @notice All active sell listings — market tab data source
-     * BLOCKCHAIN MIGRATION: Replaces CREDITS mock array in CarbonCredits.js
-     */
     function getActiveListings() external view returns (Listing[] memory) {
         uint256 count = 0;
         for (uint256 i = 0; i < _nextListingId; i++) {
@@ -610,10 +506,6 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
         return active;
     }
 
-    /**
-     * @notice All open buy orders — buy-side order book UI
-     * NEW: Powers the bid side of order book in CarbonCredits.js
-     */
     function getOpenBuyOrders() external view returns (BuyOrder[] memory) {
         uint256 count = 0;
         for (uint256 i = 0; i < _nextOrderId; i++) {
@@ -633,39 +525,10 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
         return open;
     }
 
-    /**
-     * @notice Open buy orders for a specific tokenId
-     * NEW: Powers the bid side of per-credit order book
-     */
-    function getBuyOrdersForToken(uint256 tokenId) external view returns (BuyOrder[] memory) {
-        uint256[] storage ids = tokenBuyOrders[tokenId];
-        uint256 count = 0;
-        for (uint256 i = 0; i < ids.length; i++) {
-            BuyOrder storage o = buyOrders[ids[i]];
-            if ((o.status == OrderStatus.OPEN || o.status == OrderStatus.PARTIALLY_FILLED) &&
-                block.timestamp < o.expiresAt) count++;
-        }
-        BuyOrder[] memory open = new BuyOrder[](count);
-        uint256 idx = 0;
-        for (uint256 i = 0; i < ids.length; i++) {
-            BuyOrder storage o = buyOrders[ids[i]];
-            if ((o.status == OrderStatus.OPEN || o.status == OrderStatus.PARTIALLY_FILLED) &&
-                block.timestamp < o.expiresAt) {
-                open[idx++] = o;
-            }
-        }
-        return open;
-    }
-
-    /**
-     * @notice Full order book for a tokenId: asks + bids sorted
-     * NEW: Single call to populate order book UI
-     */
     function getOrderBook(uint256 tokenId) external view returns (
-        Listing[]  memory asks,  // sell side sorted low→high
-        BuyOrder[] memory bids   // buy side sorted high→low
+        Listing[]  memory asks,
+        BuyOrder[] memory bids
     ) {
-        // Build asks
         uint256[] storage lIds = tokenListings[tokenId];
         uint256 askCount = 0;
         for (uint256 i = 0; i < lIds.length; i++) {
@@ -679,7 +542,6 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
             }
         }
 
-        // Build bids
         uint256[] storage bIds = tokenBuyOrders[tokenId];
         uint256 bidCount = 0;
         for (uint256 i = 0; i < bIds.length; i++) {
@@ -698,52 +560,44 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
         }
     }
 
-    function getSellerListings(address seller)  external view returns (uint256[] memory) { return sellerListings[seller]; }
-    function getBuyerOrders(address buyer)       external view returns (uint256[] memory) { return buyerOrders[buyer]; }
-    function getBuyerTrades(address buyer)       external view returns (uint256[] memory) { return buyerTrades[buyer]; }
-    function getSellerTrades(address seller)     external view returns (uint256[] memory) { return sellerTrades[seller]; }
-    function getTrade(uint256 tradeId)           external view returns (Trade memory)     { return trades[tradeId]; }
+    function getSellerListings(address seller) external view returns (uint256[] memory) { return sellerListings[seller]; }
+    function getBuyerOrders(address buyer)     external view returns (uint256[] memory) { return buyerOrders[buyer]; }
+    function getBuyerTrades(address buyer)     external view returns (uint256[] memory) { return buyerTrades[buyer]; }
+    function getSellerTrades(address seller)   external view returns (uint256[] memory) { return sellerTrades[seller]; }
+    function getTrade(uint256 tradeId)         external view returns (Trade memory)     { return trades[tradeId]; }
 
-    function calculateFee(uint256 amount, uint256 pricePerUnit) external pure returns (uint256 fee, uint256 total) {
-        total = amount * pricePerUnit;
-        fee   = (total * PLATFORM_FEE_BPS) / BPS_DENOMINATOR;
+    function calculateBuyerCost(uint256 amount, uint256 pricePerUnit) external pure returns (
+        uint256 subtotal, uint256 buyerFee, uint256 totalBuyerPays
+    ) {
+        subtotal      = amount * pricePerUnit;
+        buyerFee      = (subtotal * BUYER_FEE_BPS) / BPS_DENOMINATOR;
+        totalBuyerPays = subtotal + buyerFee;
+    }
+
+    function calculateSellerReceives(uint256 amount, uint256 pricePerUnit) external pure returns (
+        uint256 subtotal, uint256 sellerFee, uint256 sellerReceives
+    ) {
+        subtotal       = amount * pricePerUnit;
+        sellerFee      = (subtotal * SELLER_FEE_BPS) / BPS_DENOMINATOR;
+        sellerReceives = subtotal - sellerFee;
     }
 
     function totalListings()  external view returns (uint256) { return _nextListingId; }
     function totalBuyOrders() external view returns (uint256) { return _nextOrderId;   }
     function totalTrades()    external view returns (uint256) { return _nextTradeId;   }
+    function shouldUseAMM(uint256 amount) public view returns (bool) {
+        return ammPool != address(0) && amount <= ammThreshold;
+    }
 
-    // ═══════════════════════════════════════════════════════
-    // AMM INTEGRATION
-    // ═══════════════════════════════════════════════════════
-
-    /**
-     * @notice Set AMM pool address — called after AMMPool.sol deployed
-     */
     function setAMMPool(address _ammPool) external onlyOwner {
         ammPool = _ammPool;
         emit AMMPoolSet(_ammPool);
     }
 
-    /**
-     * @notice Update AMM threshold (credits)
-     * Orders below threshold → AMM. Above → order book.
-     */
     function setAMMThreshold(uint256 threshold) external onlyOwner {
         ammThreshold = threshold;
         emit AMMThresholdUpdated(threshold);
     }
-
-    /**
-     * @notice Check if an order should use AMM or order book
-     */
-    function shouldUseAMM(uint256 amount) public view returns (bool) {
-        return ammPool != address(0) && amount <= ammThreshold;
-    }
-
-    // ═══════════════════════════════════════════════════════
-    // INTERNAL HELPERS
-    // ═══════════════════════════════════════════════════════
 
     function _getBestAsk(uint256 tokenId) internal view returns (uint256 bestPrice) {
         uint256[] storage lIds = tokenListings[tokenId];
@@ -765,24 +619,30 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
         uint256 tokenId,
         uint256 amount,
         uint256 price,
+        uint256 priceINR,
         uint256 totalPrice,
-        uint256 fee,
+        uint256 buyerFee,
+        uint256 sellerFee,
+        uint256 totalFee,
         bool    isAMM
     ) internal returns (uint256 tradeId) {
         tradeId = _nextTradeId++;
         trades[tradeId] = Trade({
-            tradeId:      tradeId,
-            listingId:    listingId,
-            buyOrderId:   buyOrderId,
-            buyer:        buyer,
-            seller:       seller,
-            tokenId:      tokenId,
-            amount:       amount,
-            pricePerUnit: price,
-            totalPrice:   totalPrice,
-            fee:          fee,
-            tradedAt:     block.timestamp,
-            isAMM:        isAMM
+            tradeId:        tradeId,
+            listingId:      listingId,
+            buyOrderId:     buyOrderId,
+            buyer:          buyer,
+            seller:         seller,
+            tokenId:        tokenId,
+            amount:         amount,
+            pricePerUnit:   price,
+            pricePerUnitINR:priceINR,
+            totalPrice:     totalPrice,
+            buyerFee:       buyerFee,
+            sellerFee:      sellerFee,
+            totalFee:       totalFee,
+            tradedAt:       block.timestamp,
+            isAMM:          isAMM
         });
         buyerTrades[buyer].push(tradeId);
         sellerTrades[seller].push(tradeId);
@@ -790,7 +650,8 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
         emit CreditTraded(
             tradeId, listingId, buyOrderId,
             buyer, seller, tokenId,
-            amount, price, totalPrice, fee, isAMM
+            amount, price, priceINR,
+            totalPrice, buyerFee, sellerFee, totalFee, isAMM
         );
     }
 
@@ -798,16 +659,11 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
         return a < b ? a : b;
     }
 
-    // ── ERC1155 Receiver ──────────────────────────────────
-    function onERC1155Received(
-        address, address, uint256, uint256, bytes calldata
-    ) external pure override returns (bytes4) {
+    function onERC1155Received(address, address, uint256, uint256, bytes calldata) external pure override returns (bytes4) {
         return this.onERC1155Received.selector;
     }
 
-    function onERC1155BatchReceived(
-        address, address, uint256[] calldata, uint256[] calldata, bytes calldata
-    ) external pure override returns (bytes4) {
+    function onERC1155BatchReceived(address, address, uint256[] calldata, uint256[] calldata, bytes calldata) external pure override returns (bytes4) {
         return this.onERC1155BatchReceived.selector;
     }
 
@@ -815,7 +671,6 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
         return interfaceId == type(IERC1155Receiver).interfaceId;
     }
 
-    // ── Admin ─────────────────────────────────────────────
     function pause()   external onlyOwner { _pause(); }
     function unpause() external onlyOwner { _unpause(); }
 

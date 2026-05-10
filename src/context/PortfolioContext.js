@@ -9,7 +9,7 @@ const ADDRESSES = {
   AMMPool:           process.env.REACT_APP_AMM_POOL_ADDRESS,
 };
 
-const API            = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+const API              = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 const SEPOLIA_CHAIN_ID = '0xaa36a7';
 
 const ABI = {
@@ -27,24 +27,24 @@ const ABI = {
     'event CreditRetired(uint256 indexed tokenId, address indexed retiredBy, uint256 amount, string projectName)',
   ],
   Marketplace: [
-    'function listCredit(uint256 tokenId, uint256 amount, uint256 pricePerUnit, uint256 duration) returns (uint256)',
+    'function listCredit(uint256 tokenId, uint256 amount, uint256 pricePerUnit, uint256 pricePerUnitINR, uint256 duration) returns (uint256)',
     'function cancelListing(uint256 listingId)',
-    'function updateListingPrice(uint256 listingId, uint256 newPrice)',
+    'function updateListingPrice(uint256 listingId, uint256 newPriceEth, uint256 newPriceINR)',
     'function buyCredit(uint256 listingId, uint256 amount) payable',
     'function placeBuyOrder(uint256 tokenId, uint256 amount, uint256 limitPrice, uint256 duration) payable returns (uint256)',
     'function cancelBuyOrder(uint256 orderId)',
-    'function getActiveListings() view returns (tuple(uint256 listingId,address seller,uint256 tokenId,uint256 amount,uint256 amountRemaining,uint256 pricePerUnit,uint256 listedAt,uint256 expiresAt,bool active)[])',
+    'function getActiveListings() view returns (tuple(uint256 listingId,address seller,uint256 tokenId,uint256 amount,uint256 amountRemaining,uint256 pricePerUnit,uint256 pricePerUnitINR,uint256 listedAt,uint256 expiresAt,bool active)[])',
     'function getOpenBuyOrders() view returns (tuple(uint256 orderId,address buyer,uint256 tokenId,uint256 amount,uint256 amountFilled,uint256 limitPrice,uint256 ethEscrowed,uint8 status,uint256 createdAt,uint256 expiresAt)[])',
-    'function getBuyOrdersForToken(uint256 tokenId) view returns (tuple(uint256 orderId,address buyer,uint256 tokenId,uint256 amount,uint256 amountFilled,uint256 limitPrice,uint256 ethEscrowed,uint8 status,uint256 createdAt,uint256 expiresAt)[])',
-    'function getOrderBook(uint256 tokenId) view returns (tuple(uint256 listingId,address seller,uint256 tokenId,uint256 amount,uint256 amountRemaining,uint256 pricePerUnit,uint256 listedAt,uint256 expiresAt,bool active)[] asks, tuple(uint256 orderId,address buyer,uint256 tokenId,uint256 amount,uint256 amountFilled,uint256 limitPrice,uint256 ethEscrowed,uint8 status,uint256 createdAt,uint256 expiresAt)[] bids)',
+    'function listings(uint256) view returns (tuple(uint256 listingId,address seller,uint256 tokenId,uint256 amount,uint256 amountRemaining,uint256 pricePerUnit,uint256 pricePerUnitINR,uint256 listedAt,uint256 expiresAt,bool active))',
+    'function getOrderBook(uint256 tokenId) view returns (tuple(uint256 listingId,address seller,uint256 tokenId,uint256 amount,uint256 amountRemaining,uint256 pricePerUnit,uint256 pricePerUnitINR,uint256 listedAt,uint256 expiresAt,bool active)[] asks, tuple(uint256 orderId,address buyer,uint256 tokenId,uint256 amount,uint256 amountFilled,uint256 limitPrice,uint256 ethEscrowed,uint8 status,uint256 createdAt,uint256 expiresAt)[] bids)',
     'function getSellerListings(address seller) view returns (uint256[])',
     'function getBuyerOrders(address buyer) view returns (uint256[])',
-    'function listings(uint256) view returns (tuple(uint256 listingId,address seller,uint256 tokenId,uint256 amount,uint256 amountRemaining,uint256 pricePerUnit,uint256 listedAt,uint256 expiresAt,bool active))',
-    'function calculateFee(uint256 amount, uint256 pricePerUnit) view returns (uint256 fee, uint256 total)',
+    'function calculateBuyerCost(uint256 amount, uint256 pricePerUnit) view returns (uint256 subtotal, uint256 buyerFee, uint256 totalBuyerPays)',
+    'function calculateSellerReceives(uint256 amount, uint256 pricePerUnit) view returns (uint256 subtotal, uint256 sellerFee, uint256 sellerReceives)',
     'function shouldUseAMM(uint256 amount) view returns (bool)',
     'function ammThreshold() view returns (uint256)',
-    'event CreditTraded(uint256 indexed tradeId,uint256 indexed listingId,uint256 indexed buyOrderId,address buyer,address seller,uint256 tokenId,uint256 amount,uint256 pricePerUnit,uint256 totalPrice,uint256 fee,bool isAMM)',
-    'event CreditListed(uint256 indexed listingId,address indexed seller,uint256 indexed tokenId,uint256 amount,uint256 pricePerUnit)',
+    'event CreditTraded(uint256 indexed tradeId,uint256 indexed listingId,uint256 indexed buyOrderId,address buyer,address seller,uint256 tokenId,uint256 amount,uint256 pricePerUnit,uint256 pricePerUnitINR,uint256 totalPrice,uint256 buyerFee,uint256 sellerFee,uint256 totalFee,bool isAMM)',
+    'event CreditListed(uint256 indexed listingId,address indexed seller,uint256 indexed tokenId,uint256 amount,uint256 pricePerUnit,uint256 pricePerUnitINR)',
     'event BuyOrderPlaced(uint256 indexed orderId,address indexed buyer,uint256 indexed tokenId,uint256 amount,uint256 limitPrice,uint256 ethEscrowed)',
     'event MatchExecuted(uint256 listingId,uint256 buyOrderId,uint256 amount,uint256 price)',
     'event ListingCancelled(uint256 indexed listingId,address indexed seller)',
@@ -55,11 +55,8 @@ const ABI = {
     'function swapCreditsForETH(uint256 poolId, uint256 credits, uint256 minEth) returns (uint256)',
     'function addLiquidity(uint256 poolId, uint256 creditAmount) payable returns (uint256)',
     'function removeLiquidity(uint256 poolId, uint256 shares) returns (uint256, uint256)',
-    'function quoteETHForCredits(uint256 poolId, uint256 ethIn) view returns (uint256 creditOut, uint256 fee)',
-    'function quoteCreditsForETH(uint256 poolId, uint256 credits) view returns (uint256 ethOut, uint256 fee)',
-    'function getPrice(uint256 poolId) view returns (uint256)',
     'function getPool(uint256 poolId) view returns (tuple(uint256 tokenId,uint256 creditReserve,uint256 ethReserve,uint256 totalShares,bool active,string name))',
-    'function getLPPosition(uint256 poolId, address lp) view returns (tuple(uint256 shares,uint256 creditDeposited,uint256 ethDeposited,uint256 depositedAt))',
+    'function getPrice(uint256 poolId) view returns (uint256)',
     'function totalPools() view returns (uint256)',
     'event Swapped(uint256 indexed poolId,address indexed trader,bool creditIn,uint256 amountIn,uint256 amountOut,uint256 fee)',
   ],
@@ -77,9 +74,7 @@ export const vintagePenalty = (year) => {
   return 25;
 };
 
-const ETH_INR_RATE = 280000;
-
-// ── Authenticated API helper ──────────────────────────────────────
+// ── Auth fetch helper ─────────────────────────────────────────────
 const authFetch = async (path, opts = {}) => {
   const token = localStorage.getItem('et_access');
   const res = await fetch(`${API}${path}`, {
@@ -95,69 +90,76 @@ const authFetch = async (path, opts = {}) => {
   return res.json();
 };
 
-// ── KYC: DB only, not contract ────────────────────────────────────
-const fetchDBKycStatus = async () => {
-  try {
-    const data = await authFetch('/api/auth/me');
-    return !!(data.kyc_verified || data.kyc_status === 'verified');
-  } catch { return false; }
+// ── Public fetch (no auth needed) ────────────────────────────────
+const publicFetch = async (path) => {
+  const res = await fetch(`${API}${path}`);
+  if (!res.ok) throw new Error(`API ${path} failed: ${res.status}`);
+  return res.json();
 };
 
-// ── Bound wallet from backend ─────────────────────────────────────
-const fetchBoundWallet = async () => {
-  try {
-    const data = await authFetch('/api/wallet/status');
-    return data.walletAddress?.toLowerCase() || null;
-  } catch { return null; }
-};
+const fetchDBKycStatus   = async () => { try { const d = await authFetch('/api/auth/me'); return !!(d.kyc_verified || d.kyc_status === 'verified'); } catch { return false; } };
+const fetchBoundWallet   = async () => { try { const d = await authFetch('/api/wallet/status'); return d.walletAddress?.toLowerCase() || null; } catch { return null; } };
+const fetchDBCredits     = async () => { try { const d = await authFetch('/api/portfolio/my-credits'); return d.credits || []; } catch { return []; } };
+const fetchMyRetirements = async () => { try { const d = await authFetch('/api/transactions/retirements'); return d.retirements || []; } catch { return []; } };
+const fetchETHRate       = async () => { try { const d = await authFetch('/api/trades/eth-rate'); return d.rate || 280000; } catch { return 280000; } };
 
-// ── ✅ NEW: fetch DB-approved credits (not yet / already on-chain) ─
-const fetchDBCredits = async () => {
+// ── Public listings fetch (no auth needed) ────────────────────────
+const fetchListingsFromAPI = async () => {
   try {
-    const data = await authFetch('/api/portfolio/my-credits');
-    return data.credits || [];
-  } catch (e) {
-    console.warn('fetchDBCredits failed:', e.message);
+    const d = await publicFetch('/api/market/listings');
+    return d.listings || [];
+  } catch {
     return [];
   }
 };
 
-// ── ✅ NEW: fetch retirement history from retirements table ────────
-const fetchMyRetirements = async () => {
-  try {
-    // First try the retirements table (used by verify.js)
-    const data = await authFetch('/api/transactions/retirements');
-    return data.retirements || [];
-  } catch (e) {
-    console.warn('fetchMyRetirements failed:', e.message);
-    return [];
-  }
+// ── ✅ Safe number helper — fixes PostgreSQL returning numerics as strings ──
+// PostgreSQL returns numeric/decimal columns as strings in JSON.
+// Always wrap price fields with safeNum() before calling .toFixed()
+const safeNum = (val, fallback = 0) => {
+  const n = Number(val);
+  return isNaN(n) ? fallback : n;
 };
 
 const PortfolioContext = createContext(null);
 
 export function PortfolioProvider({ children }) {
-  const [provider,      setProvider]      = useState(null);
-  const [signer,        setSigner]        = useState(null);
-  const [walletAddress, setWalletAddress] = useState('');
-  const [contracts,     setContracts]     = useState(null);
-  const [isKYCVerified, setIsKYCVerified] = useState(false);
-  const [chainOk,       setChainOk]       = useState(false);
-
+  const [provider,           setProvider]           = useState(null);
+  const [signer,             setSigner]             = useState(null);
+  const [walletAddress,      setWalletAddress]      = useState('');
+  const [contracts,          setContracts]          = useState(null);
+  const [isKYCVerified,      setIsKYCVerified]      = useState(false);
+  const [chainOk,            setChainOk]            = useState(false);
   const [walletMismatch,     setWalletMismatch]     = useState(false);
   const [walletMismatchInfo, setWalletMismatchInfo] = useState(null);
-
-  const [myCredits,    setMyCredits]    = useState([]);
-  const [myRetirements,setMyRetirements]= useState([]); // ✅ retirement history
-  const [listings,     setListings]     = useState([]);
-  const [buyOrders,    setBuyOrders]    = useState([]);
-  const [tradeHistory, setTradeHistory] = useState([]);
-  const [ammPools,     setAmmPools]     = useState([]);
-
-  const [loading, setLoading] = useState({ credits:false, listings:false, buyOrders:false, tx:false });
-  const [error,   setError]   = useState('');
+  const [myCredits,          setMyCredits]          = useState([]);
+  const [myRetirements,      setMyRetirements]      = useState([]);
+  const [listings,           setListings]           = useState([]);
+  const [buyOrders,          setBuyOrders]          = useState([]);
+  const [tradeHistory,       setTradeHistory]       = useState([]);
+  const [ammPools,           setAmmPools]           = useState([]);
+  const [loading,            setLoading]            = useState({ credits:false, listings:false, buyOrders:false, tx:false });
+  const [error,              setError]              = useState('');
+  const [ethINRRate,         setEthINRRate]         = useState(280000);
 
   const listenersRef = useRef([]);
+
+  // ── Load listings from API on mount — no wallet needed ────────
+  useEffect(() => {
+    loadListingsFromAPI();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch live ETH rate on mount and every 5 min
+  useEffect(() => {
+    fetchETHRate().then(setEthINRRate);
+    const id = setInterval(() => fetchETHRate().then(setEthINRRate), 5 * 60 * 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // ── KYC status check runs independently of wallet ─────────────
+  useEffect(() => {
+    fetchDBKycStatus().then(v => { if (v) setIsKYCVerified(true); });
+  }, []);
 
   const checkChain = async () => {
     if (!window.ethereum) return false;
@@ -171,111 +173,159 @@ export function PortfolioProvider({ children }) {
     amm:    ADDRESSES.AMMPool ? new ethers.Contract(ADDRESSES.AMMPool, ABI.AMMPool, _signer) : null,
   });
 
+  // ── loadListingsFromAPI — wallet-independent ──────────────────
+  const loadListingsFromAPI = useCallback(async () => {
+    setLoading(l => ({ ...l, listings: true }));
+    try {
+      const apiListings = await fetchListingsFromAPI();
+      if (apiListings.length > 0) {
+        const mapped = apiListings.map(l => {
+          const dep = vintagePenalty(safeNum(l.vintage_year || l.vintageYear, 0));
+
+          // ✅ FIX: Always use safeNum() — PostgreSQL returns numerics as strings
+          const priceINR    = safeNum(l.price_per_credit_inr || l.pricePerUnitINR, 850);
+          const priceEth    = safeNum(l.price_per_credit_eth || l.pricePerUnit, priceINR / 280000);
+          const adjPriceINR = Math.round(priceINR * (1 - dep / 100));
+          const adjPriceEth = +(priceEth * (1 - dep / 100)).toFixed(8);
+
+          return {
+            listingId:       safeNum(l.listing_id_onchain ?? l.listingId ?? l.id, 0),
+            seller:          l.seller_wallet || l.seller || '',
+            tokenId:         safeNum(l.token_id ?? l.tokenId, null) || null,
+            amount:          safeNum(l.available_credits ?? l.amount, 0),
+            pricePerUnit:    +priceEth.toFixed(8),   // ✅ always number
+            pricePerUnitINR: +priceINR,              // ✅ always number
+            adjPrice:        adjPriceEth,            // ✅ always number
+            adjPriceINR:     +adjPriceINR,           // ✅ always number
+            adjPriceInr:     +adjPriceINR,           // backwards compat
+            projectName:     l.project_name || l.projectName || '',
+            location:        l.project_location || l.location || '',
+            country:         (l.project_location || l.location || '').split(',').pop().trim(),
+            standard:        l.standard || 'VCS',
+            projectType:     l.project_type || l.projectType || '',
+            developer:       l.developer || '',
+            vintageYear:     safeNum(l.vintage_year || l.vintageYear, 0),
+            serialNumber:    l.registry_serial || l.serialNumber || '',
+            vintageDiscount: dep,
+            active:          true,
+            batchId:         l.id || l.batchId || null,
+            expiresAt:       safeNum(l.expires_at || l.expiresAt, Date.now() / 1000 + 86400 * 30),
+            listedAt:        safeNum(l.listed_at || l.listedAt, Date.now() / 1000),
+          };
+        });
+        setListings(mapped);
+      }
+    } catch (e) {
+      console.warn('API listings load failed:', e.message);
+    } finally {
+      setLoading(l => ({ ...l, listings: false }));
+    }
+  }, []);
+
   const init = useCallback(async () => {
     if (!window.ethereum) return;
     try {
       const accounts = await window.ethereum.request({ method: 'eth_accounts' });
       if (!accounts.length) {
         setWalletAddress(''); setContracts(null);
-        setIsKYCVerified(false); setChainOk(false);
+        setChainOk(false);
         setWalletMismatch(false); setWalletMismatchInfo(null);
+        // ✅ Don't clear KYC — it's account-level not wallet-level
         return;
       }
-
       const metamaskWallet = accounts[0].toLowerCase();
-
-      const boundWallet = await fetchBoundWallet();
+      const boundWallet    = await fetchBoundWallet();
       if (boundWallet && boundWallet !== metamaskWallet) {
         setWalletMismatch(true);
         setWalletMismatchInfo({ metamaskWallet, boundWallet });
         setWalletAddress(''); setContracts(null);
-        setIsKYCVerified(false); setChainOk(false);
+        setChainOk(false);
         setMyCredits([]);
-        setError(
-          `Wrong wallet connected. Your account is bound to ${boundWallet.slice(0,6)}...${boundWallet.slice(-4)}. ` +
-          `Please switch to that wallet in MetaMask.`
-        );
+        setError(`Wrong wallet. Account bound to ${boundWallet.slice(0,6)}...${boundWallet.slice(-4)}`);
         return;
       }
-
       setWalletMismatch(false); setWalletMismatchInfo(null); setError('');
-
       const ok = await checkChain();
       setChainOk(ok);
       if (!ok) {
-        setContracts(null); setIsKYCVerified(false);
-        setError('Please switch MetaMask to Ethereum Sepolia');
+        setContracts(null);
+        setError('Switch MetaMask to Sepolia');
         return;
       }
-
       const _provider = new ethers.BrowserProvider(window.ethereum);
       const _signer   = await _provider.getSigner();
       const _address  = await _signer.getAddress();
-      setProvider(_provider);
-      setSigner(_signer);
-      setWalletAddress(_address);
-
+      setProvider(_provider); setSigner(_signer); setWalletAddress(_address);
       const c = buildContracts(_signer);
       setContracts(c);
 
+      // ✅ Re-check KYC after wallet connects
       const verified = await fetchDBKycStatus();
       setIsKYCVerified(verified);
 
       _setupListeners(c, _address);
-    } catch (e) {
-      console.error('Wallet init error:', e);
-    }
-  }, []);
+
+      // Upgrade to on-chain data now that wallet is connected
+      loadListings(c);
+      loadBuyOrders(c);
+      loadMyCredits(c, _address);
+      if (c.amm) loadAMMPools(c);
+
+    } catch (e) { console.error('Wallet init error:', e); }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const _setupListeners = (c, address) => {
-    listenersRef.current.forEach(({ contract, event, handler }) => {
-      try { contract.off(event, handler); } catch {}
-    });
+    listenersRef.current.forEach(({ contract, event, handler }) => { try { contract.off(event, handler); } catch {} });
     listenersRef.current = [];
     const addr = address.toLowerCase();
 
-    const onTraded = (tradeId, listingId, buyOrderId, buyer, seller, tokenId, amount, price, total, fee, isAMM) => {
+    const onTraded = (tradeId, listingId, buyOrderId, buyer, seller, tokenId, amount, pricePerUnit, pricePerUnitINR, totalPrice, buyerFee, sellerFee, totalFee, isAMM) => {
       const isBuyer  = buyer?.toLowerCase()  === addr;
       const isSeller = seller?.toLowerCase() === addr;
       if (isBuyer || isSeller) {
         setTimeout(() => { loadMyCredits(c, address); loadListings(c); loadBuyOrders(c); }, 2500);
         setTradeHistory(prev => [{
-          id: `TXN-${Date.now()}`, type: isBuyer ? 'Buy' : 'Sell',
-          tradeId: Number(tradeId), listingId: Number(listingId),
-          amount: Number(amount), totalEth: ethers.formatEther(total),
-          time: new Date().toLocaleTimeString(), status: 'Confirmed', isAMM,
+          id:           `TXN-${Date.now()}`,
+          type:         isBuyer ? 'Buy' : 'Sell',
+          tradeId:      Number(tradeId),
+          listingId:    Number(listingId),
+          tokenId:      Number(tokenId),
+          amount:       Number(amount),
+          totalEth:     ethers.formatEther(totalPrice),
+          priceINR:     Number(pricePerUnitINR),
+          buyerFeeINR:  Number(buyerFee),
+          sellerFeeINR: Number(sellerFee),
+          time:         new Date().toLocaleTimeString(),
+          status:       'Confirmed',
+          isAMM,
         }, ...prev.slice(0, 49)]);
       } else {
         setTimeout(() => { loadListings(c); loadBuyOrders(c); }, 2000);
       }
     };
-    const onMatch            = () => { setTimeout(() => { loadListings(c); loadBuyOrders(c); }, 1500); };
-    const onListed           = () => { setTimeout(() => loadListings(c), 1500); };
-    const onBidPlaced        = () => { setTimeout(() => loadBuyOrders(c), 1500); };
-    const onListingCancelled = () => { setTimeout(() => loadListings(c), 1500); };
-    const onBidCancelled     = () => { setTimeout(() => loadBuyOrders(c), 1500); };
+
+    const onMatch  = () => setTimeout(() => { loadListings(c); loadBuyOrders(c); }, 1500);
+    const onListed = () => setTimeout(() => { loadListings(c); loadListingsFromAPI(); }, 1500);
+    const onBid    = () => setTimeout(() => loadBuyOrders(c), 1500);
+    const onUnlist = () => setTimeout(() => { loadListings(c); loadListingsFromAPI(); }, 1500);
+    const onUnbid  = () => setTimeout(() => loadBuyOrders(c), 1500);
 
     c.market.on('CreditTraded',      onTraded);
     c.market.on('MatchExecuted',     onMatch);
     c.market.on('CreditListed',      onListed);
-    c.market.on('BuyOrderPlaced',    onBidPlaced);
-    c.market.on('ListingCancelled',  onListingCancelled);
-    c.market.on('BuyOrderCancelled', onBidCancelled);
+    c.market.on('BuyOrderPlaced',    onBid);
+    c.market.on('ListingCancelled',  onUnlist);
+    c.market.on('BuyOrderCancelled', onUnbid);
 
     listenersRef.current = [
-      { contract:c.market, event:'CreditTraded',      handler:onTraded           },
-      { contract:c.market, event:'MatchExecuted',     handler:onMatch            },
-      { contract:c.market, event:'CreditListed',      handler:onListed           },
-      { contract:c.market, event:'BuyOrderPlaced',    handler:onBidPlaced        },
-      { contract:c.market, event:'ListingCancelled',  handler:onListingCancelled },
-      { contract:c.market, event:'BuyOrderCancelled', handler:onBidCancelled     },
+      { contract:c.market, event:'CreditTraded',      handler:onTraded  },
+      { contract:c.market, event:'MatchExecuted',     handler:onMatch   },
+      { contract:c.market, event:'CreditListed',      handler:onListed  },
+      { contract:c.market, event:'BuyOrderPlaced',    handler:onBid     },
+      { contract:c.market, event:'ListingCancelled',  handler:onUnlist  },
+      { contract:c.market, event:'BuyOrderCancelled', handler:onUnbid   },
     ];
   };
-
-  // Always check KYC from DB on mount
-  useEffect(() => {
-    fetchDBKycStatus().then(v => { if (v) setIsKYCVerified(true); });
-  }, []);
 
   useEffect(() => {
     init();
@@ -288,68 +338,103 @@ export function PortfolioProvider({ children }) {
         window.ethereum.removeListener('accountsChanged', init);
         window.ethereum.removeListener('chainChanged',    init);
       }
-      listenersRef.current.forEach(({ contract, event, handler }) => {
-        try { contract.off(event, handler); } catch {}
-      });
+      listenersRef.current.forEach(({ contract, event, handler }) => { try { contract.off(event, handler); } catch {} });
     };
   }, [init]);
 
+  // Pre-populate from DB on mount even without wallet
   useEffect(() => {
-    if (contracts && walletAddress && chainOk && !walletMismatch) {
-      loadMyCredits(contracts, walletAddress);
-      loadListings(contracts);
-      loadBuyOrders(contracts);
-      if (contracts.amm) loadAMMPools(contracts);
-    }
-    // ✅ Always fetch retirements (DB-based, no wallet needed)
     fetchMyRetirements().then(setMyRetirements);
-  }, [contracts, walletAddress, chainOk, walletMismatch]);
-
-  const refreshKYC = useCallback(async () => {
-    try {
-      const v = await fetchDBKycStatus();
-      setIsKYCVerified(v);
-      return v;
-    } catch { return false; }
+    fetchDBCredits().then(dbCredits => {
+      if (!dbCredits.length) return;
+      setMyCredits(prev => {
+        if (prev.length > 0) return prev;
+        return dbCredits.map(db => ({
+          id:             `db-${db.id}`,
+          tokenId:        db.token_id || null,
+          tokenHex:       null,
+          projectId:      db.project_id || '',
+          projectName:    db.project_name,
+          location:       db.project_location || '',
+          country:        db.country || '',
+          standard:       db.standard || 'VCS',
+          projectType:    db.project_type || '',
+          developer:      db.developer || '',
+          vintageYear:    safeNum(db.vintage_year, 0),
+          expiryDate:     db.expiry_date || '',
+          serialNumber:   db.registry_serial,
+          credits:        safeNum(db.available_credits ?? db.quantity, 0),
+          heldCredits:    safeNum(db.available_credits ?? db.quantity, 0),
+          listedCredits:  0,
+          totalRetired:   0,
+          active:         true,
+          status:         'HELD',
+          pricePerCredit: safeNum(db.price_per_credit_inr || db.last_traded_price_inr, 850),
+          listingId:      null,
+          vintageDiscount:vintagePenalty(safeNum(db.vintage_year, 0)),
+          admin_status:   'approved',
+          isOnChain:      db.token_id != null,  // ✅ token_id set = minted on chain
+          creditType:             db.credit_type || 'voluntary',
+          cbamEligible:           db.cbam_eligible || false,
+          sdgTags:                db.sdg_tags || [],
+          correspondingAdjustment:db.corresponding_adjustment || 'none',
+          acvaStatus:             db.acva_status || 'pending',
+        }));
+      });
+    });
   }, []);
 
-  // ── ✅ FIXED loadMyCredits ────────────────────────────────────────
-  // Loads on-chain tokens AND merges DB-approved credits that are not
-  // yet tokenised, so approved credits show as HELD immediately.
+  const refreshKYC = useCallback(async () => {
+    try { const v = await fetchDBKycStatus(); setIsKYCVerified(v); return v; }
+    catch { return false; }
+  }, []);
+
+  // ── loadMyCredits ─────────────────────────────────────────────
   const loadMyCredits = useCallback(async (c, addr) => {
-    const _c    = c    || contracts;
+    const _c = c || contracts;
     const _addr = addr || walletAddress;
-    if (!_addr || walletMismatch) return;
+
+    // Only block on wallet mismatch
+    if (walletMismatch) return;
 
     setLoading(l => ({ ...l, credits: true }));
+
     try {
-
-      // ── 1. Fetch DB-approved credits (includes pre-mint and tokenised) ──
+      // Always fetch DB credits first
       const dbCredits = await fetchDBCredits();
-
-      // ── 2. Fetch on-chain tokens (only if wallet + contracts ready) ──
       let onChainCredits = [];
 
-      if (_c) {
+      // Only fetch on-chain data if wallet + contracts exist
+      if (_addr && _c) {
         try {
-          const nextId         = await _c.token.getNextTokenId();
-          const total          = Number(nextId);
-          const sellerIds      = await _c.market.getSellerListings(_addr);
-          const sellerListings = await Promise.all(sellerIds.map(lid => _c.market.listings(lid)));
+          const nextId = await _c.token.getNextTokenId();
+          const total = Number(nextId);
+
+          const sellerIds = await _c.market.getSellerListings(_addr);
+          const sellerListings = await Promise.all(
+            sellerIds.map(lid => _c.market.listings(lid))
+          );
 
           for (let tokenId = 0; tokenId < total; tokenId++) {
-            const bal     = await _c.token.balanceOf(_addr, tokenId);
+            const bal = await _c.token.balanceOf(_addr, tokenId);
             const heldBal = Number(bal);
 
-            let listingId    = null;
+            let listingId = null;
             let listingPrice = 0;
-            let listedBal    = 0;
+            let listingPriceINR = 0;
+            let listedBal = 0;
+
             for (let i = 0; i < sellerListings.length; i++) {
               const l = sellerListings[i];
+
               if (Number(l.tokenId) === tokenId && l.active) {
-                listingId    = Number(sellerIds[i]);
+                listingId = Number(sellerIds[i]);
                 listingPrice = parseFloat(ethers.formatEther(l.pricePerUnit));
-                listedBal    = Number(l.amountRemaining);
+                listingPriceINR = safeNum(
+                  l.pricePerUnitINR,
+                  Math.round(listingPrice * ethINRRate)
+                );
+                listedBal = Number(l.amountRemaining);
                 break;
               }
             }
@@ -357,145 +442,146 @@ export function PortfolioProvider({ children }) {
             const totalBal = heldBal + listedBal;
             if (totalBal === 0) continue;
 
-            const meta    = await _c.token.getCreditMetadata(tokenId);
+            const meta = await _c.token.getCreditMetadata(tokenId);
             const retired = await _c.token.getTotalRetired(tokenId);
-            const dep     = vintagePenalty(Number(meta.vintageYear));
-            const stdStr  = STANDARD_FROM_ENUM[Number(meta.standard)] || 'VCS';
-            const priceInr = listingPrice > 0 ? listingPrice * ETH_INR_RATE : 850;
+            const dep = vintagePenalty(Number(meta.vintageYear));
+            const stdStr = STANDARD_FROM_ENUM[Number(meta.standard)] || 'VCS';
+
+            const priceInr =
+              listingPriceINR > 0
+                ? listingPriceINR
+                : listingPrice > 0
+                ? Math.round(listingPrice * ethINRRate)
+                : 850;
 
             onChainCredits.push({
-              id:                 tokenId,
-              tokenId:            tokenId,
-              tokenHex:           `0x${tokenId.toString(16).padStart(8, '0').toUpperCase()}`,
-              projectId:          meta.serialNumber,
-              projectName:        meta.projectName,
-              location:           meta.location,
-              country:            meta.location.split(',').pop().trim(),
-              standard:           stdStr,
-              projectType:        meta.projectType,
-              developer:          meta.developer,
-              vintageYear:        Number(meta.vintageYear),
-              expiryDate:         new Date(Number(meta.expiryDate) * 1000).toISOString().slice(0, 10),
-              serialNumber:       meta.serialNumber,
-              credits:            totalBal,
-              heldCredits:        heldBal,
-              listedCredits:      listedBal,
-              totalRetired:       Number(retired),
-              active:             meta.active,
-              registeredBy:       meta.registeredBy,
-              registeredAt:       new Date(Number(meta.registeredAt) * 1000).toISOString().slice(0, 10),
-              ownerWallet:        _addr,
+              id: tokenId,
+              tokenId,
+              tokenHex: `0x${tokenId.toString(16).padStart(8, '0').toUpperCase()}`,
+              projectId: meta.serialNumber,
+              projectName: meta.projectName,
+              location: meta.location,
+              country: meta.location.split(',').pop().trim(),
+              standard: stdStr,
+              projectType: meta.projectType,
+              developer: meta.developer,
+              vintageYear: Number(meta.vintageYear),
+              expiryDate: new Date(Number(meta.expiryDate) * 1000).toISOString().slice(0, 10),
+              serialNumber: meta.serialNumber,
+              credits: totalBal,
+              heldCredits: heldBal,
+              listedCredits: listedBal,
+              totalRetired: Number(retired),
+              active: meta.active,
+              registeredBy: meta.registeredBy,
+              registeredAt: new Date(Number(meta.registeredAt) * 1000).toISOString().slice(0, 10),
+              ownerWallet: _addr,
               verificationStatus: meta.active ? 'Verified' : 'Retired',
-              status:             !meta.active ? 'RETIRED' : listedBal > 0 ? 'LISTED' : 'HELD',
-              pricePerCredit:     priceInr,
-              pricePerCreditEth:  listingPrice,
+              status: !meta.active ? 'RETIRED' : listedBal > 0 ? 'LISTED' : 'HELD',
+              pricePerCredit: +priceInr,
+              pricePerCreditEth: +listingPrice,
               listingId,
-              vintageDiscount:    dep,
-              admin_status:       'approved',
-              isOnChain:          true,
+              vintageDiscount: dep,
+              admin_status: 'approved',
+              isOnChain: true,
             });
           }
         } catch (e) {
-          console.warn('On-chain load failed, using DB only:', e.message);
+          console.warn('On-chain load failed, using DB:', e.message);
         }
       }
 
-      // ── 3. Merge: DB credits not already represented on-chain ──────
-      // A DB credit is "on-chain" if token_id is set AND exists in onChainCredits
+      // DB-only credits
       const onChainSerials = new Set(onChainCredits.map(c => c.serialNumber));
 
       const dbOnlyCredits = dbCredits
         .filter(db => !onChainSerials.has(db.registry_serial || db.serialNumber))
         .map(db => ({
-          // Use DB id as string so it doesn't clash with numeric tokenIds
-          id:             `db-${db.id}`,
-          tokenId:        db.token_id || null,
-          tokenHex:       db.token_id
+          id: `db-${db.id}`,
+          tokenId: db.token_id || null,
+          tokenHex: db.token_id
             ? `0x${Number(db.token_id).toString(16).padStart(8, '0').toUpperCase()}`
             : null,
-          projectId:      db.project_id || db.projectId || '',
-          projectName:    db.project_name || db.projectName,
-          location:       db.project_location || db.location || '',
-          country:        db.country || '',
-          standard:       db.standard || 'VCS',
-          projectType:    db.project_type || db.projectType || '',
-          developer:      db.developer || '',
-          vintageYear:    db.vintage_year || db.vintageYear,
-          expiryDate:     db.expiry_date || db.expiryDate || '',
-          serialNumber:   db.registry_serial || db.serialNumber,
-          credits:        db.available_credits ?? db.quantity ?? 0,
-          heldCredits:    db.available_credits ?? db.quantity ?? 0,
-          listedCredits:  0,
-          totalRetired:   db.retired_credits || 0,
-          active:         true,
-          ownerWallet:    _addr,
-          // ✅ Map DB batch_status enum → frontend status
-          status: (() => {
-            switch (db.status) {
-              case 'tokenised':  return 'HELD';
-              case 'exhausted':  return 'RETIRED';
-              case 'expired':    return 'RETIRED';
-              default:           return 'HELD'; // 'approved' → HELD
-            }
-          })(),
-          pricePerCredit:    850,
+          projectId: db.project_id || '',
+          projectName: db.project_name,
+          location: db.project_location || '',
+          country: db.country || '',
+          standard: db.standard || 'VCS',
+          projectType: db.project_type || '',
+          developer: db.developer || '',
+          vintageYear: safeNum(db.vintage_year, 0),
+          expiryDate: db.expiry_date || '',
+          serialNumber: db.registry_serial,
+          credits: safeNum(db.available_credits ?? db.quantity, 0),
+          heldCredits: safeNum(db.available_credits ?? db.quantity, 0),
+          listedCredits: 0,
+          totalRetired: safeNum(db.retired_credits, 0),
+          active: true,
+          ownerWallet: _addr || '',
+          status:
+            db.status === 'tokenised'
+              ? 'HELD'
+              : db.status === 'exhausted'
+              ? 'RETIRED'
+              : 'HELD',
+          pricePerCredit: safeNum(
+            db.price_per_credit_inr || db.last_traded_price_inr,
+            850
+          ),
           pricePerCreditEth: 0,
-          listingId:         null,
-          vintageDiscount:   vintagePenalty(db.vintage_year || db.vintageYear || 0),
-          admin_status:      db.admin_status || 'approved',
-          // Extra DB fields for the certificate / detail view
-          creditType:             db.credit_type || 'voluntary',
-          cbamEligible:           db.cbam_eligible || false,
-          acvaName:               db.acva_name || '',
-          acvaDate:               db.acva_date || '',
-          acvaStatus:             db.acva_status || 'pending',
-          icmRegistryId:          db.icm_registry_id || '',
-          bankingStatus:          db.banking_status || 'available',
-          correspondingAdjustment:db.corresponding_adjustment || 'none',
-          sdgTags:                db.sdg_tags || [],
-          isOnChain:              false, // not yet minted
-          doc_ipfs_hash:          db.doc_ipfs_hash || '',
+          listingId: null,
+          vintageDiscount: vintagePenalty(safeNum(db.vintage_year, 0)),
+          admin_status: db.admin_status || 'approved',
+          isOnChain: db.token_id != null,  // ✅ token_id set = minted on chain
         }));
 
-      // ── 4. Combine and set ─────────────────────────────────────────
+      // Merge safely — prevent accidental wipeout
       const merged = [...onChainCredits, ...dbOnlyCredits];
-      setMyCredits(merged);
 
-      try {
-        localStorage.setItem(`et_credits_${_addr}`, JSON.stringify(merged));
-      } catch {}
+      if (!merged.length && dbCredits.length) {
+        setMyCredits(dbOnlyCredits);
+      } else {
+        setMyCredits(merged);
+      }
 
+      if (_addr) {
+        try {
+          localStorage.setItem(`et_credits_${_addr}`, JSON.stringify(merged));
+        } catch {}
+      }
     } catch (e) {
       console.error('loadMyCredits error:', e);
-      // Fall back to cache
-      try {
-        const cached = localStorage.getItem(`et_credits_${walletAddress}`);
-        if (cached) setMyCredits(JSON.parse(cached));
-      } catch {}
     } finally {
       setLoading(l => ({ ...l, credits: false }));
     }
-  }, [contracts, walletAddress, walletMismatch]);
+  }, [contracts, walletAddress, walletMismatch, ethINRRate]);
 
+  // ── loadListings — on-chain version (wallet required) ─────────
   const loadListings = useCallback(async (c) => {
     const _c = c || contracts;
-    if (!_c) return;
+    if (!_c) return loadListingsFromAPI();
+
     setLoading(l => ({ ...l, listings: true }));
     try {
-      const raw = await _c.market.getActiveListings();
+      const raw      = await _c.market.getActiveListings();
       const enriched = await Promise.all(raw.map(async (l) => {
         const tokenId = Number(l.tokenId);
         let meta;
         try { meta = await _c.token.getCreditMetadata(tokenId); } catch { return null; }
-        const dep       = vintagePenalty(Number(meta.vintageYear));
-        const basePrice = parseFloat(ethers.formatEther(l.pricePerUnit));
+        const dep         = vintagePenalty(Number(meta.vintageYear));
+        const basePrice   = parseFloat(ethers.formatEther(l.pricePerUnit));
+        const priceINR    = safeNum(l.pricePerUnitINR, Math.round(basePrice * ethINRRate));
+        const adjPriceINR = Math.round(priceINR * (1 - dep / 100));
         return {
           listingId:       Number(l.listingId),
           seller:          l.seller,
           tokenId,
           amount:          Number(l.amountRemaining),
-          pricePerUnit:    basePrice,
+          pricePerUnit:    +basePrice,             // ✅ always number
+          pricePerUnitINR: +priceINR,              // ✅ always number
           adjPrice:        +(basePrice * (1 - dep / 100)).toFixed(8),
+          adjPriceINR:     +adjPriceINR,
+          adjPriceInr:     +adjPriceINR,
           listedAt:        Number(l.listedAt),
           expiresAt:       Number(l.expiresAt),
           projectName:     meta.projectName,
@@ -513,20 +599,20 @@ export function PortfolioProvider({ children }) {
       const nowSec = Math.floor(Date.now() / 1000);
       setListings(enriched.filter(l => l && l.active && l.expiresAt > nowSec));
     } catch (e) {
-      console.error('loadListings error:', e);
-      setListings([]);
-    } finally {
-      setLoading(l => ({ ...l, listings: false }));
+      console.error('loadListings on-chain error:', e);
+      await loadListingsFromAPI();
     }
-  }, [contracts]);
+    finally { setLoading(l => ({ ...l, listings: false })); }
+  }, [contracts, ethINRRate, loadListingsFromAPI]);
 
+  // ── loadBuyOrders ─────────────────────────────────────────────
   const loadBuyOrders = useCallback(async (c) => {
     const _c = c || contracts;
     if (!_c) return;
     setLoading(l => ({ ...l, buyOrders: true }));
     try {
-      const raw    = await _c.market.getOpenBuyOrders();
-      const orders = raw.map(o => ({
+      const raw = await _c.market.getOpenBuyOrders();
+      setBuyOrders(raw.map(o => ({
         orderId:      Number(o.orderId),
         buyer:        o.buyer,
         tokenId:      Number(o.tokenId),
@@ -538,16 +624,12 @@ export function PortfolioProvider({ children }) {
         status:       Number(o.status),
         createdAt:    Number(o.createdAt),
         expiresAt:    Number(o.expiresAt),
-      }));
-      setBuyOrders(orders);
-    } catch (e) {
-      console.error('loadBuyOrders error:', e);
-      setBuyOrders([]);
-    } finally {
-      setLoading(l => ({ ...l, buyOrders: false }));
-    }
+      })));
+    } catch (e) { console.error('loadBuyOrders error:', e); setBuyOrders([]); }
+    finally { setLoading(l => ({ ...l, buyOrders: false })); }
   }, [contracts]);
 
+  // ── loadAMMPools ──────────────────────────────────────────────
   const loadAMMPools = useCallback(async (c) => {
     const _c = c || contracts;
     if (!_c?.amm) return;
@@ -555,8 +637,9 @@ export function PortfolioProvider({ children }) {
       const total = Number(await _c.amm.totalPools());
       const pools = [];
       for (let i = 1; i <= total; i++) {
-        const pool  = await _c.amm.getPool(i);
-        const price = await _c.amm.getPrice(i);
+        const pool     = await _c.amm.getPool(i);
+        const price    = await _c.amm.getPrice(i);
+        const priceEth = parseFloat(ethers.formatEther(price));
         pools.push({
           poolId:        i,
           tokenId:       Number(pool.tokenId),
@@ -565,19 +648,18 @@ export function PortfolioProvider({ children }) {
           ethReserve:    parseFloat(ethers.formatEther(pool.ethReserve)),
           totalShares:   Number(pool.totalShares),
           active:        pool.active,
-          priceEth:      parseFloat(ethers.formatEther(price)),
-          priceInr:      parseFloat(ethers.formatEther(price)) * ETH_INR_RATE,
+          priceEth:      +priceEth,
+          priceInr:      +(priceEth * ethINRRate),
         });
       }
       setAmmPools(pools);
-    } catch (e) {
-      console.error('loadAMMPools error:', e);
-    }
-  }, [contracts]);
+    } catch (e) { console.error('loadAMMPools error:', e); }
+  }, [contracts, ethINRRate]);
+
+  // ── Trade functions ───────────────────────────────────────────
 
   const registerCredit = useCallback(async (formData) => {
-    if (!contracts) throw new Error('Wallet not connected');
-    if (walletMismatch) throw new Error('Wrong wallet connected');
+    if (!contracts || walletMismatch) throw new Error('Wallet not connected');
     setLoading(l => ({ ...l, tx: true }));
     try {
       const params = {
@@ -595,9 +677,7 @@ export function PortfolioProvider({ children }) {
       };
       const tx      = await contracts.token.mintCredit(params);
       const receipt = await tx.wait();
-      const event   = receipt.logs.find(l => {
-        try { return contracts.token.interface.parseLog(l)?.name === 'CreditMinted'; } catch { return false; }
-      });
+      const event   = receipt.logs.find(l => { try { return contracts.token.interface.parseLog(l)?.name === 'CreditMinted'; } catch { return false; } });
       const tokenId = event ? Number(contracts.token.interface.parseLog(event).args.tokenId) : null;
       await loadMyCredits();
       return { success: true, tokenId, txHash: tx.hash };
@@ -605,44 +685,50 @@ export function PortfolioProvider({ children }) {
     finally { setLoading(l => ({ ...l, tx: false })); }
   }, [contracts, walletAddress, walletMismatch, loadMyCredits]);
 
-  const listCredit = useCallback(async (tokenId, amount, priceInEth, durationDays = 30) => {
-    if (!contracts) throw new Error('Wallet not connected');
-    if (walletMismatch) throw new Error('Wrong wallet connected');
+  const listCredit = useCallback(async (tokenId, amount, priceInEth, priceInINR, durationDays = 30) => {
+    if (!contracts || walletMismatch) throw new Error('Wallet not connected');
     setLoading(l => ({ ...l, tx: true }));
     try {
       const approved = await contracts.token.isApprovedForAll(walletAddress, ADDRESSES.Marketplace);
       if (!approved) {
-        const tx = await contracts.token.setApprovalForAll(ADDRESSES.Marketplace, true);
-        await tx.wait();
+        const approveTx = await contracts.token.setApprovalForAll(ADDRESSES.Marketplace, true);
+        await approveTx.wait();
       }
+      const inrPrice = priceInINR > 0
+        ? Math.round(priceInINR)
+        : Math.round(parseFloat(priceInEth) * ethINRRate);
+
       const tx = await contracts.market.listCredit(
         tokenId, amount,
         ethers.parseEther(priceInEth.toString()),
+        inrPrice,
         durationDays * 86400
       );
       await tx.wait();
       await loadMyCredits();
+      await loadListings();
+      await loadListingsFromAPI();
       return { success: true, txHash: tx.hash };
     } catch (e) { throw e; }
     finally { setLoading(l => ({ ...l, tx: false })); }
-  }, [contracts, walletAddress, walletMismatch, loadMyCredits]);
+  }, [contracts, walletAddress, walletMismatch, loadMyCredits, loadListings, loadListingsFromAPI, ethINRRate]);
 
   const delistCredit = useCallback(async (listingId) => {
-    if (!contracts) throw new Error('Wallet not connected');
-    if (walletMismatch) throw new Error('Wrong wallet connected');
+    if (!contracts || walletMismatch) throw new Error('Wallet not connected');
     setLoading(l => ({ ...l, tx: true }));
     try {
       const tx = await contracts.market.cancelListing(listingId);
       await tx.wait();
       await loadMyCredits();
+      await loadListings();
+      await loadListingsFromAPI();
       return { success: true, txHash: tx.hash };
     } catch (e) { throw e; }
     finally { setLoading(l => ({ ...l, tx: false })); }
-  }, [contracts, walletMismatch, loadMyCredits]);
+  }, [contracts, walletMismatch, loadMyCredits, loadListings, loadListingsFromAPI]);
 
   const retireCredit = useCallback(async (tokenId, amount) => {
-    if (!contracts) throw new Error('Wallet not connected');
-    if (walletMismatch) throw new Error('Wrong wallet connected');
+    if (!contracts || walletMismatch) throw new Error('Wallet not connected');
     setLoading(l => ({ ...l, tx: true }));
     try {
       const tx = await contracts.token.retireCredit(tokenId, amount);
@@ -654,8 +740,7 @@ export function PortfolioProvider({ children }) {
   }, [contracts, walletMismatch, loadMyCredits]);
 
   const buyCredit = useCallback(async (listingId, amount, totalEth) => {
-    if (!contracts) throw new Error('Wallet not connected');
-    if (walletMismatch) throw new Error('Wrong wallet connected');
+    if (!contracts || walletMismatch) throw new Error('Wallet not connected');
     setLoading(l => ({ ...l, tx: true }));
     try {
       const tx = await contracts.market.buyCredit(
@@ -669,17 +754,17 @@ export function PortfolioProvider({ children }) {
   }, [contracts, walletMismatch]);
 
   const placeBuyOrder = useCallback(async (tokenId, amount, limitPriceEth, durationDays = 7) => {
-    if (!contracts) throw new Error('Wallet not connected');
-    if (walletMismatch) throw new Error('Wrong wallet connected');
+    if (!contracts || walletMismatch) throw new Error('Wallet not connected');
     setLoading(l => ({ ...l, tx: true }));
     try {
       const limitWei  = ethers.parseEther(limitPriceEth.toString());
-      const totalCost = limitWei * BigInt(amount); // eslint-disable-line no-undef
-      const fee       = totalCost * 50n / 10000n;
+      const amountBig = ethers.toBigInt(amount);
+      const totalCost = limitWei * amountBig;
+      const buyerFee  = totalCost * ethers.toBigInt(50) / ethers.toBigInt(10000);
       const tx = await contracts.market.placeBuyOrder(
         tokenId, amount, limitWei,
         durationDays * 86400,
-        { value: totalCost + fee }
+        { value: totalCost + buyerFee }
       );
       await tx.wait();
       await loadBuyOrders();
@@ -689,8 +774,7 @@ export function PortfolioProvider({ children }) {
   }, [contracts, walletMismatch, loadBuyOrders]);
 
   const cancelBuyOrder = useCallback(async (orderId) => {
-    if (!contracts) throw new Error('Wallet not connected');
-    if (walletMismatch) throw new Error('Wrong wallet connected');
+    if (!contracts || walletMismatch) throw new Error('Wallet not connected');
     setLoading(l => ({ ...l, tx: true }));
     try {
       const tx = await contracts.market.cancelBuyOrder(orderId);
@@ -702,8 +786,7 @@ export function PortfolioProvider({ children }) {
   }, [contracts, walletMismatch, loadBuyOrders]);
 
   const ammSwapETHForCredits = useCallback(async (poolId, ethAmount, minCredits = 0) => {
-    if (!contracts?.amm) throw new Error('AMM not available');
-    if (walletMismatch) throw new Error('Wrong wallet connected');
+    if (!contracts?.amm || walletMismatch) throw new Error('AMM not available');
     setLoading(l => ({ ...l, tx: true }));
     try {
       const tx = await contracts.amm.swapETHForCredits(poolId, minCredits, { value: ethers.parseEther(ethAmount.toString()) });
@@ -715,15 +798,11 @@ export function PortfolioProvider({ children }) {
   }, [contracts, walletMismatch, loadMyCredits, loadAMMPools]);
 
   const ammSwapCreditsForETH = useCallback(async (poolId, credits, minEth = 0) => {
-    if (!contracts?.amm) throw new Error('AMM not available');
-    if (walletMismatch) throw new Error('Wrong wallet connected');
+    if (!contracts?.amm || walletMismatch) throw new Error('AMM not available');
     setLoading(l => ({ ...l, tx: true }));
     try {
       const approved = await contracts.token.isApprovedForAll(walletAddress, ADDRESSES.AMMPool);
-      if (!approved) {
-        const t = await contracts.token.setApprovalForAll(ADDRESSES.AMMPool, true);
-        await t.wait();
-      }
+      if (!approved) { const t = await contracts.token.setApprovalForAll(ADDRESSES.AMMPool, true); await t.wait(); }
       const tx = await contracts.amm.swapCreditsForETH(poolId, credits, ethers.parseEther(minEth.toString()));
       await tx.wait();
       await loadMyCredits(); await loadAMMPools();
@@ -733,15 +812,11 @@ export function PortfolioProvider({ children }) {
   }, [contracts, walletAddress, walletMismatch, loadMyCredits, loadAMMPools]);
 
   const ammAddLiquidity = useCallback(async (poolId, creditAmount, ethAmount) => {
-    if (!contracts?.amm) throw new Error('AMM not available');
-    if (walletMismatch) throw new Error('Wrong wallet connected');
+    if (!contracts?.amm || walletMismatch) throw new Error('AMM not available');
     setLoading(l => ({ ...l, tx: true }));
     try {
       const approved = await contracts.token.isApprovedForAll(walletAddress, ADDRESSES.AMMPool);
-      if (!approved) {
-        const t = await contracts.token.setApprovalForAll(ADDRESSES.AMMPool, true);
-        await t.wait();
-      }
+      if (!approved) { const t = await contracts.token.setApprovalForAll(ADDRESSES.AMMPool, true); await t.wait(); }
       const tx = await contracts.amm.addLiquidity(poolId, creditAmount, { value: ethers.parseEther(ethAmount.toString()) });
       await tx.wait();
       await loadMyCredits(); await loadAMMPools();
@@ -750,74 +825,23 @@ export function PortfolioProvider({ children }) {
     finally { setLoading(l => ({ ...l, tx: false })); }
   }, [contracts, walletAddress, walletMismatch, loadMyCredits, loadAMMPools]);
 
-  // ── Also load DB credits on mount even without wallet ─────────────
-  // So approved credits show up before MetaMask is connected
-  useEffect(() => {
-    fetchMyRetirements().then(setMyRetirements);
-    fetchDBCredits().then(dbCredits => {
-      if (!dbCredits.length) return;
-      setMyCredits(prev => {
-        // Only pre-populate if blockchain hasn't loaded yet
-        if (prev.length > 0) return prev;
-        return dbCredits.map(db => ({
-          id:             `db-${db.id}`,
-          tokenId:        db.token_id || null,
-          tokenHex:       null,
-          projectId:      db.project_id || '',
-          projectName:    db.project_name || db.projectName,
-          location:       db.project_location || '',
-          country:        db.country || '',
-          standard:       db.standard || 'VCS',
-          projectType:    db.project_type || '',
-          developer:      db.developer || '',
-          vintageYear:    db.vintage_year,
-          expiryDate:     db.expiry_date || '',
-          serialNumber:   db.registry_serial,
-          credits:        db.available_credits ?? db.quantity ?? 0,
-          heldCredits:    db.available_credits ?? db.quantity ?? 0,
-          listedCredits:  0,
-          totalRetired:   0,
-          active:         true,
-          status:         'HELD',
-          pricePerCredit: 850,
-          listingId:      null,
-          vintageDiscount:vintagePenalty(db.vintage_year || 0),
-          admin_status:   'approved',
-          isOnChain:      false,
-          creditType:             db.credit_type || 'voluntary',
-          cbamEligible:           db.cbam_eligible || false,
-          sdgTags:                db.sdg_tags || [],
-          correspondingAdjustment:db.corresponding_adjustment || 'none',
-          acvaStatus:             db.acva_status || 'pending',
-        }));
-      });
-    });
-  }, []);
-
+  // ── Stats ─────────────────────────────────────────────────────
   const stats = {
     totalCredits: myCredits
       .filter(c => c.status !== 'RETIRED')
-      .reduce((s, c) => {
-        const qty = c.heldCredits !== undefined ? c.heldCredits : (c.status === 'HELD' ? c.credits : 0);
-        return s + qty;
-      }, 0),
+      .reduce((s, c) => s + safeNum(c.heldCredits ?? (c.status === 'HELD' ? c.credits : 0), 0), 0),
     totalValue: myCredits
       .filter(c => c.status !== 'RETIRED')
       .reduce((s, c) => {
-        const priceInr = c.pricePerCredit > 0 ? c.pricePerCredit : 850;
-        const dep      = vintagePenalty(c.vintageYear) / 100;
-        const qty      = c.heldCredits !== undefined ? c.heldCredits : (c.status === 'HELD' ? c.credits : 0);
+        const priceInr = safeNum(c.pricePerCredit, 850);
+        const dep      = vintagePenalty(safeNum(c.vintageYear, 0)) / 100;
+        const qty      = safeNum(c.heldCredits ?? (c.status === 'HELD' ? c.credits : 0), 0);
         return s + qty * priceInr * (1 - dep);
       }, 0),
-    // ✅ FIX: listedCount = sum of listedCredits, not count of cards
-    listedCount: myCredits
-      .filter(c => c.status === 'LISTED')
-      .reduce((s, c) => s + (c.listedCredits || 0), 0),
-    // ✅ FIX: retiredCount = sum of tCO₂ from retirements table
-    retiredCount: myRetirements
-      .reduce((s, r) => s + (parseInt(r.amount) || 0), 0),
-    heldCount: myCredits.filter(c => c.status === 'HELD').length,
-    openBids:  buyOrders.filter(o => o.status === 0 || o.status === 2).length,
+    listedCount:  myCredits.filter(c => c.status === 'LISTED').reduce((s, c) => s + safeNum(c.listedCredits, 0), 0),
+    retiredCount: myRetirements.reduce((s, r) => s + safeNum(r.amount, 0), 0),
+    heldCount:    myCredits.filter(c => c.status === 'HELD').length,
+    openBids:     buyOrders.filter(o => o.status === 0 || o.status === 2).length,
   };
 
   return (
@@ -826,13 +850,14 @@ export function PortfolioProvider({ children }) {
       walletMismatch, walletMismatchInfo,
       myCredits, myRetirements, listings, buyOrders, tradeHistory, ammPools, stats,
       loading, error,
+      ethINRRate,
+      ETH_INR_RATE: ethINRRate,
       registerCredit, listCredit, delistCredit, retireCredit,
       buyCredit, placeBuyOrder, cancelBuyOrder,
       ammSwapETHForCredits, ammSwapCreditsForETH, ammAddLiquidity,
-      loadMyCredits, loadListings, loadBuyOrders, loadAMMPools, refreshKYC,
-      // ✅ refresh retirements after a new retirement
+      loadMyCredits, loadListings, loadListingsFromAPI, loadBuyOrders, loadAMMPools, refreshKYC,
       refreshRetirements: () => fetchMyRetirements().then(setMyRetirements),
-      vintagePenalty, STANDARD_ENUM, STANDARD_FROM_ENUM, ETH_INR_RATE: 280000,
+      vintagePenalty, STANDARD_ENUM, STANDARD_FROM_ENUM,
     }}>
       {children}
     </PortfolioContext.Provider>

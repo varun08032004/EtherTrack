@@ -8,7 +8,7 @@ async function main() {
   const chainId    = (await hre.ethers.provider.getNetwork()).chainId;
   const balance    = await hre.ethers.provider.getBalance(deployer.address);
 
-  console.log("🚀 EtherTrack Full Deployment — Hybrid Order Book + AMM");
+  console.log("🚀 EtherTrack Full Deployment");
   console.log("══════════════════════════════════════════════════════");
   console.log(`Network:  ${network} (chainId: ${chainId})`);
   console.log(`Deployer: ${deployer.address}`);
@@ -49,8 +49,8 @@ async function main() {
   addresses.EmissionRegistry = await emission.getAddress();
   console.log(`   ✅ EmissionRegistry: ${addresses.EmissionRegistry}`);
 
-  // ── 5. Marketplace (NEW — with matching engine + buy orders) ──
-  console.log("5️⃣  Deploying Marketplace (Order Book + Matching Engine)...");
+  // ── 5. Marketplace ────────────────────────────────────────
+  console.log("5️⃣  Deploying Marketplace...");
   const Marketplace = await hre.ethers.getContractFactory("Marketplace");
   const marketplace = await Marketplace.deploy(
     deployer.address,
@@ -62,8 +62,8 @@ async function main() {
   addresses.Marketplace = await marketplace.getAddress();
   console.log(`   ✅ Marketplace: ${addresses.Marketplace}`);
 
-  // ── 6. AMMPool (NEW) ──────────────────────────────────────
-  console.log("6️⃣  Deploying AMMPool (x*y=k AMM)...");
+  // ── 6. AMMPool ────────────────────────────────────────────
+  console.log("6️⃣  Deploying AMMPool...");
   const AMMPool = await hre.ethers.getContractFactory("AMMPool");
   const amm = await AMMPool.deploy(
     deployer.address,
@@ -79,41 +79,39 @@ async function main() {
   console.log("");
   console.log("⚙️  Post-deployment configuration...");
 
-  // Marketplace authorized as Treasury depositor
-  await treasury.addDepositor(addresses.Marketplace);
+  // ✅ FIXED: authorizeDepositor (not addDepositor)
+  await treasury.authorizeDepositor(addresses.Marketplace);
   console.log("   ✅ Marketplace authorized as Treasury depositor");
 
-  // AMMPool authorized as Treasury depositor
-  await treasury.addDepositor(addresses.AMMPool);
+  await treasury.authorizeDepositor(addresses.AMMPool);
   console.log("   ✅ AMMPool authorized as Treasury depositor");
 
-  // Marketplace authorized as CarbonCreditToken minter
-  await token.addMinter(addresses.Marketplace);
-  console.log("   ✅ Marketplace authorized as CarbonCreditToken minter");
+  // ✅ FIXED: addKYCOperator (not addMinter — token doesn't have that)
+  await kyc.addKYCOperator(deployer.address);
+  console.log("   ✅ Deployer added as KYC operator");
 
   // Wire AMMPool into Marketplace
   await marketplace.setAMMPool(addresses.AMMPool);
   console.log("   ✅ AMMPool wired into Marketplace");
 
-  // Set AMM threshold: orders <= 100 credits → AMM, > 100 → order book
+  // Set AMM threshold
   await marketplace.setAMMThreshold(100);
   console.log("   ✅ AMM threshold set: ≤100 credits → AMM, >100 → Order Book");
 
-  // Deployer wallet self-verify KYC (for testing)
+  // ✅ Deployer wallet KYC verified (for testing)
   const kycHash = hre.ethers.keccak256(hre.ethers.toUtf8Bytes("deployer-kyc-ethertrack"));
-  const kycTx   = await kyc.verifyKYC(deployer.address, kycHash);
-  await kycTx.wait();
-  console.log("   ✅ Deployer wallet KYC verified");
+  await kyc.verifyKYC(deployer.address, kycHash);
+  console.log("   ✅ Deployer wallet KYC verified on-chain");
 
   // ── Save deployment ───────────────────────────────────────
-  const timestamp = Date.now();
+  const timestamp      = Date.now();
   const deploymentsDir = path.join(__dirname, "../deployments");
   if (!fs.existsSync(deploymentsDir)) fs.mkdirSync(deploymentsDir);
 
   const deploymentData = {
     network,
-    chainId: chainId.toString(),
-    deployer: deployer.address,
+    chainId:   chainId.toString(),
+    deployer:  deployer.address,
     timestamp: new Date().toISOString(),
     contracts: addresses,
   };
@@ -123,11 +121,20 @@ async function main() {
     JSON.stringify(deploymentData, null, 2)
   );
 
-  // Write .env file for React
+  // Write .env snippet
   const envContent = `
-# EtherTrack Contract Addresses — deployed ${new Date().toISOString()}
+# ─── BACKEND .env ────────────────────────────────────
+# EtherTrack Contract Addresses — ${new Date().toISOString()}
 # Network: ${network} (${chainId})
 
+KYC_REGISTRY_ADDRESS=${addresses.KYCRegistry}
+TREASURY_ADDRESS=${addresses.Treasury}
+CARBON_CREDIT_TOKEN_ADDRESS=${addresses.CarbonCreditToken}
+EMISSION_REGISTRY_ADDRESS=${addresses.EmissionRegistry}
+MARKETPLACE_ADDRESS=${addresses.Marketplace}
+AMM_POOL_ADDRESS=${addresses.AMMPool}
+
+# ─── FRONTEND .env ───────────────────────────────────
 REACT_APP_KYC_REGISTRY_ADDRESS=${addresses.KYCRegistry}
 REACT_APP_TREASURY_ADDRESS=${addresses.Treasury}
 REACT_APP_CARBON_CREDIT_TOKEN_ADDRESS=${addresses.CarbonCreditToken}
@@ -137,30 +144,35 @@ REACT_APP_AMM_POOL_ADDRESS=${addresses.AMMPool}
 `.trim();
 
   fs.writeFileSync(path.join(deploymentsDir, `${network}.env`), envContent);
+  console.log(`\n📁 Saved to: deployments/${network}_${timestamp}.json`);
+  console.log(`📁 .env snippet: deployments/${network}.env`);
 
   // ── Summary ───────────────────────────────────────────────
   console.log("");
   console.log("══════════════════════════════════════════════════════");
-  console.log("🎉 Deployment Complete!");
+  console.log("🎉 DEPLOYMENT COMPLETE!");
+  console.log("══════════════════════════════════════════════════════");
   console.log("");
   console.log("Contract Addresses:");
   Object.entries(addresses).forEach(([name, addr]) => {
-    console.log(`  ${name.padEnd(20)} ${addr}`);
+    console.log(`  ${name.padEnd(22)} ${addr}`);
   });
   console.log("");
-  console.log("Architecture:");
-  console.log("  Orders ≤ 100 credits  → AMMPool (instant swap, x*y=k)");
-  console.log("  Orders > 100 credits  → Marketplace (order book matching)");
-  console.log("  Platform fee          → 0.5% → Treasury");
-  console.log("  LP fee                → 0.3% stays in AMM pool");
+  console.log("══════════════════════════════════════════════════════");
+  console.log("COPY THESE TO YOUR .env FILES:");
+  console.log("══════════════════════════════════════════════════════");
+  console.log(`KYC_REGISTRY_ADDRESS=${addresses.KYCRegistry}`);
+  console.log(`TREASURY_ADDRESS=${addresses.Treasury}`);
+  console.log(`CARBON_CREDIT_TOKEN_ADDRESS=${addresses.CarbonCreditToken}`);
+  console.log(`MARKETPLACE_ADDRESS=${addresses.Marketplace}`);
+  console.log(`AMM_POOL_ADDRESS=${addresses.AMMPool}`);
   console.log("");
-  console.log(`Saved to: deployments/${network}_${timestamp}.json`);
-  console.log(`Frontend .env: deployments/${network}.env`);
-  console.log("");
-  console.log("Next steps:");
-  console.log("  1. Copy deployments/*.env to your React .env");
-  console.log("  2. Add REACT_APP_AMM_POOL_ADDRESS to .env");
-  console.log("  3. npm start");
+  console.log(`REACT_APP_KYC_REGISTRY_ADDRESS=${addresses.KYCRegistry}`);
+  console.log(`REACT_APP_CARBON_CREDIT_TOKEN_ADDRESS=${addresses.CarbonCreditToken}`);
+  console.log(`REACT_APP_MARKETPLACE_ADDRESS=${addresses.Marketplace}`);
+  console.log(`REACT_APP_AMM_POOL_ADDRESS=${addresses.AMMPool}`);
+  console.log(`REACT_APP_TREASURY_ADDRESS=${addresses.Treasury}`);
+  console.log("══════════════════════════════════════════════════════");
 }
 
 main().catch((err) => {

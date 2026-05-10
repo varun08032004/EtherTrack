@@ -38,7 +38,6 @@ router.post('/submit-credit', authenticate, requireKYC, async (req, res) => {
       bankingStatus         = 'available',
       correspondingAdjustment = 'none',
       sdgTags               = [],
-      // ✅ New corporate fields
       icvcmCcpEligible      = false,
       icvcmCcpLabel         = null,
       icvcmCcpDate          = null,
@@ -73,14 +72,12 @@ router.post('/submit-credit', authenticate, requireKYC, async (req, res) => {
     if (standard === 'GS' && (!sdgTags || sdgTags.length === 0))
       return res.status(400).json({ error: 'Gold Standard credits require at least one SDG tag' });
 
-    // Duplicate serial check
     const { rows: dup } = await query(
       `SELECT id FROM carbon_batches WHERE registry_serial=$1 AND user_id=$2`,
       [registrySerial, req.user.id]
     );
     if (dup.length) return res.status(409).json({ error: 'Duplicate serial' });
 
-    // Project lookup / create
     const { rows: projectRows } = await query(
       `SELECT id FROM projects WHERE project_code=$1 LIMIT 1`, [projectId]
     );
@@ -151,7 +148,6 @@ router.post('/submit-credit', authenticate, requireKYC, async (req, res) => {
 });
 
 // ── GET /api/portfolio/my-submissions ────────────────────────────
-// Only returns pending + rejected (not approved — those are in my-credits)
 router.get('/my-submissions', authenticate, async (req, res) => {
   try {
     const { rows } = await query(
@@ -191,7 +187,8 @@ router.get('/my-submissions', authenticate, async (req, res) => {
 });
 
 // ── GET /api/portfolio/my-credits ─────────────────────────────────
-// Returns all approved credits with corporate fields
+// ✅ FIXED: Now returns heldCredits and listedCredits separately
+// so frontend can show partial listings correctly
 router.get('/my-credits', authenticate, async (req, res) => {
   try {
     const { rows } = await query(
@@ -220,24 +217,33 @@ router.get('/my-credits', authenticate, async (req, res) => {
 
     const credits = rows.map(r => ({
       ...r,
-      credits:      r.available_credits ?? r.quantity,
-      vintageYear:  r.vintage_year,
-      projectName:  r.project_name,
-      serialNumber: r.registry_serial,
-      projectId:    r.project_id,
-      tokenId:      r.token_id,
-      tokenHex:     r.token_id != null
+      // ✅ available_credits = held (not listed)
+      // total_credits = full original amount
+      // listed = total - available (what's currently on market)
+      credits:        r.available_credits ?? r.quantity,
+      heldCredits:    r.available_credits ?? r.quantity,
+      listedCredits:  Math.max(0, (r.total_credits || r.quantity || 0) - (r.available_credits || 0)),
+      vintageYear:    r.vintage_year,
+      projectName:    r.project_name,
+      serialNumber:   r.registry_serial,
+      projectId:      r.project_id,
+      tokenId:        r.token_id,
+      tokenHex:       r.token_id != null
         ? `0x${Number(r.token_id).toString(16).padStart(8, '0').toUpperCase()}`
         : null,
-      expiryDate:   r.expiry_date,
-      // Map DB status → frontend status
+      expiryDate:     r.expiry_date,
+      // ✅ FIXED status logic:
+      // PARTIAL = has both held and listed credits
+      // LISTED = all credits listed (none held)
+      // HELD = nothing listed
       status: (() => {
-        switch (r.status) {
-          case 'tokenised':  return 'HELD';
-          case 'exhausted':  return 'RETIRED';
-          case 'expired':    return 'RETIRED';
-          default:           return 'HELD';
-        }
+        if (r.status === 'exhausted') return 'RETIRED';
+        if (r.status === 'expired')   return 'RETIRED';
+        const held   = r.available_credits || 0;
+        const listed = Math.max(0, (r.total_credits || r.quantity || 0) - held);
+        if (listed > 0 && held > 0) return 'PARTIAL';  // ✅ new — has both
+        if (listed > 0 && held === 0) return 'LISTED';
+        return 'HELD';
       })(),
       isOnChain: r.status === 'tokenised' && r.token_id != null,
       sdg_tags: typeof r.sdg_tags === 'string'
@@ -249,6 +255,142 @@ router.get('/my-credits', authenticate, async (req, res) => {
   } catch (e) {
     console.error('my-credits error:', e.message);
     res.status(500).json({ error: 'Failed to fetch credits' });
+  }
+});
+
+// ── GET /api/portfolio/my-bought-credits ─────────────────────────
+// ✅ NEW: Returns credits purchased from other sellers on marketplace
+// These show in ALL + BOUGHT tabs
+router.get('/my-bought-credits', authenticate, async (req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT
+         t.id             AS trade_id,
+         t.token_id,
+         t.quantity,
+         t.price_per_credit_inr,
+         t.subtotal_inr,
+         t.buyer_pays_inr,
+         t.payment_mode,
+         t.tx_hash,
+         t.created_at    AS bought_at,
+         t.status        AS trade_status,
+         -- seller info
+         su.full_name    AS seller_name,
+         su.email        AS seller_email,
+         su.wallet_address AS seller_wallet,
+         -- batch/project info from the seller's batch
+         cb.id           AS batch_id,
+         cb.project_name,
+         cb.project_location,
+         cb.country,
+         cb.standard,
+         cb.project_type,
+         cb.developer,
+         cb.vintage_year,
+         cb.expiry_date,
+         cb.registry_serial,
+         cb.credit_type,
+         cb.cbam_eligible,
+         cb.corresponding_adjustment,
+         cb.sdg_tags,
+         cb.icvcm_ccp_eligible,
+         cb.icvcm_ccp_label,
+         cb.registry_link,
+         cb.methodology_id
+       FROM trades t
+       JOIN users su ON su.id = t.seller_id
+       LEFT JOIN carbon_batches cb ON cb.id = t.batch_id
+       WHERE t.buyer_id = $1
+         AND t.status = 'completed'
+       ORDER BY t.created_at DESC`,
+      [req.user.id]
+    );
+
+    const bought = rows.map(r => ({
+      // unique id for frontend keying
+      id:               `bought-${r.trade_id}`,
+      tradeId:          r.trade_id,
+      tokenId:          r.token_id,
+      tokenHex:         r.token_id != null
+        ? `0x${Number(r.token_id).toString(16).padStart(8, '0').toUpperCase()}`
+        : null,
+      // credits
+      credits:          r.quantity,
+      heldCredits:      r.quantity,
+      listedCredits:    0,
+      quantity:         r.quantity,
+      // pricing
+      pricePerCredit:   r.price_per_credit_inr,
+      totalPaid:        r.buyer_pays_inr,
+      paymentMode:      r.payment_mode,
+      txHash:           r.tx_hash,
+      boughtAt:         r.bought_at,
+      // project info
+      batchId:          r.batch_id,
+      projectName:      r.project_name || 'Unknown Project',
+      location:         r.project_location || '',
+      country:          r.country || '',
+      standard:         r.standard || 'VCS',
+      projectType:      r.project_type || '',
+      developer:        r.developer || '',
+      vintageYear:      r.vintage_year,
+      expiryDate:       r.expiry_date,
+      serialNumber:     r.registry_serial,
+      creditType:       r.credit_type || 'voluntary',
+      cbamEligible:     r.cbam_eligible || false,
+      correspondingAdjustment: r.corresponding_adjustment || 'none',
+      sdgTags:          typeof r.sdg_tags === 'string'
+        ? JSON.parse(r.sdg_tags || '[]')
+        : (r.sdg_tags || []),
+      icvcmCcpEligible: r.icvcm_ccp_eligible || false,
+      icvcmCcpLabel:    r.icvcm_ccp_label || '',
+      registryLink:     r.registry_link || '',
+      methodologyId:    r.methodology_id || '',
+      // seller
+      sellerName:       r.seller_name,
+      sellerWallet:     r.seller_wallet,
+      // status flags
+      status:           'BOUGHT',
+      isBought:         true,
+      isOnChain:        true,
+      admin_status:     'approved',
+      vintageDiscount:  0,
+    }));
+
+    res.json({ bought });
+  } catch (e) {
+    console.error('my-bought-credits error:', e.message);
+    res.status(500).json({ error: 'Failed to fetch bought credits' });
+  }
+});
+
+// ── GET /api/portfolio/batch-by-token/:tokenId ────────────────────
+router.get('/batch-by-token/:tokenId', authenticate, async (req, res) => {
+  try {
+    const tokenId = parseInt(req.params.tokenId);
+    if (isNaN(tokenId)) return res.status(400).json({ error: 'Invalid tokenId' });
+
+    const { rows } = await query(
+      `SELECT id, project_name, standard, available_credits, user_id
+       FROM carbon_batches
+       WHERE token_id = $1
+       LIMIT 1`,
+      [tokenId]
+    );
+
+    if (!rows.length) return res.json({ batchId: null });
+
+    res.json({
+      batchId:          rows[0].id,
+      projectName:      rows[0].project_name,
+      standard:         rows[0].standard,
+      availableCredits: rows[0].available_credits,
+      sellerId:         rows[0].user_id,
+    });
+  } catch (e) {
+    console.error('batch-by-token error:', e.message);
+    res.json({ batchId: null });
   }
 });
 
@@ -286,7 +428,6 @@ router.get('/check-duplicate-retirement', authenticate, async (req, res) => {
 });
 
 // ── GET /api/portfolio/kyc-status ────────────────────────────────
-// Returns KYC expiry info for the logged-in user
 router.get('/kyc-status', authenticate, async (req, res) => {
   try {
     const { rows } = await query(
@@ -297,22 +438,22 @@ router.get('/kyc-status', authenticate, async (req, res) => {
     );
     if (!rows.length) return res.status(404).json({ error: 'User not found' });
 
-    const u           = rows[0];
-    const now         = new Date();
-    const expiresAt   = u.kyc_expires_at ? new Date(u.kyc_expires_at) : null;
-    const daysLeft    = expiresAt ? Math.floor((expiresAt - now) / (1000 * 60 * 60 * 24)) : null;
-    const isExpired   = expiresAt ? expiresAt < now : false;
+    const u              = rows[0];
+    const now            = new Date();
+    const expiresAt      = u.kyc_expires_at ? new Date(u.kyc_expires_at) : null;
+    const daysLeft       = expiresAt ? Math.floor((expiresAt - now) / (1000 * 60 * 60 * 24)) : null;
+    const isExpired      = expiresAt ? expiresAt < now : false;
     const isExpiringSoon = daysLeft !== null && daysLeft <= 90 && daysLeft > 0;
 
     res.json({
-      kycVerified:      u.kyc_verified,
-      kycStatus:        u.kyc_status,
-      kycVerifiedAt:    u.kyc_verified_at,
-      kycExpiresAt:     u.kyc_expires_at,
-      daysUntilExpiry:  daysLeft,
+      kycVerified:     u.kyc_verified,
+      kycStatus:       u.kyc_status,
+      kycVerifiedAt:   u.kyc_verified_at,
+      kycExpiresAt:    u.kyc_expires_at,
+      daysUntilExpiry: daysLeft,
       isExpired,
       isExpiringSoon,
-      needsRenewal:     isExpired || isExpiringSoon,
+      needsRenewal:    isExpired || isExpiringSoon,
     });
   } catch (e) {
     res.status(500).json({ error: 'Failed to fetch KYC status' });
@@ -341,12 +482,7 @@ router.get('/emissions-summary', authenticate, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════
-// ── CORPORATE EXPORT ENDPOINTS
-// ═══════════════════════════════════════════════════════════════
-
 // ── GET /api/portfolio/export/ghg-protocol ───────────────────────
-// GHG Protocol Corporate Standard CSV
 router.get('/export/ghg-protocol', authenticate, async (req, res) => {
   const { year = new Date().getFullYear() } = req.query;
   try {
@@ -358,12 +494,8 @@ router.get('/export/ghg-protocol', authenticate, async (req, res) => {
 
     const lines = [
       '# GHG Protocol Corporate Standard Inventory',
-      `# Organization: EtherTrack User`,
       `# Reporting Year: ${year}`,
-      `# Base Year: ${parseInt(year) - 1}`,
-      `# Boundary: Operational Control`,
-      `# Methodology: GHG Protocol Corporate Standard (2004, revised 2015)`,
-      `# Emission Factors: DEFRA 2024 / IPCC AR6 / IEA 2024`,
+      `# Methodology: GHG Protocol Corporate Standard`,
       '',
       '## SECTION 1: GHG INVENTORY',
       'Date,Activity,Scope,Category,Quantity,Unit,Emission Factor,CO2e (tonnes),Verification Status,Notes',
@@ -378,9 +510,9 @@ router.get('/export/ghg-protocol', authenticate, async (req, res) => {
       ),
       '',
       '## SECTION 3: RETIREMENTS',
-      'Certificate ID,Project Name,Standard,Credits Retired (tCO2e),Vintage Year,Scope,Beneficiary Name,Beneficiary Entity,GSTIN,TX Hash,Date',
+      'Certificate ID,Project Name,Standard,Credits Retired (tCO2e),Vintage Year,Scope,Beneficiary Name,TX Hash,Date',
       ...retirementsRes.rows.map(r =>
-        `${r.certificate_id},${r.project_name},${r.standard},${r.amount},${r.vintage_year},${r.retire_scope},${r.beneficiary_name || ''},${r.beneficiary_entity || ''},${r.beneficiary_gstin || ''},${r.tx_hash},${r.retired_at?.toISOString().slice(0,10)}`
+        `${r.certificate_id},${r.project_name},${r.standard},${r.amount},${r.vintage_year},${r.retire_scope},${r.beneficiary_name || ''},${r.tx_hash},${r.retired_at?.toISOString().slice(0,10)}`
       ),
     ];
 
@@ -394,7 +526,6 @@ router.get('/export/ghg-protocol', authenticate, async (req, res) => {
 });
 
 // ── GET /api/portfolio/export/brsr ───────────────────────────────
-// SEBI BRSR Core format
 router.get('/export/brsr', authenticate, async (req, res) => {
   const { year = new Date().getFullYear() } = req.query;
   try {
@@ -413,35 +544,22 @@ router.get('/export/brsr', authenticate, async (req, res) => {
     const totalRetired = rets.reduce((s,r)=>s+r.amount,0);
 
     const lines = [
-      '# SEBI BRSR Core — Business Responsibility and Sustainability Report',
+      '# SEBI BRSR Core',
       `# Company: ${u.company_name || u.full_name}`,
-      `# CIN: ${u.company_cin || 'Not provided'}`,
-      `# GSTIN: ${u.company_gstin || 'Not provided'}`,
       `# Reporting Year: FY ${year}-${parseInt(year)+1}`,
-      `# Generated: ${new Date().toISOString()}`,
       '',
-      '## PRINCIPLE 6: ENVIRONMENT',
-      '## P6-E1: GHG Emissions (BRSR Core KPI)',
+      'Metric,Unit,FY Current,Source',
+      `Scope 1 Emissions,tCO2e,${scope1.toFixed(2)},GHG Protocol`,
+      `Scope 2 Emissions,tCO2e,${scope2.toFixed(2)},GHG Protocol`,
+      `Scope 3 Emissions,tCO2e,${scope3.toFixed(2)},GHG Protocol`,
+      `Total GHG Emissions,tCO2e,${(scope1+scope2+scope3).toFixed(2)},GHG Protocol`,
+      `Carbon Credits Retired,tCO2e,${totalRetired},EtherTrack Blockchain`,
+      `Net Emissions,tCO2e,${Math.max(0,(scope1+scope2+scope3)-totalRetired).toFixed(2)},Calculated`,
       '',
-      'Metric,Unit,FY Current,FY Previous,Source',
-      `Scope 1 Emissions,tCO2e,${scope1.toFixed(2)},,GHG Protocol`,
-      `Scope 2 Emissions (Location-based),tCO2e,${scope2.toFixed(2)},,GHG Protocol`,
-      `Scope 3 Emissions,tCO2e,${scope3.toFixed(2)},,GHG Protocol`,
-      `Total GHG Emissions,tCO2e,${(scope1+scope2+scope3).toFixed(2)},,GHG Protocol`,
-      `Carbon Credits Retired (Offset),tCO2e,${totalRetired},,EtherTrack Blockchain`,
-      `Net Emissions,tCO2e,${Math.max(0,(scope1+scope2+scope3)-totalRetired).toFixed(2)},,Calculated`,
-      '',
-      '## P6-E2: Carbon Credits Detail',
       'Certificate ID,Project,Standard,Quantity,Vintage,Scope Offset,Date,TX Hash',
       ...rets.map(r =>
         `${r.certificate_id},${r.project_name},${r.standard},${r.amount},${r.vintage_year},Scope ${r.retire_scope},${r.retired_at?.toISOString().slice(0,10)},${r.tx_hash}`
       ),
-      '',
-      '## DISCLOSURE NOTES',
-      `Emission Factors: DEFRA 2024 / CEA India Grid Emission Factor 2023`,
-      `Verification Status: Third-party verification pending`,
-      `Blockchain Registry: Ethereum Sepolia (EtherTrack)`,
-      `Carbon Credits Standard: Verified Carbon Standard (VCS) / Gold Standard`,
     ];
 
     res.setHeader('Content-Type', 'text/csv');
@@ -454,7 +572,6 @@ router.get('/export/brsr', authenticate, async (req, res) => {
 });
 
 // ── GET /api/portfolio/export/cdp ────────────────────────────────
-// CDP Climate Change questionnaire format
 router.get('/export/cdp', authenticate, async (req, res) => {
   const { year = new Date().getFullYear() } = req.query;
   try {
@@ -471,43 +588,20 @@ router.get('/export/cdp', authenticate, async (req, res) => {
     const scope3 = emits.filter(r=>r.scope===3).reduce((s,r)=>s+parseFloat(r.co2e),0);
 
     const lines = [
-      '# CDP Climate Change Questionnaire — Carbon Disclosure',
+      '# CDP Climate Change Questionnaire',
       `# Reporting Year: ${year}`,
-      `# Generated by EtherTrack — India Carbon Exchange`,
-      `# Generated: ${new Date().toISOString()}`,
-      '',
-      '## MODULE C6: EMISSIONS DATA',
       '',
       'CDP Question,Response',
       `C6.1 Scope 1 GHG emissions (metric tons CO2e),${scope1.toFixed(2)}`,
-      `C6.3 Scope 2 GHG emissions location-based (metric tons CO2e),${scope2.toFixed(2)}`,
-      `C6.5 Scope 3 total (metric tons CO2e),${scope3.toFixed(2)}`,
-      `C6.5a Scope 3 categories included,All categories tracked`,
-      `Emission factors used,DEFRA 2024 / IPCC AR6 / IEA 2024 / CEA India`,
-      `GHG Protocol alignment,Corporate Standard (2004 revised 2015)`,
-      '',
-      '## MODULE C11: CARBON PRICING',
-      '',
-      'CDP Question,Response',
+      `C6.3 Scope 2 GHG emissions location-based,${scope2.toFixed(2)}`,
+      `C6.5 Scope 3 total,${scope3.toFixed(2)}`,
       `C11.2 Carbon credits retired,${rets.reduce((s,r)=>s+r.amount,0)} tCO2e`,
-      `C11.2a Registry used,${[...new Set(rets.map(r=>r.standard))].join(' / ')}`,
-      `C11.2b Credit type,Voluntary Carbon Units (VCU) / Compliance Carbon Certificates (CCC)`,
-      `C11.2c Verification,Third-party pending / Blockchain verified`,
       '',
-      '## C11 CREDIT DETAILS',
-      'Project Name,Standard,Serial,ICVCM CCP,Quantity (tCO2e),Vintage,Country,Article 6 CA,Certificate ID,TX Hash',
+      'Project Name,Standard,Serial,ICVCM CCP,Quantity,Vintage,Country,CA,Certificate ID,TX Hash',
       ...rets.map(r => {
         const credit = creditsRes.rows.find(c => c.registry_serial === r.serial_number);
         return `"${r.project_name}",${r.standard},${r.serial_number},${credit?.icvcm_ccp_eligible ? 'Yes' : 'No'},${r.amount},${r.vintage_year},${r.country},${r.corresponding_adjustment},${r.certificate_id},${r.tx_hash}`;
       }),
-      '',
-      '## MODULE C4: TARGETS AND PERFORMANCE',
-      '',
-      'CDP Question,Response',
-      `C4.1 Net zero target,In progress`,
-      `C4.1a Target year,2050`,
-      `C4.2 Scope 1+2 base year emissions,${(scope1+scope2).toFixed(2)} tCO2e`,
-      `C4.2a Percentage reduced,Calculating`,
     ];
 
     res.setHeader('Content-Type', 'text/csv');
@@ -520,7 +614,6 @@ router.get('/export/cdp', authenticate, async (req, res) => {
 });
 
 // ── GET /api/portfolio/export/tcfd ───────────────────────────────
-// TCFD Climate Disclosure format
 router.get('/export/tcfd', authenticate, async (req, res) => {
   const { year = new Date().getFullYear() } = req.query;
   try {
@@ -536,48 +629,21 @@ router.get('/export/tcfd', authenticate, async (req, res) => {
     const total  = scope1 + scope2 + scope3;
 
     const lines = [
-      '# TCFD — Task Force on Climate-related Financial Disclosures',
+      '# TCFD Climate Disclosure',
       `# Reporting Period: ${year}`,
-      `# Generated by EtherTrack — India Carbon Exchange`,
-      `# Generated: ${new Date().toISOString()}`,
-      '',
-      '## PILLAR 1: GOVERNANCE',
-      'Disclosure,Response',
-      `Board oversight of climate risks,In progress — ESG committee recommended`,
-      `Management role in climate assessment,Carbon tracking via EtherTrack platform`,
-      '',
-      '## PILLAR 2: STRATEGY',
-      'Disclosure,Response',
-      `Climate risks identified,Transition risk: carbon pricing; Physical risk: supply chain`,
-      `Impact on business,Regulatory: India CCTS compliance; Market: carbon cost`,
-      `Climate scenarios used,IEA Net Zero 2050; IPCC 1.5°C pathway`,
-      '',
-      '## PILLAR 3: RISK MANAGEMENT',
-      'Disclosure,Response',
-      `Process for identifying climate risks,GHG inventory via EtherTrack`,
-      `Integration into overall risk management,ESG dashboard monitoring`,
-      '',
-      '## PILLAR 4: METRICS AND TARGETS',
       '',
       'Metric,Value,Unit,Year',
       `Scope 1 GHG Emissions,${scope1.toFixed(2)},tCO2e,${year}`,
-      `Scope 2 GHG Emissions (Location-based),${scope2.toFixed(2)},tCO2e,${year}`,
+      `Scope 2 GHG Emissions,${scope2.toFixed(2)},tCO2e,${year}`,
       `Scope 3 GHG Emissions,${scope3.toFixed(2)},tCO2e,${year}`,
       `Total GHG Emissions,${total.toFixed(2)},tCO2e,${year}`,
       `Carbon Credits Retired,${retirementsRes.rows.reduce((s,r)=>s+r.amount,0)},tCO2e,${year}`,
       `Net Emissions,${Math.max(0,total-retirementsRes.rows.reduce((s,r)=>s+r.amount,0)).toFixed(2)},tCO2e,${year}`,
-      `Carbon Intensity (if revenue provided),Calculate using revenue data,,`,
       '',
-      '## RETIREMENT EVIDENCE',
-      'Certificate ID,Standard,Amount (tCO2e),Scope,Date,Blockchain TX',
+      'Certificate ID,Standard,Amount (tCO2e),Scope,Date,TX Hash',
       ...retirementsRes.rows.map(r =>
         `${r.certificate_id},${r.standard},${r.amount},Scope ${r.retire_scope},${r.retired_at?.toISOString().slice(0,10)},${r.tx_hash}`
       ),
-      '',
-      `## FORWARD-LOOKING STATEMENTS`,
-      `Net Zero Target Year: 2050`,
-      `Short-term Target: 50% reduction by 2030`,
-      `Methodology: Paris Agreement aligned, India NDC compatible`,
     ];
 
     res.setHeader('Content-Type', 'text/csv');

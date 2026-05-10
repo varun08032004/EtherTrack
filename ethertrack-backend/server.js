@@ -18,12 +18,14 @@ const adminRoutes       = require('./routes/admin');
 const portfolioRoutes   = require('./routes/portfolio');
 const verifyRoutes      = require('./routes/verify');
 const orgRoutes         = require('./routes/org');
+const tradeRoutes       = require('./routes/trades');  // ✅ Trade settlement engine
+const marketRoutes      = require('./routes/market');  // ✅ Public market listings (no auth)
 const blockchain        = require('./services/blockchain');
 
 // compliance.js exports BOTH helper functions (used by wallet.js) AND an express router
 // Always destructure { router } — do not require the file directly as a router
-const { router: complianceRoutes }    = require('./routes/compliance');
-const { router: notificationRoutes }  = require('./routes/notifications');
+const { router: complianceRoutes }   = require('./routes/compliance');
+const { router: notificationRoutes } = require('./routes/notifications');
 
 const app  = express();
 const PORT = process.env.PORT || 5000;
@@ -90,18 +92,20 @@ app.get('/health', (req, res) => {
 });
 
 // ── Routes ────────────────────────────────────────────────────────
-app.use('/api/auth',         authRoutes);
-app.use('/api/wallet',       walletRoutes);
-app.use('/api/compliance',     complianceRoutes);  // AML flags, TDS records, FEMA log, limit config
-app.use('/api/notifications',  notificationRoutes); // real-time notifications
-app.use('/api/registry',     registryRoutes);
-app.use('/api/transactions', transactionRoutes);
-app.use('/api/emissions',    emissionRoutes);
-app.use('/api/kyc',          kycRoutes);
-app.use('/api/admin',        adminRoutes);
-app.use('/api/portfolio',    portfolioRoutes);
-app.use('/api/verify',       verifyRoutes);
-app.use('/api/org',          orgRoutes);
+app.use('/api/auth',          authRoutes);
+app.use('/api/wallet',        walletRoutes);
+app.use('/api/compliance',    complianceRoutes);   // AML flags, TDS records, FEMA log, limit config
+app.use('/api/notifications', notificationRoutes); // real-time notifications
+app.use('/api/registry',      registryRoutes);
+app.use('/api/transactions',  transactionRoutes);
+app.use('/api/emissions',     emissionRoutes);
+app.use('/api/kyc',           kycRoutes);
+app.use('/api/admin',         adminRoutes);
+app.use('/api/portfolio',     portfolioRoutes);
+app.use('/api/verify',        verifyRoutes);
+app.use('/api/org',           orgRoutes);
+app.use('/api/trades',        tradeRoutes);        // ✅ Trade settlement engine
+app.use('/api/market',        marketRoutes);       // ✅ Public market — no auth needed
 
 // ── 404 ───────────────────────────────────────────────────────────
 app.use((req, res) => {
@@ -127,4 +131,4 @@ app.listen(PORT, () => {
   }
 });
 
-module.exports = app; 
+module.exports = app;
