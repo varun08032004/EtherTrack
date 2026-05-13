@@ -4,11 +4,10 @@ import { AuthContext } from '../App';
 import { authAPI } from '../services/api';
 
 const KYCGate = ({ children }) => {
-  const { isAuthenticated, kycCompleted, dbUser, handleKycComplete } = useContext(AuthContext);
-  const location  = useLocation();
-  const navigate  = useNavigate();
+  const { isAuthenticated, kycCompleted, dbUser, handleKycComplete, setDbUser } = useContext(AuthContext);
+  const location = useLocation();
+  const navigate = useNavigate();
 
-  // ✅ Self-healing: re-fetch /api/auth/me if state looks wrong
   const [checking, setChecking] = useState(false);
   const [checked,  setChecked]  = useState(false);
 
@@ -25,21 +24,27 @@ const KYCGate = ({ children }) => {
   }, []);
 
   useEffect(() => {
-    // ✅ If user is authenticated but kycCompleted=false and dbUser not yet loaded
-    // OR dbUser is loaded but kyc_verified=true while kycCompleted=false (stale state)
-    // → re-fetch /me to self-heal
     if (!isAuthenticated || checked) return;
 
-    const kycLooksFalseButMightBeTrue =
-      !kycCompleted &&
-      (!dbUser || dbUser?.kyc_verified === true || dbUser?.kyc_status === 'verified');
+    // ── Re-fetch /me on every gate mount to ensure fresh KYC status ──
+    // This covers:
+    //   1. kycCompleted=false but DB is actually verified (stale React state after refresh)
+    //   2. kyc_status='submitted' in state but DB moved to 'verified' (admin approved)
+    //   3. dbUser not yet loaded at all
+    const needsCheck =
+      !kycCompleted ||               // might be stale false
+      !dbUser ||                     // dbUser not hydrated yet
+      dbUser?.kyc_status === 'submitted'; // could have been approved since last load
 
-    if (kycLooksFalseButMightBeTrue) {
+    if (needsCheck) {
       setChecking(true);
       authAPI.me()
         .then(me => {
-          if (me?.kyc_verified || me?.kyc_status === 'verified') {
-            handleKycComplete(true); // ✅ Heal the stale state
+          if (!me) return;
+          // Always sync dbUser with fresh server data
+          setDbUser(prev => ({ ...prev, ...me }));
+          if (me.kyc_verified || me.kyc_status === 'verified') {
+            handleKycComplete(true);
           }
         })
         .catch(() => {})
@@ -50,14 +55,14 @@ const KYCGate = ({ children }) => {
     } else {
       setChecked(true);
     }
-  }, [isAuthenticated, kycCompleted, dbUser, checked, handleKycComplete]);
+  }, [isAuthenticated, kycCompleted, dbUser, checked, handleKycComplete, setDbUser]);
 
   // Not logged in
   if (!isAuthenticated) {
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
-  // ✅ Show spinner while re-checking KYC status
+  // Show spinner while re-checking
   if (checking) {
     return (
       <div style={{
@@ -81,9 +86,9 @@ const KYCGate = ({ children }) => {
     );
   }
 
+  // Use fresh dbUser from the re-fetch (setDbUser merges it above)
   const status = dbUser?.kyc_status;
 
-  // ✅ Multiple ways to confirm verified — handles stale state
   const isVerified =
     kycCompleted ||
     status === 'verified' ||

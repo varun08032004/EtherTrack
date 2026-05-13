@@ -3,6 +3,7 @@ import { RecaptchaVerifier, signInWithPhoneNumber } from 'firebase/auth';
 import { auth } from '../firebaseConfigure';
 import { AuthContext } from '../App';
 import { useNotifications } from '../context/NotificationContext';
+import { apiFetch } from '../services/api';   // ← added
 import { ethers } from 'ethers';
 
 const STEPS = ['IDENTITY', 'DOCUMENT', 'PHONE', 'REVIEW'];
@@ -188,16 +189,14 @@ const KYCForm = ({ onComplete }) => {
       const kycDataHash = ethers.keccak256(
         ethers.toUtf8Bytes(`${idType}:${normalizedId}:${phone}:${fullName}`)
       );
-      const idHash     = ethers.keccak256(ethers.toUtf8Bytes(`${idType}:${normalizedId}`));
+      const idHash      = ethers.keccak256(ethers.toUtf8Bytes(`${idType}:${normalizedId}`));
       const aadhaarHash = idType === 'aadhaar' ? idHash : null;
       const panHash     = idType === 'pan'     ? idHash : null;
 
-      // ── Step 3: Submit to backend ─────────────────────────────
+      // ── Step 3: Submit via apiFetch (handles auth automatically) ──
       setSubmitStep('Submitting KYC for admin review...');
-      const res = await fetch(`${process.env.REACT_APP_API_URL}/api/kyc/submit`, {
-        method:      'POST',
-        credentials: 'include',
-        headers:     { 'Content-Type': 'application/json' },
+      const data = await apiFetch('/api/kyc/submit', {
+        method: 'POST',
         body: JSON.stringify({
           fullName,
           idType,
@@ -209,16 +208,11 @@ const KYCForm = ({ onComplete }) => {
         }),
       });
 
-      const data = await res.json();
-
-      if (res.status === 409) {
-        setSubmitError('These KYC credentials are already verified with another account. Contact support if this is an error.');
+      // apiFetch returns null when session expired and logout was triggered
+      if (data === null) {
+        setSubmitError('Session expired. Please log in again.');
         setSubmitting(false); setSubmitStep('');
         return;
-      }
-
-      if (!res.ok) {
-        throw new Error(data.error || 'Submission failed');
       }
 
       // ── Step 4: Update local state ────────────────────────────
@@ -235,8 +229,14 @@ const KYCForm = ({ onComplete }) => {
       setSubmitted(true);
 
     } catch (err) {
+      // 409 — duplicate KYC credentials
+      if (err.status === 409) {
+        setSubmitError('These KYC credentials are already verified with another account. Contact support if this is an error.');
+        setSubmitting(false); setSubmitStep('');
+        return;
+      }
       console.error('KYC submit error:', err);
-      setSubmitError(err.message || 'Submission failed. Please try again.');
+      setSubmitError(err.error || err.message || 'Submission failed. Please try again.');
       setSubmitting(false);
       setSubmitStep('');
     }
@@ -263,7 +263,6 @@ const KYCForm = ({ onComplete }) => {
               within <span style={{ color:'#facc15' }}>1–2 business days</span>.
             </div>
 
-            {/* Status steps */}
             {[
               { icon:'✅', label:'KYC Submitted',        done: true  },
               { icon:'🔍', label:'Admin Verification',   done: false },
@@ -467,7 +466,6 @@ const KYCForm = ({ onComplete }) => {
               ))}
             </div>
 
-            {/* Admin review notice */}
             <div style={{
               background:'#0a1628', border:'1px solid #60a5fa22',
               borderRadius:8, padding:'14px 16px',
