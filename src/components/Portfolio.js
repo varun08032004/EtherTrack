@@ -775,14 +775,65 @@ function RetireModal({ credit, onConfirm, onClose, loading }) {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// ── ✅ NEW: Bought Credit Card
+// ─────────────────────────────────────────────────────────────────
+function BoughtCreditCard({ credit, navigate, i }) {
+  const reg = REGISTRIES[credit.standard] || REGISTRIES.VCS;
+  return (
+    <div style={{background:'#070c09',border:'1px solid #60a5fa22',borderRadius:14,overflow:'hidden',animation:`fadeSlideUp .3s ease ${i*0.05}s both`}}>
+      <div style={{padding:'14px 16px 10px',borderBottom:'1px solid #0d1f11',display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:8}}>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:9,color:'#60a5fa88',letterSpacing:'.14em',marginBottom:4}}>🛒 PURCHASED FROM MARKET</div>
+          <div style={{fontSize:12,color:'#f0fdf4',fontWeight:700,marginBottom:3,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{credit.projectName}</div>
+          <div style={{display:'flex',gap:5,flexWrap:'wrap',alignItems:'center'}}>
+            <span style={{fontSize:9,padding:'2px 7px',borderRadius:3,background:reg.bg,color:reg.color,border:`1px solid ${reg.color}22`}}>{credit.standard}</span>
+            <span style={{fontSize:9,padding:'2px 7px',borderRadius:3,background:'#060e18',color:'#60a5fa88',border:'1px solid #60a5fa22'}}>⛓ On-Chain</span>
+          </div>
+        </div>
+        <div style={{textAlign:'right',flexShrink:0}}>
+          <div style={{fontSize:22,fontWeight:800,color:'#60a5fa',fontFamily:'Syne,sans-serif',lineHeight:1}}>{Number(credit.quantity||0).toLocaleString()}</div>
+          <div style={{fontSize:9,color:'#60a5fa44'}}>tCO₂e</div>
+        </div>
+      </div>
+      <div style={{padding:'12px 16px',display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+        {[
+          {l:'PAID',         v:`₹${Number(credit.totalPaid||0).toLocaleString()}`,      color:'#22c55e'},
+          {l:'PRICE/CREDIT', v:`₹${Number(credit.pricePerCredit||0).toLocaleString()}`, color:'#f0fdf4'},
+          {l:'VINTAGE YEAR', v:credit.vintageYear||'—',                                 color:'#f0fdf4'},
+          {l:'PAYMENT',      v:(credit.paymentMode||'eth').toUpperCase(),               color:credit.paymentMode==='inr'?'#22c55e':'#f59e0b'},
+          {l:'SELLER',       v:credit.sellerWallet?`${credit.sellerWallet.slice(0,6)}...${credit.sellerWallet.slice(-4)}`:'—', color:'#86efac66'},
+          {l:'BOUGHT ON',    v:credit.boughtAt?new Date(credit.boughtAt).toLocaleDateString('en-IN'):'—', color:'#86efac66'},
+        ].map(({l,v,color})=>(
+          <div key={l} style={{background:'#060a07',border:'1px solid #0d1f11',borderRadius:6,padding:'8px 10px'}}>
+            <div style={{fontSize:8,color:'#86efac44',letterSpacing:'.1em',marginBottom:3}}>{l}</div>
+            <div style={{fontSize:10,color,fontWeight:600}}>{v}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{padding:'10px 16px',borderTop:'1px solid #0d1f11',display:'flex',gap:8}}>
+        <button onClick={()=>navigate('/carbon-credits')} style={{flex:1,padding:'8px 12px',borderRadius:6,border:'1px solid #60a5fa33',background:'#060e18',color:'#60a5fa88',cursor:'pointer',fontFamily:'DM Mono,monospace',fontSize:10}}>
+          📈 TRADE
+        </button>
+        {credit.txHash&&(
+          <a href={`https://sepolia.etherscan.io/tx/${credit.txHash}`} target="_blank" rel="noreferrer"
+            style={{flex:1,padding:'8px 12px',borderRadius:6,border:'1px solid #22c55e33',background:'#051409',color:'#22c55e88',fontFamily:'DM Mono,monospace',fontSize:10,textAlign:'center',textDecoration:'none'}}>
+            ⛓ ETHERSCAN ↗
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────
 // ── Main Portfolio Component
 // ─────────────────────────────────────────────────────────────────
 export default function Portfolio() {
   const navigate = useNavigate();
   const { user, dbUser } = useContext(AuthContext);
-  const { myCredits, myRetirements, stats, loading, walletAddress, isKYCVerified,
+  const { myCredits, myBoughtCredits, myRetirements, stats, loading, walletAddress, isKYCVerified,
           listCredit, delistCredit, retireCredit, loadMyCredits, refreshKYC,
-          refreshRetirements } = usePortfolio();
+          refreshRetirements, refreshBoughtCredits } = usePortfolio();
 
   const [activeTab,      setActiveTab]      = useState('ALL');
   const [showForm,       setShowForm]       = useState(false);
@@ -859,8 +910,8 @@ export default function Portfolio() {
     setForm(f=>({...f, sdgTags: f.sdgTags.includes(id)?f.sdgTags.filter(s=>s!==id):[...f.sdgTags,id]}));
   };
 
-  // Build allCredits
-  const allCredits = [
+  // Build allCredits — owned/tokenised + pending/rejected + bought from market
+  const ownedCredits = [
     ...myCredits,
     ...pendingCredits
       .filter(p=>!myCredits.find(c=>c.serialNumber===p.registry_serial))
@@ -880,29 +931,40 @@ export default function Portfolio() {
       }))
   ];
 
-  const filtered = allCredits.filter(c=>{
-    if (activeTab==='HELD')       return c.status==='HELD';
-    if (activeTab==='LISTED')     return c.status==='LISTED';
-    if (activeTab==='RETIRED')    return c.status==='RETIRED';
-    if (activeTab==='PENDING')    return c.isPending&&!c.isRejected;
-    if (activeTab==='REJECTED')   return c.isRejected;
-    if (activeTab==='COMPLIANCE') return c.creditType==='compliance';
-    if (activeTab==='CBAM')       return c.cbamEligible;
-    if (activeTab==='CCP')        return c.icvcm_ccp_eligible;
+  // Normalise bought credits so they render with the standard card
+  const normalisedBought = (myBoughtCredits||[]).map(b=>({
+    ...b,
+    status:       'BOUGHT',
+    isBought:     true,
+    heldCredits:  b.quantity || b.credits || 0,
+    credits:      b.quantity || b.credits || 0,
+    listedCredits:0,
+    isOnChain:    true,
+    admin_status: 'approved',
+  }));
+
+  // ALL = owned + bought (for display and counts)
+  const allCredits = [...ownedCredits, ...normalisedBought];
+
+  const filtered = allCredits.filter(c => {
+    if (activeTab==='ALL')      return true;
+    if (activeTab==='HELD')     return c.status==='HELD'   && !c.isBought;
+    if (activeTab==='LISTED')   return c.status==='LISTED' && !c.isBought;
+    if (activeTab==='BOUGHT')   return c.isBought === true;
+    if (activeTab==='RETIRED')  return false; // handled separately below
+    if (activeTab==='PENDING')  return c.isPending && !c.isRejected;
+    if (activeTab==='REJECTED') return c.isRejected;
     return true;
   });
 
   const tabCounts = {
-    ALL:        allCredits.length,
-    HELD:       allCredits.filter(c=>c.status==='HELD').length,
-    LISTED:     allCredits.filter(c=>c.status==='LISTED').length,
-    // ✅ FIX: RETIRED count from myRetirements not allCredits
-    RETIRED:    myRetirements.length,
-    PENDING:    allCredits.filter(c=>c.isPending&&!c.isRejected).length,
-    REJECTED:   allCredits.filter(c=>c.isRejected).length,
-    COMPLIANCE: allCredits.filter(c=>c.creditType==='compliance').length,
-    CBAM:       allCredits.filter(c=>c.cbamEligible).length,
-    CCP:        allCredits.filter(c=>c.icvcm_ccp_eligible).length,
+    ALL:      allCredits.length,
+    HELD:     ownedCredits.filter(c=>c.status==='HELD').length,
+    LISTED:   ownedCredits.filter(c=>c.status==='LISTED').length,
+    BOUGHT:   normalisedBought.length,
+    RETIRED:  myRetirements.length,
+    PENDING:  ownedCredits.filter(c=>c.isPending&&!c.isRejected).length,
+    REJECTED: ownedCredits.filter(c=>c.isRejected).length,
   };
 
   const validateForm = () => {
@@ -1061,7 +1123,13 @@ export default function Portfolio() {
   };
 
   const handleRefresh = async () => {
-    try { await loadMyCredits(); await loadPendingCredits(); await loadEmissionsData(); showToast('✅ Portfolio refreshed'); }
+    try {
+      await loadMyCredits();
+      await loadPendingCredits();
+      await loadEmissionsData();
+      if (refreshBoughtCredits) await refreshBoughtCredits();
+      showToast('✅ Portfolio refreshed');
+    }
     catch { showToast('❌ Refresh failed','error'); }
   };
 
@@ -1119,6 +1187,8 @@ export default function Portfolio() {
     .pt-tab.compliance-tab.active{border-color:#f97316;color:#fdba74;background:#1a0a00;}
     .pt-tab.cbam-tab.active{border-color:#60a5fa;color:#93c5fd;background:#060e18;}
     .pt-tab.ccp-tab.active{border-color:#84cc16;color:#bef264;background:#0a1400;}
+    .pt-tab.bought-tab.active{border-color:#60a5fa;color:#93c5fd;background:#060e18;}
+    .pt-tab.bought-tab.active .pt-tab-count{background:#60a5fa33;color:#93c5fd;}
     .pt-tab-count{font-size:10px;background:#1a2e1a;color:#86efacaa;padding:1px 7px;border-radius:10px;}
     .pt-tab.active .pt-tab-count{background:#22c55e33;color:#4ade80;}
     .pt-tab.ccp-tab.active .pt-tab-count{background:#84cc1633;color:#bef264;}
@@ -1261,7 +1331,9 @@ export default function Portfolio() {
 
           <div className="pt-stats">
             {[
-              {label:'TOTAL CREDITS',      val:loading.credits?'...':`${stats.totalCredits.toLocaleString()} t`, sub:'CO₂ equivalent tokenized',  color:'#22c55e',accent:'linear-gradient(90deg,#052e16,#16a34a)'},
+              {label:'TOTAL CREDITS',      val:loading.credits?'...':
+                `${(tabCounts.HELD + tabCounts.LISTED + tabCounts.BOUGHT).toLocaleString()} t`,
+                sub:'held + listed + bought',  color:'#22c55e',accent:'linear-gradient(90deg,#052e16,#16a34a)'},
               {label:'PORTFOLIO VALUE',     val:loading.credits?'...':`₹${(stats.totalValue/100000).toFixed(1)}L`,sub:'after vintage depreciation', color:'#60a5fa',accent:'linear-gradient(90deg,#0c1a2e,#3b82f6)'},
               {label:'LISTED ON MARKET',    val:loading.credits?'...':`${stats.listedCount.toLocaleString()} t`,  sub:'tCO₂ live on marketplace',    color:'#facc15',accent:'linear-gradient(90deg,#1a1000,#ca8a04)'},
               {label:'PERMANENTLY RETIRED', val:loading.credits?'...':`${stats.retiredCount.toLocaleString()} t`,  sub:'tCO₂ offset on-chain',        color:'#a78bfa',accent:'linear-gradient(90deg,#0f0520,#7c3aed)'},
@@ -1286,27 +1358,23 @@ export default function Portfolio() {
           <OffsetGapPanel myCredits={allCredits} emissionsData={emissionsData}/>
           {/* Credit score panel removed — coming in v2 */}
 
-          {/* Tabs — with new CCP tab */}
+          {/* Tabs */}
           <div className="pt-tabs">
             {[
-              {key:'ALL',        label:'ALL',        cls:''},
-              {key:'HELD',       label:'HELD',       cls:''},
-              {key:'LISTED',     label:'LISTED',     cls:''},
-              {key:'RETIRED',    label:'RETIRED',    cls:''},
-              {key:'PENDING',    label:'PENDING',    cls:''},
-              {key:'CCP',        label:'🏅 CCP',     cls:'ccp-tab'},
-              {key:'COMPLIANCE', label:'CCC',        cls:'compliance-tab'},
-              {key:'CBAM',       label:'CBAM ✓',     cls:'cbam-tab'},
-              {key:'REJECTED',   label:'REJECTED',   cls:'rejected-tab'},
+              {key:'ALL',      label:'ALL',       cls:''},
+              {key:'HELD',     label:'HELD',      cls:''},
+              {key:'LISTED',   label:'LISTED',    cls:''},
+              {key:'BOUGHT',   label:'🛒 BOUGHT', cls:'bought-tab'},
+              {key:'RETIRED',  label:'RETIRED',   cls:''},
+              {key:'PENDING',  label:'PENDING',   cls:''},
+              {key:'REJECTED', label:'REJECTED',  cls:'rejected-tab'},
             ].map(({key,label,cls})=>(
               <button key={key} className={`pt-tab ${cls}${activeTab===key?' active':''}`} onClick={()=>setActiveTab(key)}>
                 {label}
                 <span className="pt-tab-count"
-                  style={key==='PENDING'  &&tabCounts.PENDING>0    ?{background:'#f59e0b22',color:'#f59e0b'}
-                        :key==='REJECTED' &&tabCounts.REJECTED>0   ?{background:'#f8717122',color:'#f87171'}
-                        :key==='COMPLIANCE'&&tabCounts.COMPLIANCE>0 ?{background:'#f9731622',color:'#f97316'}
-                        :key==='CBAM'    &&tabCounts.CBAM>0        ?{background:'#60a5fa22',color:'#60a5fa'}
-                        :key==='CCP'     &&tabCounts.CCP>0         ?{background:'#84cc1622',color:'#84cc16'}:{}}>
+                  style={key==='BOUGHT'  &&tabCounts.BOUGHT>0   ?{background:'#60a5fa22',color:'#60a5fa'}
+                        :key==='PENDING' &&tabCounts.PENDING>0  ?{background:'#f59e0b22',color:'#f59e0b'}
+                        :key==='REJECTED'&&tabCounts.REJECTED>0 ?{background:'#f8717122',color:'#f87171'}:{}}>
                   {tabCounts[key]}
                 </span>
               </button>
@@ -1315,7 +1383,7 @@ export default function Portfolio() {
 
           {/* Credit Grid */}
           <div className="pt-grid">
-            {/* ✅ RETIRED TAB — show retirement history cards from DB */}
+            {/* RETIRED TAB — retirement history cards from DB */}
             {activeTab === 'RETIRED' ? (
               myRetirements.length === 0 ? (
                 <div className="pt-empty">
@@ -1413,19 +1481,22 @@ export default function Portfolio() {
               <div className="pt-empty">
                 <div style={{fontSize:40,marginBottom:16}}>🌿</div>
                 <div style={{fontSize:14,color:'#f0fdf4',fontWeight:700,marginBottom:8}}>
-                  {activeTab==='RETIRED'    ?'No retired credits yet'
+                  {activeTab==='HELD'    ?'No held credits yet'
+                   :activeTab==='LISTED' ?'No listed credits yet'
+                   :activeTab==='BOUGHT' ?'No purchased credits yet'
                    :activeTab==='PENDING'   ?'No pending submissions'
                    :activeTab==='REJECTED'  ?'No rejected submissions'
-                   :activeTab==='CCP'       ?'No ICVCM CCP credits yet'
-                   :activeTab==='COMPLIANCE'?'No CCC compliance credits yet'
-                   :activeTab==='CBAM'      ?'No CBAM-eligible credits yet'
                    :'No credits found'}
                 </div>
                 <div style={{fontSize:11,color:'#86efac22',lineHeight:1.7}}>
                   {!isKYCVerified?'Complete KYC to start tokenizing'
+                   :activeTab==='BOUGHT'?'Credits you buy from the marketplace will appear here'
                    :activeTab==='ALL'?'Click "TOKENIZE NEW CREDIT" to submit your first credit'
                    :'No credits in this view'}
                 </div>
+                {activeTab==='BOUGHT'&&(
+                  <button onClick={()=>navigate('/carbon-credits')} style={{marginTop:16,padding:'10px 20px',borderRadius:8,border:'1px solid #22c55e44',background:'#0d2e1f',color:'#22c55e',cursor:'pointer',fontFamily:'DM Mono,monospace',fontSize:11}}>GO TO MARKET →</button>
+                )}
               </div>
             ) : filtered.map(credit => {
               const reg        = REGISTRIES[credit.standard]||REGISTRIES.VCS;
@@ -1451,6 +1522,7 @@ export default function Portfolio() {
                     HELD:    {bg:'#051409',color:'#22c55e',border:'#22c55e22',label:'● HELD'},
                     LISTED:  {bg:'#110e00',color:'#facc15',border:'#facc1522',label:'◆ LISTED'},
                     RETIRED: {bg:'#0c0520',color:'#a78bfa',border:'#a78bfa22',label:'✓ RETIRED'},
+                    BOUGHT:  {bg:'#060e18',color:'#60a5fa',border:'#60a5fa22',label:'🛒 BOUGHT'},
                   }[credit.status]||{bg:'#051409',color:'#22c55e',border:'#22c55e22',label:'● HELD'});
 
               return (
@@ -1516,13 +1588,15 @@ export default function Portfolio() {
                     )}
                     <div className={`pt-meta-cell${credit.isPending?' pt-meta-full':''}`}>
                       <div className="pt-meta-label">
-                        {credit.status==='LISTED' ? 'LISTED (tCO₂)' : credit.status==='RETIRED' ? 'RETIRED (tCO₂)' : 'HELD (tCO₂)'}
+                        {credit.status==='LISTED' ? 'LISTED (tCO₂)' : credit.status==='RETIRED' ? 'RETIRED (tCO₂)' : credit.status==='BOUGHT' ? 'BOUGHT (tCO₂)' : 'HELD (tCO₂)'}
                       </div>
                       <div className="pt-meta-val green">
                         {credit.status==='LISTED'
                           ? (credit.listedCredits||credit.credits)?.toLocaleString()
                           : credit.status==='RETIRED'
                           ? (credit.totalRetired||credit.credits)?.toLocaleString()
+                          : credit.status==='BOUGHT'
+                          ? (credit.quantity||credit.credits)?.toLocaleString()
                           : (credit.heldCredits??credit.credits)?.toLocaleString()
                         }
                       </div>
@@ -1610,7 +1684,17 @@ export default function Portfolio() {
                   )}
 
                   {/* Actions */}
-                  {credit.isRejected ? (
+                  {credit.isBought ? (
+                    <div className="pt-card-actions">
+                      <button className="pt-act-btn market" onClick={()=>navigate('/carbon-credits')}>📈 TRADE</button>
+                      {credit.txHash&&(
+                        <a href={`https://sepolia.etherscan.io/tx/${credit.txHash}`} target="_blank" rel="noreferrer"
+                          className="pt-act-btn market" style={{textDecoration:'none',display:'flex',alignItems:'center',justifyContent:'center'}}>
+                          ⛓ ETHERSCAN ↗
+                        </a>
+                      )}
+                    </div>
+                  ) : credit.isRejected ? (
                     <div className="pt-card-actions">
                       <button className="pt-act-btn resubmit" onClick={()=>{setForm({...emptyForm,projectName:credit.projectName,location:credit.location,country:credit.country,standard:credit.standard,projectType:credit.projectType,developer:credit.developer,credits:String(credit.credits),vintageYear:String(credit.vintageYear),serialNumber:credit.serialNumber});setShowForm(true);}}>↺ RESUBMIT</button>
                       <button className="pt-act-btn cancel" onClick={()=>handleCancelSubmission(credit.id)}>✕ DELETE</button>

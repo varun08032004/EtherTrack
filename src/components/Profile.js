@@ -9,11 +9,14 @@ const Profile = () => {
   const navigate = useNavigate();
   const [walletCopied, setWalletCopied] = useState(false);
 
+  // ── Data — always prefer dbUser (the DB source of truth) ─────────────────
   const name        = dbUser?.full_name    || user?.name  || '—';
   const email       = dbUser?.email        || user?.email || '—';
   const company     = dbUser?.company_name || '—';
+  const phone       = dbUser?.phone        || null;
   const role        = dbUser?.role         || 'user';
   const kycVerified = !!dbUser?.kyc_verified;
+  const avatarUrl   = dbUser?.avatar_url   || user?.profilePicture || null;
   const kycDate     = dbUser?.kyc_submitted_at
     ? new Date(dbUser.kyc_submitted_at).toLocaleDateString('en-IN', { day:'numeric', month:'short', year:'numeric' })
     : '—';
@@ -50,17 +53,21 @@ const Profile = () => {
     .ep-title{font-size:28px;font-weight:500;color:#f0fdf4;margin-bottom:2px;letter-spacing:.02em;}
     .ep-title span{color:#22c55e;}
     .ep-sub{font-size:10px;color:#4ade8066;letter-spacing:.1em;margin-bottom:32px;}
+
+    /* Hero */
     .ep-hero{background:#080c0a;border:1px solid #0f2a1a;border-radius:16px;padding:28px 32px;
       display:flex;align-items:center;gap:24px;margin-bottom:16px;animation:fadeUp .35s ease both;}
     .ep-avatar{width:76px;height:76px;border-radius:50%;flex-shrink:0;
       background:linear-gradient(135deg,#16a34a,#052e16);border:2px solid #22c55e44;
       display:flex;align-items:center;justify-content:center;
-      font-size:26px;font-weight:500;color:#22c55e;position:relative;}
+      font-size:26px;font-weight:500;color:#22c55e;position:relative;overflow:hidden;}
+    .ep-avatar img{width:100%;height:100%;object-fit:cover;}
     .ep-avatar-ring{position:absolute;inset:-4px;border-radius:50%;
       border:1px solid #22c55e22;animation:ringPulse 3s ease infinite;}
     .ep-info{flex:1;min-width:0;}
     .ep-name{font-size:22px;font-weight:500;color:#f0fdf4;margin-bottom:3px;letter-spacing:.01em;}
-    .ep-email{font-size:11px;color:#86efac88;margin-bottom:10px;}
+    .ep-email{font-size:11px;color:#86efac88;margin-bottom:2px;}
+    .ep-phone{font-size:10px;color:#86efac55;margin-bottom:10px;letter-spacing:.04em;}
     .ep-badges{display:flex;gap:6px;flex-wrap:wrap;align-items:center;}
     .ep-badge{display:inline-flex;align-items:center;gap:4px;font-size:9px;padding:3px 9px;border-radius:4px;letter-spacing:.08em;}
     .ep-badge-kyc-ok{background:#0d2e1f;color:#22c55e;border:1px solid #22c55e33;}
@@ -72,12 +79,16 @@ const Profile = () => {
       background:transparent;color:#22c55e;cursor:pointer;
       font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.08em;transition:all .2s;}
     .ep-edit-btn:hover{background:#0d2e1f;border-color:#22c55e;}
+
+    /* Stats */
     .ep-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;animation:fadeUp .35s ease .06s both;}
     .ep-stat{background:#080c0a;border:1px solid #0f2a1a;border-radius:12px;padding:18px 14px;text-align:center;transition:border-color .2s;cursor:default;}
     .ep-stat:hover{border-color:#22c55e22;}
     .ep-stat-icon{font-size:22px;margin-bottom:8px;}
     .ep-stat-val{font-size:20px;font-weight:500;margin-bottom:3px;letter-spacing:.02em;}
     .ep-stat-lbl{font-size:8px;color:#86efac66;letter-spacing:.12em;}
+
+    /* Table */
     .ep-table{background:#080c0a;border:1px solid #0f2a1a;border-radius:12px;overflow:hidden;margin-bottom:16px;animation:fadeUp .35s ease .12s both;}
     .ep-table-hdr{padding:14px 20px;border-bottom:1px solid #0f2a1a;font-size:10px;color:#f0fdf4;font-weight:500;letter-spacing:.12em;display:flex;align-items:center;justify-content:space-between;}
     .ep-row{display:flex;align-items:center;justify-content:space-between;padding:13px 20px;border-bottom:1px solid #0f2a1a0a;transition:background .15s;}
@@ -90,7 +101,8 @@ const Profile = () => {
     .ep-copy-btn{background:none;border:1px solid #0f2a1a;border-radius:4px;color:#4ade8044;cursor:pointer;padding:2px 7px;font-size:9px;font-family:'DM Mono',monospace;transition:all .15s;letter-spacing:.06em;}
     .ep-copy-btn:hover{border-color:#22c55e33;color:#22c55e;}
     .ep-copy-btn.copied{border-color:#22c55e44;color:#22c55e;}
-    /* Quick actions — 4 cols to fit Help */
+
+    /* Quick actions */
     .ep-actions{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;animation:fadeUp .35s ease .18s both;}
     .ep-action{background:#080c0a;border:1px solid #0f2a1a;border-radius:10px;padding:16px;text-align:center;cursor:pointer;transition:all .2s;}
     .ep-action:hover{border-color:#22c55e22;background:#0d2e1f1a;transform:translateY(-1px);}
@@ -99,14 +111,18 @@ const Profile = () => {
     .ep-action-icon{font-size:20px;margin-bottom:6px;}
     .ep-action-lbl{font-size:9px;color:#86efac88;letter-spacing:.1em;}
     .ep-action.help .ep-action-lbl{color:#60a5fa88;}
+
+    /* Bottom */
     .ep-bottom{display:grid;grid-template-columns:1fr 1fr;gap:10px;animation:fadeUp .35s ease .22s both;}
     .ep-logout{padding:12px;border-radius:8px;border:1px solid #dc262633;background:transparent;color:#f8717199;cursor:pointer;font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.08em;transition:all .2s;}
     .ep-logout:hover{background:#450a0a;border-color:#dc2626;color:#f87171;}
     .ep-delete{padding:12px;border-radius:8px;border:1px solid #7c3aed22;background:transparent;color:#7c3aed99;cursor:pointer;font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.08em;transition:all .2s;}
     .ep-delete:hover{background:#1a0a2e;border-color:#7c3aed55;color:#a78bfa;}
+
+    .ep-member{margin-bottom:16px;padding:10px 16px;border-radius:8px;background:#040706;border:1px solid #0f2a1a;display:flex;justify-content:space-between;align-items:center;font-size:9px;animation:fadeUp .35s ease .09s both;}
     .ep-privacy{margin-top:12px;padding:14px 16px;border-radius:8px;background:#040706;border:1px solid #0f2a1a08;font-size:9px;color:#86efac55;line-height:1.9;letter-spacing:.03em;animation:fadeUp .35s ease .26s both;}
     .ep-privacy b{color:#22c55e99;}
-    .ep-member{margin-bottom:16px;padding:10px 16px;border-radius:8px;background:#040706;border:1px solid #0f2a1a;display:flex;justify-content:space-between;align-items:center;font-size:9px;animation:fadeUp .35s ease .09s both;}
+
     @keyframes fadeUp{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
     @keyframes ringPulse{0%,100%{opacity:.3;}50%{opacity:.7;}}
     @media(max-width:640px){
@@ -134,11 +150,15 @@ const Profile = () => {
           <div className="ep-hero">
             <div className="ep-avatar">
               <div className="ep-avatar-ring"/>
-              {initials}
+              {avatarUrl
+                ? <img src={avatarUrl} alt={name} />
+                : initials
+              }
             </div>
             <div className="ep-info">
               <div className="ep-name">{name}</div>
               <div className="ep-email">{email}</div>
+              {phone && <div className="ep-phone">{phone}</div>}
               <div className="ep-badges">
                 {kycVerified
                   ? <span className="ep-badge ep-badge-kyc-ok">✅ KYC VERIFIED</span>
@@ -158,7 +178,7 @@ const Profile = () => {
             </div>
           </div>
 
-          {/* Member since strip */}
+          {/* Member strip */}
           <div className="ep-member">
             <span style={{ color:'#86efac66' }}>MEMBER SINCE</span>
             <span style={{ color:'#86efac99' }}>{memberSince}</span>
@@ -197,6 +217,7 @@ const Profile = () => {
             {[
               { key:'FULL NAME',  val: name },
               { key:'EMAIL',      val: email },
+              { key:'PHONE',      val: phone || '—', muted: true },
               { key:'COMPANY',    val: company },
               { key:'ROLE',       val: role.toUpperCase(), muted: true },
               { key:'KYC STATUS', val: kycVerified ? '✅ VERIFIED' : '⏳ PENDING', green: kycVerified },
@@ -216,7 +237,7 @@ const Profile = () => {
                     <span style={{ fontSize:10, fontFamily:'monospace', color:'#86efaccc' }}>
                       {wallet.slice(0,6)}...{wallet.slice(-4)}
                     </span>
-                    <button className={`ep-copy-btn${walletCopied ? ' copied' : ''}`} onClick={copyWallet} title="Copy full address">
+                    <button className={`ep-copy-btn${walletCopied ? ' copied' : ''}`} onClick={copyWallet}>
                       {walletCopied ? '✓ COPIED' : 'COPY'}
                     </button>
                     {kycVerified && <span style={{ fontSize:8, color:'#22c55e99', letterSpacing:'.06em' }}>⛓ ON-CHAIN</span>}
@@ -228,7 +249,7 @@ const Profile = () => {
             </div>
           </div>
 
-          {/* Quick actions — 4 cols (7 items + Help) */}
+          {/* Quick actions */}
           <div className="ep-actions">
             {[
               { icon:'📈', label:'MARKET',    path:'/carbon-credits',    cls:'' },
@@ -261,7 +282,6 @@ const Profile = () => {
             </button>
           </div>
 
-          {/* Privacy notice */}
           <div className="ep-privacy">
             🔒 <b>DATA PRIVACY</b> — Your Aadhaar and PAN numbers are <b>never stored</b> on our servers or on the blockchain.
             Only one-way cryptographic hashes (keccak256) are retained solely for duplicate KYC prevention.

@@ -6,6 +6,7 @@ const cors         = require('cors');
 const helmet       = require('helmet');
 const rateLimit    = require('express-rate-limit');
 const cookieParser = require('cookie-parser');
+const path         = require('path');  // ← ADDED
 
 // ── Route imports ─────────────────────────────────────────────────
 const authRoutes        = require('./routes/auth');
@@ -18,12 +19,10 @@ const adminRoutes       = require('./routes/admin');
 const portfolioRoutes   = require('./routes/portfolio');
 const verifyRoutes      = require('./routes/verify');
 const orgRoutes         = require('./routes/org');
-const tradeRoutes       = require('./routes/trades');  // ✅ Trade settlement engine
-const marketRoutes      = require('./routes/market');  // ✅ Public market listings (no auth)
+const tradeRoutes       = require('./routes/trades');
+const marketRoutes      = require('./routes/market');
 const blockchain        = require('./services/blockchain');
 
-// compliance.js exports BOTH helper functions (used by wallet.js) AND an express router
-// Always destructure { router } — do not require the file directly as a router
 const { router: complianceRoutes }   = require('./routes/compliance');
 const { router: notificationRoutes } = require('./routes/notifications');
 
@@ -31,7 +30,9 @@ const app  = express();
 const PORT = process.env.PORT || 5000;
 
 app.set('trust proxy', 1);
-app.use(helmet());
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' }, // ← ADDED: allows avatar images to load from frontend
+}));
 
 const ALLOWED_ORIGINS = [
   'http://localhost:3000',
@@ -51,13 +52,15 @@ app.use(cookieParser());
 
 // ─────────────────────────────────────────────────────────────────
 // ⚠️  WEBHOOK RAW BODY — must be BEFORE express.json()
-// Razorpay webhook needs the raw Buffer to verify HMAC signature.
-// If express.json() runs first, signature verification WILL fail.
 // ─────────────────────────────────────────────────────────────────
 app.use('/api/wallet/webhook', express.raw({ type: 'application/json' }));
 
+// ── Serve uploaded avatars as static files ────────────────────────
+// Avatar URLs look like: http://localhost:5000/uploads/avatars/avatar_<id>_<ts>.jpg
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));  // ← ADDED
+
 // ── Rate limiting ─────────────────────────────────────────────────
-app.use('/api/auth/me', (req, res, next) => next()); // exempt /me
+app.use('/api/auth/me', (req, res, next) => next());
 
 app.use('/api/auth', rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -77,7 +80,7 @@ app.use('/api/', rateLimit({
   max: 500,
 }));
 
-// ── Body parsers — AFTER webhook raw middleware ───────────────────
+// ── Body parsers ──────────────────────────────────────────────────
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
@@ -94,8 +97,8 @@ app.get('/health', (req, res) => {
 // ── Routes ────────────────────────────────────────────────────────
 app.use('/api/auth',          authRoutes);
 app.use('/api/wallet',        walletRoutes);
-app.use('/api/compliance',    complianceRoutes);   // AML flags, TDS records, FEMA log, limit config
-app.use('/api/notifications', notificationRoutes); // real-time notifications
+app.use('/api/compliance',    complianceRoutes);
+app.use('/api/notifications', notificationRoutes);
 app.use('/api/registry',      registryRoutes);
 app.use('/api/transactions',  transactionRoutes);
 app.use('/api/emissions',     emissionRoutes);
@@ -104,16 +107,23 @@ app.use('/api/admin',         adminRoutes);
 app.use('/api/portfolio',     portfolioRoutes);
 app.use('/api/verify',        verifyRoutes);
 app.use('/api/org',           orgRoutes);
-app.use('/api/trades',        tradeRoutes);        // ✅ Trade settlement engine
-app.use('/api/market',        marketRoutes);       // ✅ Public market — no auth needed
+app.use('/api/trades',        tradeRoutes);
+app.use('/api/market',        marketRoutes);
 
 // ── 404 ───────────────────────────────────────────────────────────
 app.use((req, res) => {
   res.status(404).json({ error: `Route ${req.method} ${req.path} not found` });
 });
 
-// ── Global error handler ──────────────────────────────────────────
+// ── Global error handler (handles multer errors too) ─────────────
 app.use((err, req, res, next) => {
+  // Multer file size / type errors — ← ADDED
+  if (err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(400).json({ error: 'File too large. Maximum size is 5 MB.' });
+  }
+  if (err.message && err.message.includes('Only JPG')) {
+    return res.status(400).json({ error: err.message });
+  }
   console.error('Unhandled error:', err);
   res.status(500).json({ error: 'Internal server error' });
 });

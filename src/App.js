@@ -20,6 +20,8 @@ import VerifyCertificate  from './components/VerifyCertificate';
 import TeamManagement     from './components/TeamManagement';
 import JoinOrg            from './components/JoinOrg';
 import Wallet             from './components/Wallet';
+import PlanSelection      from './components/PlanSelection';        // ← patch 1
+import SubscriptionBilling from './components/SubscriptionBilling'; // ← patch 1
 
 import { NotificationProvider } from './context/NotificationContext';
 import { PortfolioProvider }    from './context/PortfolioContext';
@@ -41,17 +43,15 @@ const getUserKey = (email) => `user_${email}`;
 
 // ── Guards ────────────────────────────────────────────────────────
 
-// Waits for dbUser to load before deciding — no flash redirects
 const AdminGuard = ({ dbUser, sessionChecked, children }) => {
-  if (!sessionChecked) return null;                      // still loading
+  if (!sessionChecked) return null;
   if (!dbUser)         return <Navigate to="/login" replace />;
   if (dbUser.role !== 'admin') return <Navigate to="/dashboard" replace />;
   return children;
 };
 
-// Redirects unauthenticated users to login
 const UserGuard = ({ isAuthenticated, sessionChecked, children }) => {
-  if (!sessionChecked) return null;                      // still loading
+  if (!sessionChecked) return null;
   if (!isAuthenticated) return <Navigate to="/login" replace />;
   return children;
 };
@@ -65,11 +65,29 @@ const FullPageSpinner = () => (
 );
 
 // ── AppInner ──────────────────────────────────────────────────────
-function AppInner({ isAuthenticated, sessionChecked, user, setUser, kycCompleted, handleLogin, handleLogout, handleKycComplete, dbUser, setDbUser }) {
+function AppInner({
+  isAuthenticated, sessionChecked, user, setUser,
+  kycCompleted, handleLogin, handleLogout, handleKycComplete,
+  dbUser, setDbUser,
+  planSelected, setPlanSelected,   // ← patch 6
+}) {
   const isAdmin = dbUser?.role === 'admin';
 
   // Show spinner until session is resolved
   if (!sessionChecked) return <FullPageSpinner />;
+
+  // ← patch 7: Plan selection gate — shown after KYC, before dashboard
+  if (isAuthenticated && !isAdmin && kycCompleted && !planSelected) {
+    return (
+      <PlanSelection
+        userName={dbUser?.full_name}
+        onPlanSelected={(planKey) => {
+          setPlanSelected(true);
+          setDbUser(prev => prev ? { ...prev, subscription_plan: planKey, plan_selected: true } : prev);
+        }}
+      />
+    );
+  }
 
   return (
     <AuthContext.Provider value={{
@@ -172,6 +190,16 @@ function AppInner({ isAuthenticated, sessionChecked, user, setUser, kycCompleted
             </UserGuard>
           } />
 
+          {/* ── Billing route ── */}                              {/* ← patch 8 */}
+          <Route path="/billing" element={
+            <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
+              <SubscriptionBilling
+                currentPlan={dbUser?.subscription_plan || 'free'}
+                orgName={dbUser?.org_name || ''}
+              />
+            </UserGuard>
+          } />
+
           {/* ── KYC gated routes ── */}
           <Route path="/portfolio" element={
             <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
@@ -220,6 +248,7 @@ function App() {
   const [kycCompleted,    setKycCompleted]    = useState(false);
   const [dbUser,          setDbUser]          = useState(null);
   const [sessionChecked,  setSessionChecked]  = useState(false);
+  const [planSelected,    setPlanSelected]    = useState(false); // ← patch 2
 
   const handleLogout = useCallback(async () => {
     try { await authAPI.logout(); } catch {}
@@ -227,6 +256,7 @@ function App() {
     setUser(null);
     setKycCompleted(false);
     setDbUser(null);
+    setPlanSelected(false); // reset on logout
     localStorage.removeItem('activeEmail');
   }, []);
 
@@ -240,6 +270,7 @@ function App() {
         if (me?.id) {
           setDbUser(me);
           setKycCompleted(!!me.kyc_verified);
+          setPlanSelected(!!me.plan_selected); // ← patch 3
           setIsAuthenticated(true);
           const activeEmail = localStorage.getItem('activeEmail');
           if (activeEmail) {
@@ -287,14 +318,16 @@ function App() {
         if (res?.user) {
           resolvedDbUser = res.user;
           setDbUser(res.user);
-          if (res.user.kyc_verified) setKycCompleted(true);
+          if (res.user.kyc_verified)   setKycCompleted(true);
+          if (res.user.plan_selected)  setPlanSelected(true); // ← sync plan on firebase login
         }
       } catch(e) { console.warn('Backend sync failed:', e?.message || e); }
     } else if (userData.accessToken) {
       if (userData.dbUser) {
         resolvedDbUser = userData.dbUser;
         setDbUser(userData.dbUser);
-        if (userData.dbUser.kyc_verified) setKycCompleted(true);
+        if (userData.dbUser.kyc_verified)  setKycCompleted(true);
+        if (userData.dbUser.plan_selected) setPlanSelected(true); // ← sync plan on normal login
       }
     }
 
@@ -323,6 +356,7 @@ function App() {
   const handleKycComplete = (status) => {
     setKycCompleted(status);
     setDbUser(prev => prev ? { ...prev, kyc_verified: status } : prev);
+    // planSelected stays false — user will be shown PlanSelection next
   };
 
   return (
@@ -340,6 +374,8 @@ function App() {
             handleKycComplete={handleKycComplete}
             dbUser={dbUser}
             setDbUser={setDbUser}
+            planSelected={planSelected}        // ← patch 5
+            setPlanSelected={setPlanSelected}  // ← patch 5
           />
         </Router>
       </PortfolioProvider>

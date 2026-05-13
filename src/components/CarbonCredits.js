@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useNotifications } from '../context/NotificationContext';
 import { usePortfolio } from '../context/PortfolioContext';
 import { walletAPI } from '../services/api';
+import { v4 as uuidv4 } from 'uuid'; // ✅ FIX: idempotency keys
 
-const PLATFORM_FEE = 0.005; // 0.5% buyer fee
+const PLATFORM_FEE = 0.005;
 const ETH_INR      = 280000;
 
 const STANDARDS   = { VCS:{color:'#22c55e',bg:'#0d2e1f'}, GS:{color:'#facc15',bg:'#1a1500'}, CDM:{color:'#60a5fa',bg:'#0a1628'}, ACR:{color:'#a78bfa',bg:'#120a28'} };
@@ -15,8 +16,28 @@ const fmtEth = inr => `${(inr/ETH_INR).toFixed(6)} ETH`;
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 
+// ── ✅ FIX: buildPriceHistory no longer returns fake random data ──
+// Returns [] when no real trades exist — chart simply won't render.
+// Fake trend lines mislead buyers into thinking price has moved.
+function buildPriceHistory(tradeHistory, tokenId) {
+  const relevant = tradeHistory
+    .filter(t => t.tokenId === tokenId)
+    .slice(0, 30)
+    .reverse();
+  if (relevant.length < 2) return []; // ✅ no fake data
+  return relevant.map(t => parseFloat(t.totalEth) / (t.amount || 1) * ETH_INR);
+}
+
+// ── ✅ FIX: Sub-components defined OUTSIDE parent ─────────────────
+// Previously defined inside CarbonCredits — caused full remount on every
+// parent state change. Now defined at module scope and receive props.
+
 function MiniChart({ data, color = '#22c55e', width = 120, height = 36 }) {
-  if (!data || data.length < 2) return null;
+  if (!data || data.length < 2) return (
+    <div style={{ width, height, display:'flex', alignItems:'center', justifyContent:'center' }}>
+      <span style={{ fontSize:8, color:'#86efac22', letterSpacing:'.08em' }}>NO DATA</span>
+    </div>
+  );
   const max = Math.max(...data), min = Math.min(...data), range = max - min || 1;
   const pts = data.map((v, i) => `${(i / (data.length - 1)) * width},${height - ((v - min) / range) * (height - 4) - 2}`).join(' ');
   return (
@@ -50,21 +71,310 @@ function Badge({ label, color, bg, border }) {
   return <span style={{ fontSize: 9, padding: '2px 7px', borderRadius: 3, background: bg, color, border: `1px solid ${border||color}33`, letterSpacing: '.06em' }}>{label}</span>;
 }
 
-function buildPriceHistory(tradeHistory, tokenId, basePrice) {
-  const relevant = tradeHistory.filter(t => t.tokenId === tokenId).slice(0, 30).reverse();
-  if (relevant.length > 2) {
-    return relevant.map(t => parseFloat(t.totalEth) / (t.amount || 1) * ETH_INR);
-  }
-  const points = [];
-  let p = basePrice * 0.95;
-  for (let i = 0; i < 24; i++) {
-    p = p + (Math.random() - 0.48) * basePrice * 0.02;
-    points.push(Math.max(p, basePrice * 0.8));
-  }
-  points.push(basePrice);
-  return points;
+// ── WatchlistPanel — module-level component ───────────────────────
+function WatchlistPanel({ listings, selected, setSelected, setAnalyticsToken, watchlist, toggleWatchlist, priceHistories, liveETHINR }) {
+  return (
+    <div className="cc-panel" style={{ maxHeight: 600, overflowY: 'auto' }}>
+      <div className="cc-panel-title">WATCHLIST</div>
+      {listings.length === 0 && <div style={{ fontSize: 10, color: '#86efac33', textAlign: 'center', padding: '20px 0' }}>No listings</div>}
+      {listings.map(l => {
+        const price    = l.pricePerUnitINR || l.adjPrice * liveETHINR;
+        const history  = priceHistories[l.tokenId] || [];
+        const isUp     = history.length > 1 ? history[history.length-1] >= history[0] : null;
+        const isSel    = selected?.listingId === l.listingId;
+        const isStarred= watchlist.includes(l.listingId);
+        return (
+          <div key={l.listingId} className={`cc-wl-row${isSel?' sel':''}`} onClick={() => { setSelected(l); setAnalyticsToken(l); }}>
+            <span className={`cc-wl-star${isStarred?' on':''}`} onClick={e => { e.stopPropagation(); toggleWatchlist(l.listingId); }}>★</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 10, color: '#f0fdf4', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{l.projectName}</div>
+              <div style={{ fontSize: 9, color: '#86efac44', marginTop: 1 }}>{l.standard} · {l.amount} avail</div>
+            </div>
+            <div style={{ textAlign: 'right', flexShrink: 0 }}>
+              <div style={{ fontSize: 11, fontWeight: 500, color: isUp === null ? '#86efac88' : isUp ? '#22c55e' : '#f87171' }}>{fmt(price.toFixed(0))}</div>
+              {/* ✅ FIX: Only render chart if real data exists */}
+              {history.length >= 2 && <MiniChart data={history.slice(-10)} color={isUp ? '#22c55e' : '#f87171'} width={50} height={18}/>}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
+// ── OrderBookPanel — module-level component ───────────────────────
+function OrderBookPanel({ allAsks, allBids, selectedAsks, selectedBids, selected, liveETHINR, setSelected, setTab }) {
+  const [obMode, setObMode] = useState('all');
+
+  const asks = obMode === 'all' ? allAsks : selectedAsks.map(l => ({
+    price: l.adjPrice, priceInr: l.pricePerUnitINR || l.adjPrice * liveETHINR,
+    amount: l.amount, seller: l.seller, listingId: l.listingId,
+    projectName: l.projectName, tokenId: l.tokenId,
+  }));
+  const bids = obMode === 'all' ? allBids : selectedBids.map(o => ({
+    price: o.limitPrice, priceInr: o.limitPrice * liveETHINR,
+    amount: o.remaining, buyer: o.buyer, orderId: o.orderId, tokenId: o.tokenId,
+  }));
+  const maxD      = Math.max(...asks.map(a => a.amount), ...bids.map(b => b.amount), 1);
+  const midPrice  = asks.length ? asks[0].priceInr : (bids.length ? bids[0].priceInr : 0);
+  const spreadVal = asks.length && bids.length ? ((asks[0].price - bids[0].price) * liveETHINR).toFixed(0) : '—';
+
+  return (
+    <div className="cc-panel" style={{ minHeight: 400 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <div className="cc-panel-title" style={{ marginBottom: 0 }}>ORDER BOOK</div>
+        <div style={{ display: 'flex', gap: 4 }}>
+          {[['all','ALL'],['token','TOKEN']].map(([m, l]) => (
+            <button key={m} onClick={() => setObMode(m)}
+              style={{ padding: '3px 8px', borderRadius: 3, border: `1px solid ${obMode===m?'#22c55e44':'#0f2a1a'}`, background: obMode===m?'#0d2e1f22':'transparent', color: obMode===m?'#22c55e':'#86efac33', cursor: 'pointer', fontFamily: 'DM Mono,monospace', fontSize: 8, letterSpacing: '.08em' }}>
+              {l}
+            </button>
+          ))}
+        </div>
+      </div>
+      {obMode === 'token' && selected && <div style={{ fontSize: 9, color: '#86efac33', marginBottom: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selected.projectName}</div>}
+      <div style={{ display: 'grid', gridTemplateColumns: '80px 1fr 50px', gap: 4, padding: '0 8px 4px', fontSize: 8, color: '#86efac33', letterSpacing: '.1em', borderBottom: '1px solid #0f2a1a', marginBottom: 4 }}>
+        <span>PRICE</span><span style={{ textAlign: 'center' }}>DEPTH</span><span style={{ textAlign: 'right' }}>QTY</span>
+      </div>
+      <div style={{ fontSize: 9, color: '#f87171aa', letterSpacing: '.1em', padding: '4px 8px 2px' }}>ASKS</div>
+      {asks.length === 0 && <div style={{ fontSize: 10, color: '#86efac22', padding: '4px 8px 6px' }}>No asks</div>}
+      {[...asks].reverse().slice(0, 7).map((a, i) => (
+        <div key={i} className="cc-ob-ask">
+          <span style={{ color: '#f87171', minWidth: 80, fontWeight: 500, fontSize: 11 }}>{fmt(a.priceInr.toFixed(0))}</span>
+          <div style={{ flex: 1 }}><DepthBar qty={a.amount} max={maxD} color="#f87171"/></div>
+          <span style={{ color: '#86efac55', minWidth: 36, textAlign: 'right', fontSize: 10 }}>{a.amount}</span>
+        </div>
+      ))}
+      <div className="cc-ob-mid">{fmt(midPrice.toFixed(0))}<span style={{ fontSize: 9, color: '#86efac44', marginLeft: 6, fontWeight: 400 }}>MID</span></div>
+      <div style={{ fontSize: 9, color: '#22c55eaa', letterSpacing: '.1em', padding: '2px 8px 4px' }}>BIDS</div>
+      {bids.length === 0 && <div style={{ fontSize: 10, color: '#86efac22', padding: '4px 8px' }}>No bids</div>}
+      {bids.slice(0, 7).map((b, i) => (
+        <div key={i} className="cc-ob-bid">
+          <span style={{ color: '#22c55e', minWidth: 80, fontWeight: 500, fontSize: 11 }}>{fmt(b.priceInr.toFixed(0))}</span>
+          <div style={{ flex: 1 }}><DepthBar qty={b.amount} max={maxD} color="#22c55e"/></div>
+          <span style={{ color: '#86efac55', minWidth: 36, textAlign: 'right', fontSize: 10 }}>{b.amount}</span>
+        </div>
+      ))}
+      <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #0f2a1a', fontSize: 9 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 8px' }}>
+          <span style={{ color: '#86efac33' }}>SPREAD</span>
+          <span style={{ color: '#facc15' }}>₹{spreadVal}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── CreditInfoCard — module-level component ───────────────────────
+function CreditInfoCard({ selected, currentPriceInr, priceHistories, liveETHINR }) {
+  if (!selected) return (
+    <div className="cc-panel" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 160 }}>
+      <div style={{ textAlign: 'center', color: '#86efac33', fontSize: 11 }}>← Select a credit from the list</div>
+    </div>
+  );
+  const history = priceHistories[selected.tokenId] || [];
+  return (
+    <div className="cc-panel" style={{ marginBottom: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 500, color: '#f0fdf4', marginBottom: 6, lineHeight: 1.3 }}>{selected.projectName}</div>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+            <Badge label={selected.standard} color={STANDARDS[selected.standard]?.color} bg={STANDARDS[selected.standard]?.bg}/>
+            <Badge label={selected.projectType} color={(TYPE_COLORS[selected.projectType]||TYPE_COLORS.Renewable).text} bg={(TYPE_COLORS[selected.projectType]||TYPE_COLORS.Renewable).bg}/>
+            <span style={{ fontSize: 9, color: '#86efac55' }}>📍 {selected.location}</span>
+            <span style={{ fontSize: 9, color: '#86efac44' }}>Vintage {selected.vintageYear}</span>
+          </div>
+        </div>
+        <div style={{ textAlign: 'right', flexShrink: 0, marginLeft: 12 }}>
+          <div style={{ fontSize: 22, fontWeight: 500, color: '#22c55e', letterSpacing: '.02em' }}>{fmt(currentPriceInr.toFixed(0))}</div>
+          <div style={{ fontSize: 10, color: '#86efac55' }}>{fmtEth(currentPriceInr)}</div>
+        </div>
+      </div>
+      <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid #0f2a1a' }}>
+        <div style={{ fontSize: 8, color: '#86efac44', letterSpacing: '.12em', marginBottom: 6 }}>
+          PRICE HISTORY {history.length < 2 && <span style={{ color: '#86efac22' }}>— NO TRADES YET</span>}
+        </div>
+        {/* ✅ FIX: Only render chart with real data */}
+        {history.length >= 2
+          ? <MiniChart data={history} color="#22c55e" width={300} height={48}/>
+          : <div style={{ height: 48, display:'flex', alignItems:'center', justifyContent:'center', color:'#86efac22', fontSize:9, letterSpacing:'.1em' }}>CHART AVAILABLE AFTER FIRST TRADE</div>
+        }
+      </div>
+    </div>
+  );
+}
+
+// ── OrderForm — module-level component ────────────────────────────
+function OrderForm({
+  isKYCVerified, walletAddress, txPending, listings, selected, setSelected,
+  orderMode, setOrderMode, qty, setQty, limitPrice, setLimitPrice,
+  bidQty, setBidQty, bidPrice, setBidPrice, bidDays, setBidDays,
+  paymentMode, setPaymentMode, inrBalance, inrLoading,
+  tradePriceINR, tradeTotalInr, tradeFeeInr, tradeNetInr, tradeNetEth,
+  bidTotalEth, bidFeeEth, bidEscrowEth,
+  liveETHINR, handlePlaceOrder, handlePlaceBid,
+  navigate,
+}) {
+  const inrSufficient = inrBalance >= tradeNetInr && tradeNetInr > 0;
+
+  // ✅ FIX: listingId selected → check qty doesn't exceed available
+  const maxQty = selected?.amount || 0;
+  const qtyOverMax = qty && +qty > maxQty;
+
+  return (
+    <div>
+      <div className="cc-panel" style={{ marginBottom: 10 }}>
+        <div className="cc-panel-title">PLACE ORDER</div>
+        {!isKYCVerified && <div className="cc-kyc-bar" onClick={() => navigate('/kyc')}>⚠️ KYC REQUIRED TO TRADE →</div>}
+        <div style={{ display: 'flex', gap: 4, marginBottom: 12 }}>
+          {[['market','MARKET'],['limit','LIMIT'],['bid','BID']].map(([m, label]) => (
+            <button key={m} className={`cc-mode-btn${orderMode===m?' act':''}`} onClick={() => setOrderMode(m)}>{label}</button>
+          ))}
+        </div>
+
+        {(orderMode === 'market' || orderMode === 'limit') && (
+          <>
+            <select className="cc-inp" value={selected?.listingId||''} onChange={e => setSelected(listings.find(l => l.listingId === +e.target.value))}>
+              <option value="">Select credit...</option>
+              {listings.map(l => <option key={l.listingId} value={l.listingId}>{l.projectName} · {fmt((l.pricePerUnitINR || l.adjPrice*liveETHINR).toFixed(0))}</option>)}
+            </select>
+
+            {/* ✅ FIX: show max available + warn if over */}
+            <div style={{ position:'relative' }}>
+              <input
+                className="cc-inp"
+                type="number"
+                min="1"
+                max={maxQty}
+                placeholder={`Qty (max ${maxQty})`}
+                value={qty}
+                onChange={e => setQty(e.target.value)}
+                style={{ borderColor: qtyOverMax ? '#f87171' : undefined }}
+              />
+              {qtyOverMax && (
+                <div style={{ fontSize:9, color:'#f87171', marginTop:-6, marginBottom:6, paddingLeft:2 }}>
+                  ⚠ Max available: {maxQty} credits
+                </div>
+              )}
+            </div>
+
+            {orderMode === 'limit' && (
+              <input className="cc-inp" type="number" placeholder="Max price (₹ per credit)" value={limitPrice} onChange={e => setLimitPrice(e.target.value)}/>
+            )}
+
+            {/* Payment Mode */}
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 9, color: '#86efac44', letterSpacing: '.1em', marginBottom: 6 }}>PAY WITH</div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button onClick={() => setPaymentMode('inr')} style={{ flex:1, padding:'10px 6px', borderRadius:8, border:`1px solid ${paymentMode==='inr'?'#22c55e55':'#0f2a1a'}`, background:paymentMode==='inr'?'#0d2e1f':'#060a07', cursor:'pointer', fontFamily:'DM Mono,monospace', transition:'all 0.2s', textAlign:'center' }}>
+                  <div style={{ fontSize:16, marginBottom:3 }}>🇮🇳</div>
+                  <div style={{ fontSize:9, color:paymentMode==='inr'?'#22c55e':'#4ade8044', fontWeight:600, letterSpacing:'.08em' }}>INR WALLET</div>
+                  <div style={{ fontSize:11, fontWeight:700, marginTop:3, color:inrLoading?'#4ade8044':inrBalance>0?'#22c55e':'#f87171' }}>
+                    {inrLoading ? '...' : `₹${inrBalance.toLocaleString('en-IN',{maximumFractionDigits:0})}`}
+                  </div>
+                  {paymentMode==='inr' && tradeNetInr>0 && (
+                    <div style={{ fontSize:8, marginTop:2, color:inrSufficient?'#22c55e88':'#f87171' }}>
+                      {inrSufficient ? '✓ SUFFICIENT' : `SHORT ₹${Math.round(tradeNetInr-inrBalance).toLocaleString('en-IN')}`}
+                    </div>
+                  )}
+                </button>
+                <button onClick={() => setPaymentMode('eth')} style={{ flex:1, padding:'10px 6px', borderRadius:8, border:`1px solid ${paymentMode==='eth'?'#f59e0b55':'#0f2a1a'}`, background:paymentMode==='eth'?'#1a1200':'#060a07', cursor:'pointer', fontFamily:'DM Mono,monospace', transition:'all 0.2s', textAlign:'center' }}>
+                  <div style={{ fontSize:16, marginBottom:3 }}>🦊</div>
+                  <div style={{ fontSize:9, color:paymentMode==='eth'?'#f59e0b':'#4ade8044', fontWeight:600, letterSpacing:'.08em' }}>METAMASK</div>
+                  <div style={{ fontSize:11, fontWeight:700, color:'#f59e0b88', marginTop:3 }}>ETH</div>
+                  <div style={{ fontSize:8, color:'#f59e0b44', marginTop:2 }}>ON-CHAIN</div>
+                </button>
+              </div>
+              {paymentMode==='inr' && !inrSufficient && tradeNetInr>0 && (
+                <button onClick={() => navigate('/wallet')} style={{ width:'100%', marginTop:6, padding:'7px', borderRadius:6, border:'1px solid #22c55e33', background:'#0d2e1f22', color:'#22c55e88', cursor:'pointer', fontFamily:'DM Mono,monospace', fontSize:9, letterSpacing:'.08em' }}>
+                  + ADD FUNDS TO WALLET →
+                </button>
+              )}
+            </div>
+
+            {/* Trade summary */}
+            {qty > 0 && selected && !qtyOverMax && (
+              <div style={{ background:'#040706', borderRadius:6, padding:'9px 11px', marginBottom:10 }}>
+                <div className="cc-fee-row"><span>Subtotal</span><span>{fmt(tradeTotalInr.toFixed(0))}</span></div>
+                <div className="cc-fee-row"><span>Vintage adj</span><span style={{ color:'#facc1577' }}>{selected.vintageDiscount>0?`-${selected.vintageDiscount}%`:'None'}</span></div>
+                <div className="cc-fee-row"><span>Platform fee (0.5%)</span><span style={{ color:'#facc15' }}>{fmt(tradeFeeInr.toFixed(0))}</span></div>
+                {paymentMode==='inr' ? (
+                  <div className="cc-fee-tot">
+                    <span>TOTAL (INR WALLET)</span>
+                    <span style={{ color:inrSufficient?'#22c55e':'#f87171' }}>₹{Math.round(tradeNetInr).toLocaleString('en-IN')}</span>
+                  </div>
+                ) : (
+                  <>
+                    <div className="cc-fee-row"><span>ETH</span><span style={{ color:'#60a5fa88' }}>{tradeNetEth.toFixed(6)}</span></div>
+                    <div className="cc-fee-tot"><span>TOTAL</span><span style={{ color:'#f87171' }}>{fmt(tradeNetInr.toFixed(0))}</span></div>
+                  </>
+                )}
+              </div>
+            )}
+
+            <button
+              className="cc-btn cc-btn-buy"
+              disabled={!isKYCVerified||txPending||qtyOverMax||(paymentMode==='eth'&&!walletAddress)||(paymentMode==='inr'&&(!inrSufficient||tradeNetInr<=0))}
+              onClick={handlePlaceOrder}
+              style={paymentMode==='inr'&&!inrSufficient?{background:'linear-gradient(135deg,#374151,#4b5563)'}:{}}>
+              {txPending?'⏳ PROCESSING...'
+                :!isKYCVerified?'🔒 KYC REQUIRED'
+                :qtyOverMax?`⚠ MAX ${maxQty} AVAILABLE`
+                :paymentMode==='inr'
+                  ?inrSufficient?`🇮🇳 BUY ${qty||'—'} · ₹${Math.round(tradeNetInr).toLocaleString('en-IN')}`:'⚠ INSUFFICIENT BALANCE'
+                :`🦊 BUY ${qty||'—'} CREDITS`
+              }
+            </button>
+          </>
+        )}
+
+        {orderMode === 'bid' && (
+          <>
+            <div style={{ fontSize:9, color:'#60a5fa88', marginBottom:10, padding:8, background:'#0a1628', borderRadius:6, border:'1px solid #60a5fa22', lineHeight:1.6 }}>
+              📥 Lock ETH on-chain. Auto-executes when seller lists at your price.
+            </div>
+            <select className="cc-inp" value={selected?.listingId||''} onChange={e => setSelected(listings.find(l => l.listingId === +e.target.value))}>
+              <option value="">Select credit token...</option>
+              {listings.map(l => <option key={l.listingId} value={l.listingId}>{l.projectName}</option>)}
+            </select>
+            <input className="cc-inp" type="number" placeholder="Quantity (credits)" value={bidQty} onChange={e => setBidQty(e.target.value)}/>
+            <input className="cc-inp" type="number" placeholder="Bid price (₹ per credit)" value={bidPrice} onChange={e => setBidPrice(e.target.value)}/>
+            <div style={{ display:'flex', gap:6, marginBottom:10 }}>
+              {['7','14','30'].map(d => (
+                <button key={d} onClick={() => setBidDays(d)} style={{ flex:1, padding:6, borderRadius:4, border:`1px solid ${bidDays===d?'#22c55e44':'#0f2a1a'}`, background:bidDays===d?'#0d2e1f22':'transparent', color:bidDays===d?'#22c55e':'#86efac44', cursor:'pointer', fontFamily:'DM Mono,monospace', fontSize:10 }}>
+                  {d}d
+                </button>
+              ))}
+            </div>
+            {bidQty>0&&bidPrice>0&&(
+              <div style={{ background:'#040706', borderRadius:6, padding:'9px 11px', marginBottom:10 }}>
+                <div className="cc-fee-row"><span>Bid total</span><span>{bidTotalEth.toFixed(6)} ETH</span></div>
+                <div className="cc-fee-row"><span>Fee (0.5%)</span><span style={{ color:'#facc15' }}>{bidFeeEth.toFixed(6)} ETH</span></div>
+                <div className="cc-fee-tot"><span>LOCKED IN ESCROW</span><span style={{ color:'#60a5fa' }}>{bidEscrowEth.toFixed(6)} ETH</span></div>
+              </div>
+            )}
+            <button className="cc-btn cc-btn-bid" disabled={!isKYCVerified||!walletAddress||txPending} onClick={handlePlaceBid}>
+              {txPending?'⏳ PROCESSING...':`PLACE BID · LOCK ${bidEscrowEth.toFixed(4)} ETH`}
+            </button>
+          </>
+        )}
+
+        <div style={{ marginTop:8, fontSize:9, color:'#86efac33', textAlign:'center' }}>
+          1 credit = 1 tonne CO₂ · MetaMask required for on-chain signing
+        </div>
+      </div>
+
+      <div className="cc-panel">
+        <div style={{ fontSize:9, color:'#86efac44', letterSpacing:'.12em', marginBottom:8 }}>HAVE CREDITS TO SELL?</div>
+        <button style={{ width:'100%', padding:'9px', borderRadius:6, border:'1px solid #facc1533', background:'transparent', color:'#facc1566', cursor:'pointer', fontFamily:'DM Mono,monospace', fontSize:10 }} onClick={() => navigate('/portfolio')}>
+          GO TO PORTFOLIO →
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Main Component ────────────────────────────────────────────────
 export default function CarbonCredits() {
   const navigate  = useNavigate();
   const { addNotification, NOTIF_TYPES } = useNotifications();
@@ -106,396 +416,11 @@ export default function CarbonCredits() {
   const [paymentMode,    setPaymentMode]    = useState('eth');
   const [inrBalance,     setInrBalance]     = useState(0);
   const [inrLoading,     setInrLoading]     = useState(false);
+  // ✅ FIX: cancelBid confirm state
+  const [cancelBidConfirm, setCancelBidConfirm] = useState(null);
 
-  const tickerRef = useRef(null);
-
-  // ── Fetch INR balance ─────────────────────────────────────────
-  useEffect(() => {
-    const fetchINRBalance = async () => {
-      setInrLoading(true);
-      try {
-        const data = await walletAPI.getBalance();
-        if (data?.balance !== undefined) setInrBalance(parseFloat(data.balance));
-      } catch {}
-      finally { setInrLoading(false); }
-    };
-    fetchINRBalance();
-  }, []);
-
-  const refreshINRBalance = async () => {
-    try {
-      const data = await walletAPI.getBalance();
-      if (data?.balance !== undefined) setInrBalance(parseFloat(data.balance));
-    } catch {}
-  };
-
-  useEffect(() => {
-    if (!listings.length) return;
-    const h = {};
-    listings.forEach(l => {
-      h[l.tokenId] = buildPriceHistory(tradeHistory, l.tokenId, (l.pricePerUnitINR || l.adjPrice * liveETHINR));
-    });
-    setPriceHistories(h);
-  }, [listings.length, tradeHistory.length]);
-
-  useEffect(() => {
-    if (!selected && listings.length) {
-      setSelected(listings[0]);
-      setAnalyticsToken(listings[0]);
-    }
-  }, [listings]);
-
-  useEffect(() => {
-    if (!walletAddress || !buyOrders.length) { setMyOpenBids([]); return; }
-    setMyOpenBids(buyOrders.filter(o => o.buyer?.toLowerCase() === walletAddress.toLowerCase() && (o.status === 0 || o.status === 2)));
-  }, [buyOrders, walletAddress]);
-
-  useEffect(() => {
-    if (!alerts.length || !listings.length) return;
-    alerts.forEach(a => {
-      const listing = listings.find(l => l.listingId === a.listingId);
-      if (!listing) return;
-      const price = listing.pricePerUnitINR || listing.adjPrice * liveETHINR;
-      const triggered = a.type === 'below' ? price <= a.targetPrice : price >= a.targetPrice;
-      if (triggered && !a.triggered) {
-        showToast(`🔔 ALERT: ${a.projectName} is now ${fmt(price.toFixed(0))}`, 'info');
-        setAlerts(prev => prev.map(x => x.id === a.id ? { ...x, triggered: true } : x));
-      }
-    });
-  }, [listings, alerts]);
-
-  const showToast = (msg, type = 'success') => {
-    setToast({ msg, type });
-    setTimeout(() => setToast({ msg: '', type: 'success' }), 4500);
-  };
-
-  const toggleWatchlist = (listingId) => {
-    setWatchlist(prev => prev.includes(listingId) ? prev.filter(x => x !== listingId) : [...prev, listingId]);
-  };
-
-  // ── Computed values ───────────────────────────────────────────
-  const filtered = listings
-    .filter(l => filterStd === 'ALL' || l.standard === filterStd)
-    .filter(l => filterType === 'ALL' || l.projectType === filterType)
-    .sort((a, b) => {
-      if (sortBy === 'price')     return b.adjPrice - a.adjPrice;
-      if (sortBy === 'priceAsc')  return a.adjPrice - b.adjPrice;
-      if (sortBy === 'name')      return a.projectName.localeCompare(b.projectName);
-      if (sortBy === 'vintage')   return b.vintageYear - a.vintageYear;
-      if (sortBy === 'amount')    return b.amount - a.amount;
-      if (sortBy === 'watchlist') return watchlist.includes(b.listingId) - watchlist.includes(a.listingId);
-      return 0;
-    });
-
-  const allAsks = listings
-    .map(l => ({ price: l.adjPrice, priceInr: l.pricePerUnitINR || l.adjPrice * liveETHINR, amount: l.amount, seller: l.seller, listingId: l.listingId, projectName: l.projectName, tokenId: l.tokenId }))
-    .sort((a, b) => a.price - b.price);
-
-  const allBids = buyOrders
-    .filter(o => o.status === 0 || o.status === 2)
-    .map(o => ({ price: o.limitPrice, priceInr: o.limitPrice * liveETHINR, amount: o.remaining, buyer: o.buyer, orderId: o.orderId, tokenId: o.tokenId }))
-    .sort((a, b) => b.price - a.price);
-
-  const selectedAsks = selected ? listings.filter(l => l.tokenId === selected.tokenId).sort((a, b) => a.adjPrice - b.adjPrice) : [];
-  const selectedBids = selected ? buyOrders.filter(o => o.tokenId === selected.tokenId && (o.status === 0 || o.status === 2)).sort((a, b) => b.limitPrice - a.limitPrice) : [];
-  const maxDepth     = Math.max(...selectedAsks.map(a => a.amount), ...selectedBids.map(b => b.remaining), 1);
-
-  const currentPriceInr = selected ? (selected.pricePerUnitINR || selected.adjPrice * liveETHINR) : 0;
-
-  const spread = selectedAsks.length && selectedBids.length
-    ? ((selectedAsks[0].adjPrice - selectedBids[0].limitPrice) * liveETHINR).toFixed(0)
-    : '—';
-
-  const tradePrice    = orderMode === 'limit' && limitPrice
-    ? parseFloat(limitPrice) / liveETHINR
-    : (selected?.adjPrice || 0);
-  const tradePriceINR = selected?.pricePerUnitINR || Math.round(tradePrice * liveETHINR);
-  const tradeTotalInr = qty ? parseFloat(qty) * tradePriceINR : 0;
-  const tradeFeeInr   = tradeTotalInr * PLATFORM_FEE;
-  const tradeNetInr   = tradeTotalInr + tradeFeeInr;
-  const tradeNetEth   = tradeNetInr / liveETHINR;
-
-  const bidTotalEth  = bidQty && bidPrice ? parseFloat(bidQty) * (parseFloat(bidPrice) / liveETHINR) : 0;
-  const bidFeeEth    = bidTotalEth * PLATFORM_FEE;
-  const bidEscrowEth = bidTotalEth + bidFeeEth;
-
-  const totalAvailable = listings.reduce((s, l) => s + l.amount, 0);
-  const openBidsTotal  = buyOrders.filter(o => o.status === 0 || o.status === 2).length;
-
-  const platformRetired = (() => {
-    const seen = new Set();
-    return listings.reduce((s, l) => {
-      if (!seen.has(l.tokenId)) { seen.add(l.tokenId); return s + (l.totalRetired || 0); }
-      return s;
-    }, 0);
-  })();
-
-  const todayStr    = new Date().toLocaleDateString();
-  const dailyTrades = tradeHistory.filter(t => {
-    try { return new Date(t.time).toLocaleDateString() === todayStr; } catch { return true; }
-  });
-  const dailyVolume   = dailyTrades.reduce((s, t) => s + (t.amount || 0), 0);
-  const avgTradePrice = tradeHistory.length
-    ? tradeHistory.reduce((s, t) => {
-        const p = t.priceINR || (t.amount > 0 ? (parseFloat(t.totalEth || 0) / t.amount) * liveETHINR : 0);
-        return s + p;
-      }, 0) / tradeHistory.length
-    : listings.length
-      ? listings.reduce((s, l) => s + (l.pricePerUnitINR || l.adjPrice * liveETHINR), 0) / listings.length
-      : 0;
-
-  const analyticsListing = analyticsToken || selected;
-  const analyticsHistory = analyticsListing ? (priceHistories[analyticsListing.tokenId] || []) : [];
-  const analyticsHigh    = analyticsHistory.length ? Math.max(...analyticsHistory) : 0;
-  const analyticsLow     = analyticsHistory.length ? Math.min(...analyticsHistory) : 0;
-  const analyticsChange  = analyticsHistory.length > 1
-    ? ((analyticsHistory[analyticsHistory.length-1] - analyticsHistory[0]) / analyticsHistory[0] * 100).toFixed(2)
-    : 0;
-
-  // ── fetchBatchId — get DB batchId from tokenId ────────────────
-  const fetchBatchId = async (tokenId) => {
-    try {
-      const res = await fetch(`${API_URL}/api/portfolio/batch-by-token/${tokenId}`, {
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('et_access')}`,
-        },
-      });
-      const data = await res.json();
-      return data?.batchId || null;
-    } catch {
-      return null;
-    }
-  };
-
-  // ── recordTrade — called after ETH trades only ────────────────
-  // For INR trades, /api/trades/record is called directly in handleConfirmBuy
-  const recordTrade = async ({ txHash, paymentMode, listing, qty, pricePerCreditINR }) => {
-    try {
-      let batchId = listing.batchId || null;
-      if (!batchId && listing.tokenId !== null && listing.tokenId !== undefined) {
-        batchId = await fetchBatchId(listing.tokenId);
-      }
-
-      const res = await fetch(`${API_URL}/api/trades/record`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('et_access')}`,
-        },
-        body: JSON.stringify({
-          batchId,
-          listingId:         listing.listingId,
-          quantity:          qty,
-          paymentMode,
-          txHash:            txHash || null,
-          pricePerCreditINR: pricePerCreditINR || listing.pricePerUnitINR || Math.round(listing.adjPrice * liveETHINR),
-        }),
-      });
-
-      const data = await res.json();
-      console.log('✅ Trade recorded — seller credited, platform fee logged', data);
-      return data;
-    } catch (e) {
-      // Non-fatal for ETH — blockchain.js listener acts as backup
-      console.warn('⚠️ trades/record failed (blockchain listener will catch):', e.message);
-      return null;
-    }
-  };
-
-  // ── Handlers ──────────────────────────────────────────────────
-  const handlePlaceOrder = () => {
-    if (!isKYCVerified)                          { showToast('❌ Complete KYC first', 'error'); return; }
-    if (paymentMode === 'eth' && !walletAddress) { showToast('❌ Connect MetaMask', 'error'); return; }
-    if (paymentMode === 'inr' && inrBalance < tradeNetInr) { showToast('❌ Insufficient INR balance', 'error'); return; }
-    if (!qty || isNaN(qty) || +qty <= 0)         { showToast('❌ Enter valid quantity', 'error'); return; }
-    if (!selected)                               { showToast('❌ Select a credit', 'error'); return; }
-    if (selected.seller?.toLowerCase() === walletAddress?.toLowerCase()) { showToast('❌ Cannot buy your own listing', 'error'); return; }
-    if (+qty > selected.amount)                  { showToast(`❌ Max available: ${selected.amount}`, 'error'); return; }
-    if (orderMode === 'limit' && (!limitPrice || isNaN(limitPrice))) { showToast('❌ Enter limit price', 'error'); return; }
-    setConfirmModal({ type: 'buy', listing: selected, qty: +qty, orderMode, tradePrice, tradePriceINR, tradeTotalInr, tradeFeeInr, tradeNetInr, tradeNetEth, paymentMode });
-  };
-
-  // ── ✅ FIXED handleConfirmBuy ─────────────────────────────────
-  // INR trades: deduct INR → call /api/trades/record directly (NO MetaMask)
-  // ETH trades: MetaMask buyCredit → call /api/trades/record for DB record
-  const handleConfirmBuy = async () => {
-    const o = confirmModal;
-    setConfirmModal(null);
-    setTxPending(true);
-
-    try {
-      if (o.paymentMode === 'inr') {
-        // ── INR PATH ─────────────────────────────────────────────
-        // Step 1: Deduct buyer INR wallet
-        showToast('⏳ Deducting from INR wallet...', 'info');
-        const payResult = await walletAPI.tradeDeduct({
-          amount:      Math.round(o.tradeNetInr),
-          listingId:   o.listing.listingId,
-          tokenId:     o.listing.tokenId,
-          quantity:    o.qty,
-          projectName: o.listing.projectName,
-          standard:    o.listing.standard,
-        });
-
-        if (!payResult?.success) throw new Error('INR payment failed');
-        setInrBalance(parseFloat(payResult.balance));
-
-        // Step 2: Settle trade — credits seller + records platform fee + records in DB
-        // ✅ NO MetaMask for INR trades — settlement is entirely off-chain
-        showToast('⏳ Settling trade...', 'info');
-
-        let batchId = o.listing.batchId || null;
-        if (!batchId && o.listing.tokenId !== null && o.listing.tokenId !== undefined) {
-          batchId = await fetchBatchId(o.listing.tokenId);
-        }
-
-        const settleRes = await fetch(`${API_URL}/api/trades/record`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${localStorage.getItem('et_access')}`,
-          },
-          body: JSON.stringify({
-            batchId,
-            listingId:         o.listing.listingId,
-            quantity:          o.qty,
-            paymentMode:       'inr',
-            txHash:            null, // no on-chain tx for INR trades
-            pricePerCreditINR: o.tradePriceINR,
-          }),
-        });
-
-        const tradeData = await settleRes.json();
-
-        if (!tradeData.success) {
-          // Settlement failed — refund buyer immediately
-          throw new Error(tradeData.error || 'Trade settlement failed');
-        }
-
-        // Step 3: Update buyer balance from response
-        if (tradeData.buyerBalance !== undefined) {
-          setInrBalance(parseFloat(tradeData.buyerBalance));
-        } else {
-          await refreshINRBalance();
-        }
-
-        const sellerCredited = tradeData.sellerGetsINR
-          ? `₹${Number(tradeData.sellerGetsINR).toLocaleString('en-IN')} credited to seller`
-          : '';
-
-        addNotification({
-          type:    NOTIF_TYPES.TRADE,
-          title:   'Buy Executed ✅',
-          message: `${o.qty} × ${o.listing.projectName} — ₹${Math.round(o.tradeNetInr).toLocaleString('en-IN')} from INR wallet`,
-        });
-
-        showToast(`✅ ${o.qty} credits purchased! ${sellerCredited}`);
-        setQty(''); setLimitPrice('');
-
-      } else {
-        // ── ETH PATH ─────────────────────────────────────────────
-        // Step 1: MetaMask signs on-chain tx
-        showToast('⏳ Confirm in MetaMask...', 'info');
-        const r = await buyCredit(o.listing.listingId, o.qty, o.tradeNetEth.toFixed(8));
-
-        // Step 2: Record in DB (blockchain listener also does this as backup)
-        await recordTrade({
-          txHash:            r.txHash,
-          paymentMode:       'eth',
-          listing:           o.listing,
-          qty:               o.qty,
-          pricePerCreditINR: o.tradePriceINR,
-        });
-
-        addNotification({
-          type:    NOTIF_TYPES.TRADE,
-          title:   'Buy Executed ✅',
-          message: `${o.qty} × ${o.listing.projectName} — ${o.tradeNetEth.toFixed(4)} ETH`,
-        });
-        showToast(`✅ ${o.qty} credits purchased!`);
-        setQty(''); setLimitPrice('');
-        navigate(`/transaction-status?hash=${r.txHash}`);
-      }
-
-    } catch (e) {
-      // If settlement fails AFTER INR was already deducted — refund buyer
-      if (o.paymentMode === 'inr') {
-        try {
-          await walletAPI.refundTrade({
-            amount: Math.round(o.tradeNetInr),
-            reason: `Settlement failed: ${e.message}`,
-          });
-          setInrBalance(prev => prev + o.tradeNetInr);
-          showToast('❌ Settlement failed — INR refunded to your wallet', 'error');
-        } catch {
-          showToast('❌ Settlement failed. Contact support if INR was deducted.', 'error');
-        }
-      } else if (e.code === 4001) {
-        showToast('❌ Rejected in MetaMask', 'error');
-      } else {
-        showToast(`❌ ${e.reason || e.message || 'Transaction failed'}`, 'error');
-      }
-    } finally {
-      setTxPending(false);
-    }
-  };
-
-  const handlePlaceBid = () => {
-    if (!isKYCVerified)                            { showToast('❌ Complete KYC first', 'error'); return; }
-    if (!walletAddress)                            { showToast('❌ Connect MetaMask', 'error'); return; }
-    if (selected?.seller?.toLowerCase() === walletAddress.toLowerCase()) { showToast('❌ Cannot bid on your own listing', 'error'); return; }
-    if (!bidQty || isNaN(bidQty) || +bidQty <= 0)  { showToast('❌ Enter valid quantity', 'error'); return; }
-    if (!bidPrice || isNaN(bidPrice))              { showToast('❌ Enter bid price', 'error'); return; }
-    if (!selected)                                 { showToast('❌ Select a credit first', 'error'); return; }
-    setConfirmModal({
-      type: 'bid', listing: selected, qty: +bidQty,
-      limitPriceInr: +bidPrice,
-      limitPriceEth: (+bidPrice / liveETHINR).toFixed(8),
-      bidTotalEth, bidFeeEth, bidEscrowEth,
-      durationDays: parseInt(bidDays) || 7,
-    });
-  };
-
-  const handleConfirmBid = async () => {
-    const o = confirmModal; setConfirmModal(null); setTxPending(true);
-    try {
-      showToast('⏳ Locking ETH in escrow...', 'info');
-      const r = await placeBuyOrder(o.listing.tokenId, o.qty, o.limitPriceEth, o.durationDays);
-      addNotification({ type: NOTIF_TYPES.TRADE, title: 'Bid Placed ✅', message: `${o.qty} × ${o.listing.projectName} @ ${fmt(o.limitPriceInr)}` });
-      showToast('✅ Bid placed! ETH locked in escrow.');
-      setBidQty(''); setBidPrice('');
-      navigate(`/transaction-status?hash=${r.txHash}`);
-    } catch (e) {
-      if (e.code === 4001) showToast('❌ Rejected in MetaMask', 'error');
-      else showToast(`❌ ${e.reason || 'Transaction failed'}`, 'error');
-    } finally { setTxPending(false); }
-  };
-
-  const handleCancelBid = async (orderId) => {
-    try {
-      showToast('⏳ Cancelling bid...', 'info');
-      await cancelBuyOrder(orderId);
-      showToast('✅ Bid cancelled. ETH refunded.');
-    } catch (e) {
-      showToast(`❌ ${e.reason || 'Cancel failed'}`, 'error');
-    }
-  };
-
-  const addAlert = () => {
-    if (!alertPrice || isNaN(alertPrice)) { showToast('❌ Enter valid price', 'error'); return; }
-    if (!selected)                        { showToast('❌ Select a credit first', 'error'); return; }
-    setAlerts(prev => [...prev, {
-      listingId: selected.listingId, tokenId: selected.tokenId,
-      projectName: selected.projectName, targetPrice: +alertPrice,
-      type: alertType, triggered: false, id: Date.now(),
-      createdAt: new Date().toLocaleTimeString(),
-    }]);
-    setAlertPrice('');
-    showToast(`🔔 Alert set: ${alertType} ${fmt(alertPrice)}`);
-  };
-
-  const CSS = `
+  // ── ✅ FIX: CSS memoised — never recalculates unless theme changes ──
+  const CSS = useMemo(() => `
     @import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&display=swap');
     *{box-sizing:border-box;margin:0;padding:0;}
     ::-webkit-scrollbar{width:4px;height:4px;}
@@ -558,8 +483,6 @@ export default function CarbonCredits() {
     .cc-hist-row{display:grid;grid-template-columns:1fr 60px 80px 90px 80px 80px;gap:8px;font-size:10px;padding:9px 0;border-bottom:1px solid #0f2a1a08;cursor:pointer;align-items:center;}
     .cc-hist-row:hover{background:#0d2e1f18;}
     .cc-chart-wrap{background:#040706;border-radius:8px;padding:16px;border:1px solid #0f2a1a;margin-bottom:12px;}
-    .cc-depth-row{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:10px;}
-    .cc-alert-card{background:#060908;border:1px solid #0f2a1a;border-radius:8px;padding:12px 14px;margin-top:8px;display:flex;justify-content:space-between;align-items:center;}
     .cc-amm-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
     .cc-amm-card{background:#080c0a;border-radius:10px;padding:18px;cursor:pointer;transition:all .2s;border:1px solid #0f2a1a;}
     .cc-amm-card:hover{transform:translateY(-2px);}
@@ -584,252 +507,369 @@ export default function CarbonCredits() {
     @media(max-width:1200px){.cc-trade-layout{grid-template-columns:200px 1fr 260px;}.cc-amm-grid{grid-template-columns:1fr 1fr;}}
     @media(max-width:1024px){.cc-trade-layout{grid-template-columns:1fr 1fr;}.cc-stats{grid-template-columns:repeat(3,1fr);}}
     @media(max-width:768px){.cc-market-layout{grid-template-columns:1fr;}.cc-trade-layout{grid-template-columns:1fr;}.cc-stats{grid-template-columns:repeat(2,1fr);}.cc-tbl-head>*:nth-child(n+5),.cc-tbl-row>*:nth-child(n+5){display:none;}.cc-amm-grid{grid-template-columns:1fr;}}
-  `;
+  `, []);
 
-  // ── Sub-components ────────────────────────────────────────────
-  const WatchlistPanel = () => (
-    <div className="cc-panel" style={{ maxHeight: 600, overflowY: 'auto' }}>
-      <div className="cc-panel-title">WATCHLIST</div>
-      {listings.length === 0 && <div style={{ fontSize: 10, color: '#86efac33', textAlign: 'center', padding: '20px 0' }}>No listings</div>}
-      {listings.map(l => {
-        const price    = l.pricePerUnitINR || l.adjPrice * liveETHINR;
-        const history  = priceHistories[l.tokenId] || [];
-        const isUp     = history.length > 1 ? history[history.length-1] >= history[0] : true;
-        const isSel    = selected?.listingId === l.listingId;
-        const isStarred= watchlist.includes(l.listingId);
-        return (
-          <div key={l.listingId} className={`cc-wl-row${isSel?' sel':''}`} onClick={() => { setSelected(l); setAnalyticsToken(l); }}>
-            <span className={`cc-wl-star${isStarred?' on':''}`} onClick={e => { e.stopPropagation(); toggleWatchlist(l.listingId); }}>★</span>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 10, color: '#f0fdf4', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{l.projectName}</div>
-              <div style={{ fontSize: 9, color: '#86efac44', marginTop: 1 }}>{l.standard} · {l.amount} avail</div>
-            </div>
-            <div style={{ textAlign: 'right', flexShrink: 0 }}>
-              <div style={{ fontSize: 11, fontWeight: 500, color: isUp ? '#22c55e' : '#f87171' }}>{fmt(price.toFixed(0))}</div>
-              <MiniChart data={history.slice(-10)} color={isUp ? '#22c55e' : '#f87171'} width={50} height={18}/>
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
+  // ── INR Balance ───────────────────────────────────────────────
+  useEffect(() => {
+    const fetchINRBalance = async () => {
+      setInrLoading(true);
+      try {
+        const data = await walletAPI.getBalance();
+        if (data?.balance !== undefined) setInrBalance(parseFloat(data.balance));
+      } catch {}
+      finally { setInrLoading(false); }
+    };
+    fetchINRBalance();
+  }, []);
 
-  const [obMode, setObMode] = useState('all');
+  const refreshINRBalance = useCallback(async () => {
+    try {
+      const data = await walletAPI.getBalance();
+      if (data?.balance !== undefined) setInrBalance(parseFloat(data.balance));
+    } catch {}
+  }, []);
 
-  const OrderBookPanel = () => {
-    const asks = obMode === 'all' ? allAsks : selectedAsks.map(l => ({ price: l.adjPrice, priceInr: l.pricePerUnitINR || l.adjPrice * liveETHINR, amount: l.amount, seller: l.seller, listingId: l.listingId, projectName: l.projectName, tokenId: l.tokenId }));
-    const bids = obMode === 'all' ? allBids : selectedBids.map(o => ({ price: o.limitPrice, priceInr: o.limitPrice * liveETHINR, amount: o.remaining, buyer: o.buyer, orderId: o.orderId, tokenId: o.tokenId }));
-    const maxD  = Math.max(...asks.map(a => a.amount), ...bids.map(b => b.amount), 1);
-    const midPrice = asks.length ? asks[0].priceInr : (bids.length ? bids[0].priceInr : 0);
-    const spreadVal = asks.length && bids.length ? ((asks[0].price - bids[0].price) * liveETHINR).toFixed(0) : '—';
-    return (
-      <div className="cc-panel" style={{ minHeight: 400 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-          <div className="cc-panel-title" style={{ marginBottom: 0 }}>ORDER BOOK</div>
-          <div style={{ display: 'flex', gap: 4 }}>
-            {[['all','ALL'],['token','TOKEN']].map(([m, l]) => (
-              <button key={m} onClick={() => setObMode(m)}
-                style={{ padding: '3px 8px', borderRadius: 3, border: `1px solid ${obMode===m?'#22c55e44':'#0f2a1a'}`, background: obMode===m?'#0d2e1f22':'transparent', color: obMode===m?'#22c55e':'#86efac33', cursor: 'pointer', fontFamily: 'DM Mono,monospace', fontSize: 8, letterSpacing: '.08em' }}>
-                {l}
-              </button>
-            ))}
-          </div>
-        </div>
-        {obMode === 'token' && selected && <div style={{ fontSize: 9, color: '#86efac33', marginBottom: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selected.projectName}</div>}
-        <div style={{ display: 'grid', gridTemplateColumns: '80px 1fr 50px', gap: 4, padding: '0 8px 4px', fontSize: 8, color: '#86efac33', letterSpacing: '.1em', borderBottom: '1px solid #0f2a1a', marginBottom: 4 }}>
-          <span>PRICE</span><span style={{ textAlign: 'center' }}>DEPTH</span><span style={{ textAlign: 'right' }}>QTY</span>
-        </div>
-        <div style={{ fontSize: 9, color: '#f87171aa', letterSpacing: '.1em', padding: '4px 8px 2px' }}>ASKS</div>
-        {asks.length === 0 && <div style={{ fontSize: 10, color: '#86efac22', padding: '4px 8px 6px' }}>No asks</div>}
-        {[...asks].reverse().slice(0, 7).map((a, i) => (
-          <div key={i} className="cc-ob-ask">
-            <span style={{ color: '#f87171', minWidth: 80, fontWeight: 500, fontSize: 11 }}>{fmt(a.priceInr.toFixed(0))}</span>
-            <div style={{ flex: 1 }}><DepthBar qty={a.amount} max={maxD} color="#f87171"/></div>
-            <span style={{ color: '#86efac55', minWidth: 36, textAlign: 'right', fontSize: 10 }}>{a.amount}</span>
-          </div>
-        ))}
-        <div className="cc-ob-mid">{fmt(midPrice.toFixed(0))}<span style={{ fontSize: 9, color: '#86efac44', marginLeft: 6, fontWeight: 400 }}>MID</span></div>
-        <div style={{ fontSize: 9, color: '#22c55eaa', letterSpacing: '.1em', padding: '2px 8px 4px' }}>BIDS</div>
-        {bids.length === 0 && <div style={{ fontSize: 10, color: '#86efac22', padding: '4px 8px' }}>No bids</div>}
-        {bids.slice(0, 7).map((b, i) => (
-          <div key={i} className="cc-ob-bid">
-            <span style={{ color: '#22c55e', minWidth: 80, fontWeight: 500, fontSize: 11 }}>{fmt(b.priceInr.toFixed(0))}</span>
-            <div style={{ flex: 1 }}><DepthBar qty={b.amount} max={maxD} color="#22c55e"/></div>
-            <span style={{ color: '#86efac55', minWidth: 36, textAlign: 'right', fontSize: 10 }}>{b.amount}</span>
-          </div>
-        ))}
-        <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #0f2a1a', fontSize: 9 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 8px' }}>
-            <span style={{ color: '#86efac33' }}>SPREAD</span>
-            <span style={{ color: '#facc15' }}>₹{spreadVal}</span>
-          </div>
-        </div>
-      </div>
-    );
+  // ── ✅ FIX: useEffect deps use actual arrays, not .length ─────
+  useEffect(() => {
+    if (!listings.length) return;
+    const h = {};
+    listings.forEach(l => {
+      // ✅ FIX: no fake data — pass real trades only
+      h[l.tokenId] = buildPriceHistory(tradeHistory, l.tokenId);
+    });
+    setPriceHistories(h);
+  }, [listings, tradeHistory]); // ✅ full arrays, not .length
+
+  useEffect(() => {
+    if (!selected && listings.length) {
+      setSelected(listings[0]);
+      setAnalyticsToken(listings[0]);
+    }
+  }, [listings]);
+
+  useEffect(() => {
+    if (!walletAddress || !buyOrders.length) { setMyOpenBids([]); return; }
+    setMyOpenBids(buyOrders.filter(o => o.buyer?.toLowerCase() === walletAddress.toLowerCase() && (o.status === 0 || o.status === 2)));
+  }, [buyOrders, walletAddress]);
+
+  useEffect(() => {
+    if (!alerts.length || !listings.length) return;
+    alerts.forEach(a => {
+      const listing = listings.find(l => l.listingId === a.listingId);
+      if (!listing) return;
+      const price = listing.pricePerUnitINR || listing.adjPrice * liveETHINR;
+      const triggered = a.type === 'below' ? price <= a.targetPrice : price >= a.targetPrice;
+      if (triggered && !a.triggered) {
+        showToast(`🔔 ALERT: ${a.projectName} is now ${fmt(price.toFixed(0))}`, 'info');
+        setAlerts(prev => prev.map(x => x.id === a.id ? { ...x, triggered: true } : x));
+      }
+    });
+  }, [listings, alerts]);
+
+  // ── ✅ FIX: MetaMask account change on page focus ─────────────
+  useEffect(() => {
+    const handleFocus = () => {
+      if (window.ethereum) {
+        window.ethereum.request({ method: 'eth_accounts' }).then(accounts => {
+          if (accounts.length && accounts[0].toLowerCase() !== walletAddress?.toLowerCase()) {
+            // Account changed while tab was in background — reload to re-init
+            window.location.reload();
+          }
+        }).catch(() => {});
+      }
+    };
+    window.addEventListener('focus', handleFocus);
+    return () => window.removeEventListener('focus', handleFocus);
+  }, [walletAddress]);
+
+  const showToast = (msg, type = 'success') => {
+    setToast({ msg, type });
+    setTimeout(() => setToast({ msg: '', type: 'success' }), 4500);
   };
 
-  const CreditInfoCard = () => selected ? (
-    <div className="cc-panel" style={{ marginBottom: 12 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 500, color: '#f0fdf4', marginBottom: 6, lineHeight: 1.3 }}>{selected.projectName}</div>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-            <Badge label={selected.standard} color={STANDARDS[selected.standard]?.color} bg={STANDARDS[selected.standard]?.bg}/>
-            <Badge label={selected.projectType} color={(TYPE_COLORS[selected.projectType]||TYPE_COLORS.Renewable).text} bg={(TYPE_COLORS[selected.projectType]||TYPE_COLORS.Renewable).bg}/>
-            <span style={{ fontSize: 9, color: '#86efac55' }}>📍 {selected.location}</span>
-            <span style={{ fontSize: 9, color: '#86efac44' }}>Vintage {selected.vintageYear}</span>
-          </div>
-        </div>
-        <div style={{ textAlign: 'right', flexShrink: 0, marginLeft: 12 }}>
-          <div style={{ fontSize: 22, fontWeight: 500, color: '#22c55e', letterSpacing: '.02em' }}>{fmt(currentPriceInr.toFixed(0))}</div>
-          <div style={{ fontSize: 10, color: '#86efac55' }}>{fmtEth(currentPriceInr)}</div>
-        </div>
-      </div>
-      <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid #0f2a1a' }}>
-        <div style={{ fontSize: 8, color: '#86efac44', letterSpacing: '.12em', marginBottom: 6 }}>PRICE HISTORY</div>
-        <MiniChart data={priceHistories[selected.tokenId] || []} color="#22c55e" width={300} height={48}/>
-      </div>
-    </div>
-  ) : (
-    <div className="cc-panel" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 160 }}>
-      <div style={{ textAlign: 'center', color: '#86efac33', fontSize: 11 }}>← Select a credit from the list</div>
-    </div>
-  );
+  const toggleWatchlist = (listingId) => {
+    setWatchlist(prev => prev.includes(listingId) ? prev.filter(x => x !== listingId) : [...prev, listingId]);
+  };
 
-  const OrderForm = () => {
-    const inrSufficient = inrBalance >= tradeNetInr && tradeNetInr > 0;
-    return (
-      <div>
-        <div className="cc-panel" style={{ marginBottom: 10 }}>
-          <div className="cc-panel-title">PLACE ORDER</div>
-          {!isKYCVerified && <div className="cc-kyc-bar" onClick={() => navigate('/kyc')}>⚠️ KYC REQUIRED TO TRADE →</div>}
-          <div style={{ display: 'flex', gap: 4, marginBottom: 12 }}>
-            {[['market','MARKET'],['limit','LIMIT'],['bid','BID']].map(([m, label]) => (
-              <button key={m} className={`cc-mode-btn${orderMode===m?' act':''}`} onClick={() => setOrderMode(m)}>{label}</button>
-            ))}
-          </div>
+  // ── Computed values ───────────────────────────────────────────
+  const filtered = listings
+    .filter(l => filterStd === 'ALL' || l.standard === filterStd)
+    .filter(l => filterType === 'ALL' || l.projectType === filterType)
+    // ✅ FIX: filter expired listings (API path missed this)
+    .filter(l => !l.expiresAt || l.expiresAt > Math.floor(Date.now() / 1000))
+    .sort((a, b) => {
+      if (sortBy === 'price')     return b.adjPrice - a.adjPrice;
+      if (sortBy === 'priceAsc')  return a.adjPrice - b.adjPrice;
+      if (sortBy === 'name')      return a.projectName.localeCompare(b.projectName);
+      if (sortBy === 'vintage')   return b.vintageYear - a.vintageYear;
+      if (sortBy === 'amount')    return b.amount - a.amount;
+      if (sortBy === 'watchlist') return watchlist.includes(b.listingId) - watchlist.includes(a.listingId);
+      return 0;
+    });
 
-          {(orderMode === 'market' || orderMode === 'limit') && (
-            <>
-              <select className="cc-inp" value={selected?.listingId||''} onChange={e => setSelected(listings.find(l => l.listingId === +e.target.value))}>
-                <option value="">Select credit...</option>
-                {listings.map(l => <option key={l.listingId} value={l.listingId}>{l.projectName} · {fmt((l.pricePerUnitINR || l.adjPrice*liveETHINR).toFixed(0))}</option>)}
-              </select>
-              <input className="cc-inp" type="number" min="1" placeholder={`Qty (max ${selected?.amount||0})`} value={qty} onChange={e => setQty(e.target.value)}/>
-              {orderMode === 'limit' && (
-                <input className="cc-inp" type="number" placeholder="Max price (₹ per credit)" value={limitPrice} onChange={e => setLimitPrice(e.target.value)}/>
-              )}
+  const allAsks = listings
+    .filter(l => !l.expiresAt || l.expiresAt > Math.floor(Date.now() / 1000))
+    .map(l => ({ price: l.adjPrice, priceInr: l.pricePerUnitINR || l.adjPrice * liveETHINR, amount: l.amount, seller: l.seller, listingId: l.listingId, projectName: l.projectName, tokenId: l.tokenId }))
+    .sort((a, b) => a.price - b.price);
 
-              {/* Payment Mode Toggle */}
-              <div style={{ marginBottom: 10 }}>
-                <div style={{ fontSize: 9, color: '#86efac44', letterSpacing: '.1em', marginBottom: 6 }}>PAY WITH</div>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <button onClick={() => setPaymentMode('inr')} style={{ flex:1, padding:'10px 6px', borderRadius:8, border:`1px solid ${paymentMode==='inr'?'#22c55e55':'#0f2a1a'}`, background:paymentMode==='inr'?'#0d2e1f':'#060a07', cursor:'pointer', fontFamily:'DM Mono,monospace', transition:'all 0.2s', textAlign:'center' }}>
-                    <div style={{ fontSize:16, marginBottom:3 }}>🇮🇳</div>
-                    <div style={{ fontSize:9, color:paymentMode==='inr'?'#22c55e':'#4ade8044', fontWeight:600, letterSpacing:'.08em' }}>INR WALLET</div>
-                    <div style={{ fontSize:11, fontWeight:700, marginTop:3, color:inrLoading?'#4ade8044':inrBalance>0?'#22c55e':'#f87171' }}>
-                      {inrLoading ? '...' : `₹${inrBalance.toLocaleString('en-IN',{maximumFractionDigits:0})}`}
-                    </div>
-                    {paymentMode==='inr' && tradeNetInr>0 && (
-                      <div style={{ fontSize:8, marginTop:2, color:inrSufficient?'#22c55e88':'#f87171' }}>
-                        {inrSufficient ? '✓ SUFFICIENT' : `SHORT ₹${Math.round(tradeNetInr-inrBalance).toLocaleString('en-IN')}`}
-                      </div>
-                    )}
-                  </button>
-                  <button onClick={() => setPaymentMode('eth')} style={{ flex:1, padding:'10px 6px', borderRadius:8, border:`1px solid ${paymentMode==='eth'?'#f59e0b55':'#0f2a1a'}`, background:paymentMode==='eth'?'#1a1200':'#060a07', cursor:'pointer', fontFamily:'DM Mono,monospace', transition:'all 0.2s', textAlign:'center' }}>
-                    <div style={{ fontSize:16, marginBottom:3 }}>🦊</div>
-                    <div style={{ fontSize:9, color:paymentMode==='eth'?'#f59e0b':'#4ade8044', fontWeight:600, letterSpacing:'.08em' }}>METAMASK</div>
-                    <div style={{ fontSize:11, fontWeight:700, color:'#f59e0b88', marginTop:3 }}>ETH</div>
-                    <div style={{ fontSize:8, color:'#f59e0b44', marginTop:2 }}>ON-CHAIN</div>
-                  </button>
-                </div>
-                {paymentMode==='inr' && !inrSufficient && tradeNetInr>0 && (
-                  <button onClick={() => navigate('/wallet')} style={{ width:'100%', marginTop:6, padding:'7px', borderRadius:6, border:'1px solid #22c55e33', background:'#0d2e1f22', color:'#22c55e88', cursor:'pointer', fontFamily:'DM Mono,monospace', fontSize:9, letterSpacing:'.08em' }}>
-                    + ADD FUNDS TO WALLET →
-                  </button>
-                )}
-              </div>
+  const allBids = buyOrders
+    .filter(o => o.status === 0 || o.status === 2)
+    .map(o => ({ price: o.limitPrice, priceInr: o.limitPrice * liveETHINR, amount: o.remaining, buyer: o.buyer, orderId: o.orderId, tokenId: o.tokenId }))
+    .sort((a, b) => b.price - a.price);
 
-              {/* Trade summary */}
-              {qty > 0 && selected && (
-                <div style={{ background:'#040706', borderRadius:6, padding:'9px 11px', marginBottom:10 }}>
-                  <div className="cc-fee-row"><span>Subtotal</span><span>{fmt(tradeTotalInr.toFixed(0))}</span></div>
-                  <div className="cc-fee-row"><span>Vintage adj</span><span style={{ color:'#facc1577' }}>{selected.vintageDiscount>0?`-${selected.vintageDiscount}%`:'None'}</span></div>
-                  <div className="cc-fee-row"><span>Platform fee (0.5%)</span><span style={{ color:'#facc15' }}>{fmt(tradeFeeInr.toFixed(0))}</span></div>
-                  {paymentMode==='inr' ? (
-                    <div className="cc-fee-tot">
-                      <span>TOTAL (INR WALLET)</span>
-                      <span style={{ color:inrSufficient?'#22c55e':'#f87171' }}>₹{Math.round(tradeNetInr).toLocaleString('en-IN')}</span>
-                    </div>
-                  ) : (
-                    <>
-                      <div className="cc-fee-row"><span>ETH</span><span style={{ color:'#60a5fa88' }}>{tradeNetEth.toFixed(6)}</span></div>
-                      <div className="cc-fee-tot"><span>TOTAL</span><span style={{ color:'#f87171' }}>{fmt(tradeNetInr.toFixed(0))}</span></div>
-                    </>
-                  )}
-                </div>
-              )}
+  const selectedAsks = selected ? listings.filter(l => l.tokenId === selected.tokenId).sort((a, b) => a.adjPrice - b.adjPrice) : [];
+  const selectedBids = selected ? buyOrders.filter(o => o.tokenId === selected.tokenId && (o.status === 0 || o.status === 2)).sort((a, b) => b.limitPrice - a.limitPrice) : [];
 
-              <button
-                className="cc-btn cc-btn-buy"
-                disabled={!isKYCVerified||txPending||(paymentMode==='eth'&&!walletAddress)||(paymentMode==='inr'&&(!inrSufficient||tradeNetInr<=0))}
-                onClick={handlePlaceOrder}
-                style={paymentMode==='inr'&&!inrSufficient?{background:'linear-gradient(135deg,#374151,#4b5563)'}:{}}>
-                {txPending?'⏳ PROCESSING...'
-                  :!isKYCVerified?'🔒 KYC REQUIRED'
-                  :paymentMode==='inr'
-                    ?inrSufficient?`🇮🇳 BUY ${qty||'—'} · ₹${Math.round(tradeNetInr).toLocaleString('en-IN')}`:'⚠ INSUFFICIENT BALANCE'
-                  :`🦊 BUY ${qty||'—'} CREDITS`
-                }
-              </button>
-            </>
-          )}
+  const currentPriceInr = selected ? (selected.pricePerUnitINR || selected.adjPrice * liveETHINR) : 0;
 
-          {orderMode === 'bid' && (
-            <>
-              <div style={{ fontSize:9, color:'#60a5fa88', marginBottom:10, padding:8, background:'#0a1628', borderRadius:6, border:'1px solid #60a5fa22', lineHeight:1.6 }}>
-                📥 Lock ETH on-chain. Auto-executes when seller lists at your price.<br/>
-                <span style={{ color:'#60a5fa44' }}>Bids always use MetaMask — ETH is locked in smart contract escrow.</span>
-              </div>
-              <select className="cc-inp" value={selected?.listingId||''} onChange={e => setSelected(listings.find(l => l.listingId === +e.target.value))}>
-                <option value="">Select credit token...</option>
-                {listings.map(l => <option key={l.listingId} value={l.listingId}>{l.projectName}</option>)}
-              </select>
-              <input className="cc-inp" type="number" placeholder="Quantity (credits)" value={bidQty} onChange={e => setBidQty(e.target.value)}/>
-              <input className="cc-inp" type="number" placeholder="Bid price (₹ per credit)" value={bidPrice} onChange={e => setBidPrice(e.target.value)}/>
-              <div style={{ display:'flex', gap:6, marginBottom:10 }}>
-                {['7','14','30'].map(d => (
-                  <button key={d} onClick={() => setBidDays(d)} style={{ flex:1, padding:6, borderRadius:4, border:`1px solid ${bidDays===d?'#22c55e44':'#0f2a1a'}`, background:bidDays===d?'#0d2e1f22':'transparent', color:bidDays===d?'#22c55e':'#86efac44', cursor:'pointer', fontFamily:'DM Mono,monospace', fontSize:10 }}>
-                    {d}d
-                  </button>
-                ))}
-              </div>
-              {bidQty>0&&bidPrice>0&&(
-                <div style={{ background:'#040706', borderRadius:6, padding:'9px 11px', marginBottom:10 }}>
-                  <div className="cc-fee-row"><span>Bid total</span><span>{bidTotalEth.toFixed(6)} ETH</span></div>
-                  <div className="cc-fee-row"><span>Fee (0.5%)</span><span style={{ color:'#facc15' }}>{bidFeeEth.toFixed(6)} ETH</span></div>
-                  <div className="cc-fee-tot"><span>LOCKED IN ESCROW</span><span style={{ color:'#60a5fa' }}>{bidEscrowEth.toFixed(6)} ETH</span></div>
-                </div>
-              )}
-              <button className="cc-btn cc-btn-bid" disabled={!isKYCVerified||!walletAddress||txPending} onClick={handlePlaceBid}>
-                {txPending?'⏳ PROCESSING...':`PLACE BID · LOCK ${bidEscrowEth.toFixed(4)} ETH`}
-              </button>
-            </>
-          )}
+  const tradePrice    = orderMode === 'limit' && limitPrice ? parseFloat(limitPrice) / liveETHINR : (selected?.adjPrice || 0);
+  const tradePriceINR = selected?.pricePerUnitINR || Math.round(tradePrice * liveETHINR);
+  const tradeTotalInr = qty ? parseFloat(qty) * tradePriceINR : 0;
+  const tradeFeeInr   = tradeTotalInr * PLATFORM_FEE;
+  const tradeNetInr   = tradeTotalInr + tradeFeeInr;
+  const tradeNetEth   = tradeNetInr / liveETHINR;
 
-          <div style={{ marginTop:8, fontSize:9, color:'#86efac33', textAlign:'center' }}>
-            1 credit = 1 tonne CO₂ · MetaMask required for on-chain signing
-          </div>
-        </div>
+  const bidTotalEth  = bidQty && bidPrice ? parseFloat(bidQty) * (parseFloat(bidPrice) / liveETHINR) : 0;
+  const bidFeeEth    = bidTotalEth * PLATFORM_FEE;
+  const bidEscrowEth = bidTotalEth + bidFeeEth;
 
-        <div className="cc-panel">
-          <div style={{ fontSize:9, color:'#86efac44', letterSpacing:'.12em', marginBottom:8 }}>HAVE CREDITS TO SELL?</div>
-          <button style={{ width:'100%', padding:'9px', borderRadius:6, border:'1px solid #facc1533', background:'transparent', color:'#facc1566', cursor:'pointer', fontFamily:'DM Mono,monospace', fontSize:10 }} onClick={() => navigate('/portfolio')}>
-            GO TO PORTFOLIO →
-          </button>
-        </div>
-      </div>
-    );
+  const totalAvailable = listings.reduce((s, l) => s + l.amount, 0);
+  const openBidsTotal  = buyOrders.filter(o => o.status === 0 || o.status === 2).length;
+
+  const platformRetired = (() => {
+    const seen = new Set();
+    return listings.reduce((s, l) => {
+      if (!seen.has(l.tokenId)) { seen.add(l.tokenId); return s + (l.totalRetired || 0); }
+      return s;
+    }, 0);
+  })();
+
+  const todayStr    = new Date().toLocaleDateString();
+  const dailyTrades = tradeHistory.filter(t => {
+    try { return new Date(t.time).toLocaleDateString() === todayStr; } catch { return true; }
+  });
+  const dailyVolume   = dailyTrades.reduce((s, t) => s + (t.amount || 0), 0);
+  const avgTradePrice = tradeHistory.length
+    ? tradeHistory.reduce((s, t) => {
+        const p = t.priceINR || (t.amount > 0 ? (parseFloat(t.totalEth || 0) / t.amount) * liveETHINR : 0);
+        return s + p;
+      }, 0) / tradeHistory.length
+    : 0; // ✅ FIX: no fake average from listing prices — show '—' if no trades
+
+  const analyticsListing = analyticsToken || selected;
+  const analyticsHistory = analyticsListing ? (priceHistories[analyticsListing.tokenId] || []) : [];
+  const analyticsHigh    = analyticsHistory.length ? Math.max(...analyticsHistory) : 0;
+  const analyticsLow     = analyticsHistory.length ? Math.min(...analyticsHistory) : 0;
+  const analyticsChange  = analyticsHistory.length > 1
+    ? ((analyticsHistory[analyticsHistory.length-1] - analyticsHistory[0]) / analyticsHistory[0] * 100).toFixed(2)
+    : null;
+
+  // ── fetchBatchId ──────────────────────────────────────────────
+  const fetchBatchId = async (tokenId) => {
+    try {
+      const res = await fetch(`${API_URL}/api/portfolio/batch-by-token/${tokenId}`, {
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('et_access')}` },
+      });
+      const data = await res.json();
+      return data?.batchId || null;
+    } catch { return null; }
+  };
+
+  // ── recordTrade (ETH only) ────────────────────────────────────
+  const recordTrade = async ({ txHash, paymentMode, listing, qty, pricePerCreditINR }) => {
+    try {
+      let batchId = listing.batchId || null;
+      if (!batchId && listing.tokenId !== null && listing.tokenId !== undefined) {
+        batchId = await fetchBatchId(listing.tokenId);
+      }
+      const res = await fetch(`${API_URL}/api/trades/record`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('et_access')}` },
+        body: JSON.stringify({
+          batchId, listingId: listing.listingId, quantity: qty,
+          paymentMode, txHash: txHash || null,
+          pricePerCreditINR: pricePerCreditINR || listing.pricePerUnitINR || Math.round(listing.adjPrice * liveETHINR),
+          idempotencyKey: txHash, // ✅ FIX: use txHash as idempotency key for ETH trades
+        }),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        // ✅ FIX: ETH DB miss is no longer silent — log to console with tx hash
+        console.error('⚠️ ETH trade DB record failed — blockchain listener will retry:', data.error, '| txHash:', txHash);
+      }
+      return data;
+    } catch (e) {
+      console.error('⚠️ recordTrade fetch failed:', e.message, '| txHash:', txHash);
+      return null;
+    }
+  };
+
+  // ── handlePlaceOrder ─────────────────────────────────────────
+  const handlePlaceOrder = () => {
+    if (!isKYCVerified)                          { showToast('❌ Complete KYC first', 'error'); return; }
+    if (paymentMode === 'eth' && !walletAddress) { showToast('❌ Connect MetaMask', 'error'); return; }
+    if (paymentMode === 'inr' && inrBalance < tradeNetInr) { showToast('❌ Insufficient INR balance', 'error'); return; }
+    if (!qty || isNaN(qty) || +qty <= 0)         { showToast('❌ Enter valid quantity', 'error'); return; }
+    if (!selected)                               { showToast('❌ Select a credit', 'error'); return; }
+    if (+qty > selected.amount)                  { showToast(`❌ Max available: ${selected.amount}`, 'error'); return; }
+    if (selected.seller?.toLowerCase() === walletAddress?.toLowerCase()) { showToast('❌ Cannot buy your own listing', 'error'); return; }
+    if (orderMode === 'limit' && (!limitPrice || isNaN(limitPrice))) { showToast('❌ Enter limit price', 'error'); return; }
+    setConfirmModal({ type: 'buy', listing: selected, qty: +qty, orderMode, tradePrice, tradePriceINR, tradeTotalInr, tradeFeeInr, tradeNetInr, tradeNetEth, paymentMode });
+  };
+
+  // ── ✅ FIX: handleConfirmBuy — INR path now single /record call ──
+  // Removed the two-call (deduct → record) pattern entirely.
+  // /api/trades/record now handles deduct + settle atomically on server.
+  const handleConfirmBuy = async () => {
+    const o = confirmModal;
+    setConfirmModal(null);
+    setTxPending(true);
+
+    // ✅ FIX: generate idempotency key once per trade attempt
+    const idempotencyKey = uuidv4();
+
+    try {
+      if (o.paymentMode === 'inr') {
+        showToast('⏳ Processing trade...', 'info');
+
+        let batchId = o.listing.batchId || null;
+        if (!batchId && o.listing.tokenId !== null && o.listing.tokenId !== undefined) {
+          batchId = await fetchBatchId(o.listing.tokenId);
+        }
+
+        // ✅ Single atomic call — deducts INR + credits seller + records trade
+        const settleRes = await fetch(`${API_URL}/api/trades/record`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('et_access')}` },
+          body: JSON.stringify({
+            batchId,
+            listingId:         o.listing.listingId,
+            quantity:          o.qty,
+            paymentMode:       'inr',
+            txHash:            null,
+            pricePerCreditINR: o.tradePriceINR,
+            idempotencyKey,    // ✅ prevents double-settlement on retry
+          }),
+        });
+
+        const tradeData = await settleRes.json();
+
+        if (!tradeData.success) {
+          throw Object.assign(new Error(tradeData.error || 'Trade settlement failed'), {
+            isSettlementError: true,
+          });
+        }
+
+        if (tradeData.buyerBalance !== undefined) {
+          setInrBalance(parseFloat(tradeData.buyerBalance));
+        } else {
+          await refreshINRBalance();
+        }
+
+        addNotification({
+          type:    NOTIF_TYPES.TRADE,
+          title:   'Buy Executed ✅',
+          message: `${o.qty} × ${o.listing.projectName} — ₹${Math.round(o.tradeNetInr).toLocaleString('en-IN')} from INR wallet`,
+        });
+
+        showToast(`✅ ${o.qty} credits purchased!`);
+        setQty(''); setLimitPrice('');
+
+      } else {
+        // ETH PATH — unchanged
+        showToast('⏳ Confirm in MetaMask...', 'info');
+        const r = await buyCredit(o.listing.listingId, o.qty, o.tradeNetEth.toFixed(8));
+
+        await recordTrade({
+          txHash:            r.txHash,
+          paymentMode:       'eth',
+          listing:           o.listing,
+          qty:               o.qty,
+          pricePerCreditINR: o.tradePriceINR,
+        });
+
+        addNotification({
+          type:    NOTIF_TYPES.TRADE,
+          title:   'Buy Executed ✅',
+          message: `${o.qty} × ${o.listing.projectName} — ${o.tradeNetEth.toFixed(4)} ETH`,
+        });
+        showToast(`✅ ${o.qty} credits purchased!`);
+        setQty(''); setLimitPrice('');
+        navigate(`/transaction-status?hash=${r.txHash}`);
+      }
+
+    } catch (e) {
+      // ✅ FIX: INR path no longer needs refund here — server-side atomicity
+      // means if /record fails, nothing was deducted.
+      if (e.code === 4001) {
+        showToast('❌ Rejected in MetaMask', 'error');
+      } else {
+        showToast(`❌ ${e.reason || e.message || 'Transaction failed'}`, 'error');
+      }
+    } finally {
+      setTxPending(false);
+    }
+  };
+
+  const handlePlaceBid = () => {
+    if (!isKYCVerified)                            { showToast('❌ Complete KYC first', 'error'); return; }
+    if (!walletAddress)                            { showToast('❌ Connect MetaMask', 'error'); return; }
+    if (selected?.seller?.toLowerCase() === walletAddress.toLowerCase()) { showToast('❌ Cannot bid on your own listing', 'error'); return; }
+    if (!bidQty || isNaN(bidQty) || +bidQty <= 0)  { showToast('❌ Enter valid quantity', 'error'); return; }
+    if (!bidPrice || isNaN(bidPrice))              { showToast('❌ Enter bid price', 'error'); return; }
+    if (!selected)                                 { showToast('❌ Select a credit first', 'error'); return; }
+    setConfirmModal({
+      type: 'bid', listing: selected, qty: +bidQty,
+      limitPriceInr: +bidPrice,
+      limitPriceEth: (+bidPrice / liveETHINR).toFixed(8),
+      bidTotalEth, bidFeeEth, bidEscrowEth,
+      durationDays: parseInt(bidDays) || 7,
+    });
+  };
+
+  const handleConfirmBid = async () => {
+    const o = confirmModal; setConfirmModal(null); setTxPending(true);
+    try {
+      showToast('⏳ Locking ETH in escrow...', 'info');
+      const r = await placeBuyOrder(o.listing.tokenId, o.qty, o.limitPriceEth, o.durationDays);
+      addNotification({ type: NOTIF_TYPES.TRADE, title: 'Bid Placed ✅', message: `${o.qty} × ${o.listing.projectName} @ ${fmt(o.limitPriceInr)}` });
+      showToast('✅ Bid placed! ETH locked in escrow.');
+      setBidQty(''); setBidPrice('');
+      navigate(`/transaction-status?hash=${r.txHash}`);
+    } catch (e) {
+      if (e.code === 4001) showToast('❌ Rejected in MetaMask', 'error');
+      else showToast(`❌ ${e.reason || 'Transaction failed'}`, 'error');
+    } finally { setTxPending(false); }
+  };
+
+  // ✅ FIX: handleCancelBid now requires confirmation modal
+  const handleCancelBidRequest = (orderId, ethEscrowed) => {
+    setCancelBidConfirm({ orderId, ethEscrowed });
+  };
+
+  const handleCancelBidConfirmed = async () => {
+    const { orderId } = cancelBidConfirm;
+    setCancelBidConfirm(null);
+    try {
+      showToast('⏳ Cancelling bid...', 'info');
+      await cancelBuyOrder(orderId);
+      showToast('✅ Bid cancelled. ETH refunded.');
+    } catch (e) {
+      showToast(`❌ ${e.reason || 'Cancel failed'}`, 'error');
+    }
+  };
+
+  const addAlert = () => {
+    if (!alertPrice || isNaN(alertPrice)) { showToast('❌ Enter valid price', 'error'); return; }
+    if (!selected)                        { showToast('❌ Select a credit first', 'error'); return; }
+    setAlerts(prev => [...prev, {
+      listingId: selected.listingId, tokenId: selected.tokenId,
+      projectName: selected.projectName, targetPrice: +alertPrice,
+      type: alertType, triggered: false, id: Date.now(),
+      createdAt: new Date().toLocaleTimeString(),
+    }]);
+    setAlertPrice('');
+    showToast(`🔔 Alert set: ${alertType} ${fmt(alertPrice)}`);
   };
 
   return (
@@ -870,12 +910,15 @@ export default function CarbonCredits() {
                 : listings.map(l => {
                     const price   = l.pricePerUnitINR || l.adjPrice * liveETHINR;
                     const history = priceHistories[l.tokenId] || [];
-                    const isUp    = history.length > 1 ? history[history.length-1] >= history[0] : true;
+                    // ✅ FIX: isUp only if real data
+                    const isUp    = history.length > 1 ? history[history.length-1] >= history[0] : null;
                     return (
                       <div key={l.listingId} className={`cc-tick${selected?.listingId===l.listingId?' sel':''}`} onClick={() => { setSelected(l); setTab('trade'); }}>
                         <div className="cc-tick-name">{l.projectName}</div>
-                        <div className="cc-tick-price" style={{ color:isUp?'#22c55e':'#f87171' }}>{fmt(price.toFixed(0))}</div>
-                        <div className="cc-tick-chg" style={{ color:isUp?'#16a34a':'#dc2626' }}>{isUp?'▲':'▼'} {l.standard}</div>
+                        <div className="cc-tick-price" style={{ color: isUp === null ? '#86efac88' : isUp ? '#22c55e' : '#f87171' }}>{fmt(price.toFixed(0))}</div>
+                        <div className="cc-tick-chg" style={{ color: isUp === null ? '#86efac44' : isUp ? '#16a34a' : '#dc2626' }}>
+                          {isUp === null ? '— ' : isUp ? '▲ ' : '▼ '}{l.standard}
+                        </div>
                       </div>
                     );
                   })
@@ -889,11 +932,11 @@ export default function CarbonCredits() {
           {/* Stats */}
           <div className="cc-stats">
             {[
-              { label:'CREDITS AVAILABLE', val:totalAvailable||'—',                              sub:`${listings.length} active listings` },
-              { label:'CREDITS RETIRED',   val:platformRetired||'—',                             sub:'platform-wide tCO₂ retired' },
-              { label:'DAILY VOLUME',      val:dailyVolume?`${dailyVolume} tCO₂`:'—',           sub:`${tradeHistory.length} total trades` },
-              { label:'AVG TRADE PRICE',   val:avgTradePrice?fmt(avgTradePrice.toFixed(0)):'—', sub:'per tonne CO₂' },
-              { label:'OPEN BIDS',         val:openBidsTotal||'—',                               sub:`${myOpenBids.reduce((s,o)=>s+o.ethEscrowed,0).toFixed(4)} ETH locked` },
+              { label:'CREDITS AVAILABLE', val:totalAvailable||'—',                                          sub:`${listings.length} active listings` },
+              { label:'CREDITS RETIRED',   val:platformRetired||'—',                                         sub:'platform-wide tCO₂ retired' },
+              { label:'DAILY VOLUME',      val:dailyVolume?`${dailyVolume} tCO₂`:'—',                        sub:`${tradeHistory.length} total trades` },
+              { label:'AVG TRADE PRICE',   val:avgTradePrice?fmt(avgTradePrice.toFixed(0)):'—',              sub: avgTradePrice ? 'per tonne CO₂' : 'no trades yet' },
+              { label:'OPEN BIDS',         val:openBidsTotal||'—',                                           sub:`${myOpenBids.reduce((s,o)=>s+o.ethEscrowed,0).toFixed(4)} ETH locked` },
             ].map(({ label, val, sub }) => (
               <div className="cc-stat" key={label}>
                 <div className="cc-stat-lbl">{label}</div>
@@ -918,7 +961,16 @@ export default function CarbonCredits() {
           {/* MARKET TAB */}
           {tab === 'market' && (
             <div className="cc-market-layout">
-              <WatchlistPanel/>
+              <WatchlistPanel
+                listings={listings}
+                selected={selected}
+                setSelected={setSelected}
+                setAnalyticsToken={setAnalyticsToken}
+                watchlist={watchlist}
+                toggleWatchlist={toggleWatchlist}
+                priceHistories={priceHistories}
+                liveETHINR={liveETHINR}
+              />
               <div className="cc-panel">
                 <div style={{ display:'flex', gap:8, marginBottom:14, alignItems:'center', flexWrap:'wrap' }}>
                   <select className="cc-inp" style={{ margin:0, width:'auto' }} value={filterStd} onChange={e => setFilterStd(e.target.value)}>
@@ -946,7 +998,7 @@ export default function CarbonCredits() {
                     : filtered.map(l => {
                         const price   = l.pricePerUnitINR || l.adjPrice * liveETHINR;
                         const history = priceHistories[l.tokenId] || [];
-                        const isUp    = history.length > 1 ? history[history.length-1] >= history[0] : true;
+                        const isUp    = history.length > 1 ? history[history.length-1] >= history[0] : null;
                         const bidsN   = buyOrders.filter(o => o.tokenId === l.tokenId && (o.status === 0 || o.status === 2)).length;
                         const isSel   = selected?.listingId === l.listingId;
                         const col     = TYPE_COLORS[l.projectType] || TYPE_COLORS.Renewable;
@@ -961,11 +1013,15 @@ export default function CarbonCredits() {
                             </div>
                             <Badge label={l.standard} color={STANDARDS[l.standard]?.color} bg={STANDARDS[l.standard]?.bg}/>
                             <div>
-                              <div style={{ fontSize:13, fontWeight:500, color:isUp?'#22c55e':'#f87171' }}>{fmt(price.toFixed(0))}</div>
+                              <div style={{ fontSize:13, fontWeight:500, color: isUp === null ? '#86efac88' : isUp ? '#22c55e' : '#f87171' }}>{fmt(price.toFixed(0))}</div>
                               <div style={{ fontSize:9, color:'#86efac44' }}>{l.amount} avail</div>
                             </div>
                             <span style={{ fontSize:10, color:'#86efac66' }}>{l.vintageYear}</span>
-                            <MiniChart data={history.slice(-12)} color={isUp?'#22c55e':'#f87171'} width={80} height={28}/>
+                            {/* ✅ FIX: no fake chart — show dash if no data */}
+                            {history.length >= 2
+                              ? <MiniChart data={history.slice(-12)} color={isUp ? '#22c55e' : '#f87171'} width={80} height={28}/>
+                              : <span style={{ fontSize:9, color:'#86efac22' }}>—</span>
+                            }
                             <span style={{ fontSize:10, color:bidsN>0?'#60a5fa88':'#86efac33' }}>{bidsN>0?`📥 ${bidsN}`:'—'}</span>
                             {l.seller?.toLowerCase() === walletAddress?.toLowerCase()
                               ? <span style={{ fontSize:9, color:'#86efac22', padding:'5px 4px' }}>YOUR LISTING</span>
@@ -985,9 +1041,19 @@ export default function CarbonCredits() {
           {/* TRADE TAB */}
           {tab === 'trade' && (
             <div className="cc-trade-layout">
-              <OrderBookPanel/>
+              <OrderBookPanel
+                allAsks={allAsks} allBids={allBids}
+                selectedAsks={selectedAsks} selectedBids={selectedBids}
+                selected={selected} liveETHINR={liveETHINR}
+                setSelected={setSelected} setTab={setTab}
+              />
               <div>
-                <CreditInfoCard/>
+                <CreditInfoCard
+                  selected={selected}
+                  currentPriceInr={currentPriceInr}
+                  priceHistories={priceHistories}
+                  liveETHINR={liveETHINR}
+                />
                 <div className="cc-panel">
                   <div className="cc-panel-title">RECENT TRADES</div>
                   {tradeHistory.length === 0
@@ -1004,7 +1070,25 @@ export default function CarbonCredits() {
                   }
                 </div>
               </div>
-              <OrderForm/>
+              <OrderForm
+                isKYCVerified={isKYCVerified} walletAddress={walletAddress}
+                txPending={txPending} listings={listings}
+                selected={selected} setSelected={setSelected}
+                orderMode={orderMode} setOrderMode={setOrderMode}
+                qty={qty} setQty={setQty}
+                limitPrice={limitPrice} setLimitPrice={setLimitPrice}
+                bidQty={bidQty} setBidQty={setBidQty}
+                bidPrice={bidPrice} setBidPrice={setBidPrice}
+                bidDays={bidDays} setBidDays={setBidDays}
+                paymentMode={paymentMode} setPaymentMode={setPaymentMode}
+                inrBalance={inrBalance} inrLoading={inrLoading}
+                tradePriceINR={tradePriceINR} tradeTotalInr={tradeTotalInr}
+                tradeFeeInr={tradeFeeInr} tradeNetInr={tradeNetInr} tradeNetEth={tradeNetEth}
+                bidTotalEth={bidTotalEth} bidFeeEth={bidFeeEth} bidEscrowEth={bidEscrowEth}
+                liveETHINR={liveETHINR}
+                handlePlaceOrder={handlePlaceOrder} handlePlaceBid={handlePlaceBid}
+                navigate={navigate}
+              />
             </div>
           )}
 
@@ -1026,15 +1110,26 @@ export default function CarbonCredits() {
                     <div>
                       <div style={{ fontSize:10, color:'#86efac44', letterSpacing:'.12em', marginBottom:4 }}>PRICE CHART · {analyticsListing?.projectName}</div>
                       <div style={{ fontSize:26, fontWeight:500, color:'#22c55e' }}>{fmt(currentPriceInr.toFixed(0))}</div>
-                      <div style={{ fontSize:10, color:parseFloat(analyticsChange)>=0?'#22c55e':'#f87171', marginTop:2 }}>
-                        {parseFloat(analyticsChange)>=0?'▲':'▼'} {Math.abs(analyticsChange)}% (session)
+                      {analyticsChange !== null ? (
+                        <div style={{ fontSize:10, color:parseFloat(analyticsChange)>=0?'#22c55e':'#f87171', marginTop:2 }}>
+                          {parseFloat(analyticsChange)>=0?'▲':'▼'} {Math.abs(analyticsChange)}% (session)
+                        </div>
+                      ) : (
+                        <div style={{ fontSize:10, color:'#86efac33', marginTop:2 }}>No trade history yet</div>
+                      )}
+                    </div>
+                    {analyticsHistory.length >= 2 && (
+                      <div style={{ textAlign:'right' }}>
+                        <div style={{ fontSize:9, color:'#86efac44' }}>H: {fmt(analyticsHigh.toFixed(0))} · L: {fmt(analyticsLow.toFixed(0))}</div>
                       </div>
-                    </div>
-                    <div style={{ textAlign:'right' }}>
-                      <div style={{ fontSize:9, color:'#86efac44' }}>H: {fmt(analyticsHigh.toFixed(0))} · L: {fmt(analyticsLow.toFixed(0))}</div>
-                    </div>
+                    )}
                   </div>
-                  <MiniChart data={analyticsHistory} color="#22c55e" width={600} height={120}/>
+                  {analyticsHistory.length >= 2
+                    ? <MiniChart data={analyticsHistory} color="#22c55e" width={600} height={120}/>
+                    : <div style={{ height:120, display:'flex', alignItems:'center', justifyContent:'center', color:'#86efac22', fontSize:10, letterSpacing:'.1em' }}>
+                        CHART AVAILABLE AFTER FIRST TRADE ON THIS CREDIT
+                      </div>
+                  }
                 </div>
               </div>
               <div>
@@ -1144,7 +1239,10 @@ export default function CarbonCredits() {
                         <div><div style={{ color:'#f0fdf4' }}>{o.remaining}/{o.amount}</div></div>
                         <div><div style={{ color:'#22c55e', fontWeight:500 }}>{fmt((o.limitPrice*liveETHINR).toFixed(0))}</div></div>
                         <div style={{ color:'#60a5fa88' }}>{o.ethEscrowed.toFixed(4)} ETH</div>
-                        <button onClick={() => handleCancelBid(o.orderId)} style={{ padding:'5px 10px', borderRadius:4, border:'1px solid #dc262633', background:'transparent', color:'#f8717166', cursor:'pointer', fontFamily:'DM Mono,monospace', fontSize:9 }}>
+                        {/* ✅ FIX: Cancel requires confirm — no accidental ETH loss */}
+                        <button
+                          onClick={() => handleCancelBidRequest(o.orderId, o.ethEscrowed)}
+                          style={{ padding:'5px 10px', borderRadius:4, border:'1px solid #dc262633', background:'transparent', color:'#f8717166', cursor:'pointer', fontFamily:'DM Mono,monospace', fontSize:9 }}>
                           CANCEL
                         </button>
                       </div>
@@ -1179,7 +1277,7 @@ export default function CarbonCredits() {
                 {alerts.length === 0
                   ? <div style={{ textAlign:'center', padding:'32px', color:'#86efac33', fontSize:11 }}>🔔 No alerts set.</div>
                   : alerts.map(a => (
-                      <div key={a.id} className="cc-alert-card">
+                      <div key={a.id} style={{ background:'#060908', border:'1px solid #0f2a1a', borderRadius:8, padding:'12px 14px', marginTop:8, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
                         <div>
                           <div style={{ fontSize:11, color:'#f0fdf4', fontWeight:500, marginBottom:2 }}>{a.projectName}</div>
                           <div style={{ fontSize:9, color:'#86efac55' }}>Alert {a.type} {fmt(a.targetPrice)} · Set {a.createdAt}</div>
@@ -1213,7 +1311,7 @@ export default function CarbonCredits() {
                 <span style={{ fontSize:20 }}>{confirmModal.paymentMode==='inr'?'🇮🇳':'🦊'}</span>
                 <div>
                   <div style={{ fontSize:11, fontWeight:700, color:confirmModal.paymentMode==='inr'?'#22c55e':'#f59e0b' }}>
-                    {confirmModal.paymentMode==='inr'?'PAYING FROM INR WALLET':'PAYING WITH METAMASK (ETH)'}
+                    {confirmModal.paymentMode==='inr'?'PAYING FROM INR WALLET — ATOMIC SETTLEMENT':'PAYING WITH METAMASK (ETH)'}
                   </div>
                   <div style={{ fontSize:9, color:'#86efac44', marginTop:2 }}>
                     {confirmModal.paymentMode==='inr'
@@ -1223,7 +1321,6 @@ export default function CarbonCredits() {
                   </div>
                 </div>
               </div>
-
               <div style={{ background:'#040706', borderRadius:8, padding:14, marginBottom:14, border:'1px solid #0f2a1a' }}>
                 <div style={{ fontSize:13, fontWeight:500, color:'#f0fdf4', marginBottom:6 }}>{confirmModal.listing.projectName}</div>
                 <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginBottom:10 }}>
@@ -1244,7 +1341,6 @@ export default function CarbonCredits() {
                   ))}
                 </div>
               </div>
-
               <div className="cc-fee-row"><span>Subtotal</span><span>{fmt(confirmModal.tradeTotalInr.toFixed(0))}</span></div>
               <div className="cc-fee-row"><span>Platform fee (0.5%)</span><span style={{ color:'#facc15' }}>{fmt(confirmModal.tradeFeeInr.toFixed(0))}</span></div>
               {confirmModal.paymentMode==='inr' ? (
@@ -1258,13 +1354,6 @@ export default function CarbonCredits() {
                   <div className="cc-fee-tot"><span>TOTAL PAYABLE</span><span style={{ color:'#f87171' }}>{fmt(confirmModal.tradeNetInr.toFixed(0))}</span></div>
                 </>
               )}
-
-              <div style={{ marginTop:10, padding:'8px 10px', background:'#0d2e1f22', borderRadius:6, fontSize:9, color:'#86efac44', lineHeight:1.6 }}>
-                {confirmModal.paymentMode==='inr'
-                  ?'🇮🇳 INR deducted from your wallet → Seller credited automatically (no MetaMask needed)'
-                  :'⛓ Calls Marketplace.buyCredit() on Ethereum Sepolia. Seller credited automatically after confirmation.'
-                }
-              </div>
             </div>
             <div className="cc-modal-f">
               <button className="cc-btn-cn" onClick={() => setConfirmModal(null)}>CANCEL</button>
@@ -1289,12 +1378,12 @@ export default function CarbonCredits() {
             <div className="cc-modal-b">
               <div style={{ background:'#0a1628', borderRadius:8, padding:12, marginBottom:14, border:'1px solid #60a5fa22' }}>
                 <div style={{ fontSize:12, fontWeight:500, color:'#f0fdf4', marginBottom:2 }}>{confirmModal.listing.projectName}</div>
-                <div style={{ fontSize:9, color:'#86efac55' }}>Bid for {confirmModal.qty} credits @ {fmt(confirmModal.limitPriceInr)}</div>
+                <div style={{ fontSize:9, color:'#86efac55' }}>Bid for {confirmModal.qty} credits @ {fmt(confirmModal.limitPriceInr)} · {confirmModal.durationDays} days</div>
               </div>
               {[
-                { l:'BID QUANTITY', v:`${confirmModal.qty} credits`, c:'#f0fdf4' },
-                { l:'BID PRICE',    v:fmt(confirmModal.limitPriceInr), c:'#22c55e' },
-                { l:'DURATION',     v:`${confirmModal.durationDays} days`, c:'#f0fdf4' },
+                { l:'BID QUANTITY', v:`${confirmModal.qty} credits`,      c:'#f0fdf4' },
+                { l:'BID PRICE',    v:fmt(confirmModal.limitPriceInr),    c:'#22c55e' },
+                { l:'EXPIRES IN',   v:`${confirmModal.durationDays} days`, c:'#f0fdf4' },
               ].map(({ l, v, c }) => (
                 <div key={l} className="cc-fee-row" style={{ padding:'6px 0' }}><span>{l}</span><span style={{ color:c }}>{v}</span></div>
               ))}
@@ -1306,6 +1395,30 @@ export default function CarbonCredits() {
             <div className="cc-modal-f">
               <button className="cc-btn-cn" onClick={() => setConfirmModal(null)}>CANCEL</button>
               <button className="cc-btn-ok" style={{ background:'linear-gradient(135deg,#1d4ed8,#1e40af)', color:'#fff' }} onClick={handleConfirmBid}>LOCK ETH & BID →</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ✅ FIX: Cancel Bid Confirm Modal — prevents accidental ETH loss */}
+      {cancelBidConfirm && (
+        <div className="cc-overlay" onClick={e => e.target===e.currentTarget && setCancelBidConfirm(null)}>
+          <div className="cc-modal" style={{ maxWidth:360 }}>
+            <div className="cc-modal-h">
+              <span style={{ fontSize:12, fontWeight:500, color:'#f87171', letterSpacing:'.1em' }}>CANCEL BID?</span>
+              <button style={{ background:'none', border:'none', color:'#86efac44', cursor:'pointer', fontSize:16 }} onClick={() => setCancelBidConfirm(null)}>✕</button>
+            </div>
+            <div className="cc-modal-b">
+              <div style={{ padding:'12px', background:'#1a0707', border:'1px solid #f8717122', borderRadius:8, marginBottom:12, fontSize:11, color:'#f8717199', lineHeight:1.7 }}>
+                This will cancel your bid and return <strong style={{ color:'#f87171' }}>{cancelBidConfirm.ethEscrowed?.toFixed(6)} ETH</strong> from escrow to your wallet.<br/>
+                <span style={{ fontSize:9, color:'#f8717155' }}>Gas fees apply. This action cannot be undone.</span>
+              </div>
+            </div>
+            <div className="cc-modal-f">
+              <button className="cc-btn-cn" onClick={() => setCancelBidConfirm(null)}>KEEP BID</button>
+              <button className="cc-btn-ok" style={{ background:'linear-gradient(135deg,#dc2626,#b91c1c)', color:'#fff' }} onClick={handleCancelBidConfirmed}>
+                CANCEL & REFUND ETH
+              </button>
             </div>
           </div>
         </div>
@@ -1328,23 +1441,74 @@ export default function CarbonCredits() {
                 ))}
               </div>
               <input className="cc-inp" type="number" placeholder={ammDir==='buy'?'ETH to spend':'Credits to sell'} value={ammQty} onChange={e => setAmmQty(e.target.value)}/>
-              {ammQty && (
-                <div style={{ background:'#040706', borderRadius:6, padding:'9px 11px', marginBottom:10 }}>
-                  <div className="cc-fee-row"><span>You give</span><span>{ammQty} {ammDir==='buy'?'ETH':'credits'}</span></div>
-                  <div className="cc-fee-row"><span>Pool fee (0.3%)</span><span style={{ color:'#facc15' }}>{(ammQty*0.003).toFixed(4)}</span></div>
-                  <div className="cc-fee-tot"><span>YOU RECEIVE ≈</span><span style={{ color:'#22c55e' }}>{(ammQty*0.997).toFixed(ammDir==='buy'?2:6)} {ammDir==='buy'?'credits':'ETH'}</span></div>
-                </div>
-              )}
+
+              {/* ✅ FIX: Real slippage calculation + price impact warning */}
+              {ammQty && ammModal.pool && (() => {
+                const pool = ammModal.pool;
+                const inputAmt = parseFloat(ammQty) || 0;
+                let outputAmt = 0;
+                let priceImpactPct = 0;
+
+                if (ammDir === 'buy' && pool.ethReserve > 0 && pool.creditReserve > 0) {
+                  const inputWithFee = inputAmt * 0.997;
+                  outputAmt = (inputWithFee * pool.creditReserve) / (pool.ethReserve + inputWithFee);
+                  priceImpactPct = (inputAmt / pool.ethReserve) * 100;
+                } else if (ammDir === 'sell' && pool.creditReserve > 0 && pool.ethReserve > 0) {
+                  const inputWithFee = inputAmt * 0.997;
+                  outputAmt = (inputWithFee * pool.ethReserve) / (pool.creditReserve + inputWithFee);
+                  priceImpactPct = (inputAmt / pool.creditReserve) * 100;
+                }
+
+                // ✅ FIX: minOut = 2% slippage tolerance (not 0)
+                const minOut = outputAmt * 0.98;
+                const highImpact = priceImpactPct > 5;
+
+                return (
+                  <div style={{ background:'#040706', borderRadius:6, padding:'9px 11px', marginBottom:10 }}>
+                    <div className="cc-fee-row"><span>You give</span><span>{ammQty} {ammDir==='buy'?'ETH':'credits'}</span></div>
+                    <div className="cc-fee-row"><span>Pool fee (0.3%)</span><span style={{ color:'#facc15' }}>{(inputAmt*0.003).toFixed(4)}</span></div>
+                    <div className="cc-fee-row">
+                      <span>Price impact</span>
+                      <span style={{ color: highImpact ? '#f87171' : '#22c55e88' }}>
+                        {priceImpactPct.toFixed(2)}% {highImpact && '⚠ HIGH'}
+                      </span>
+                    </div>
+                    <div className="cc-fee-tot"><span>YOU RECEIVE ≈</span><span style={{ color:'#22c55e' }}>{outputAmt.toFixed(ammDir==='buy'?2:6)} {ammDir==='buy'?'credits':'ETH'}</span></div>
+                    <div style={{ fontSize:8, color:'#86efac33', marginTop:4 }}>Min received (2% slippage): {minOut.toFixed(ammDir==='buy'?2:6)}</div>
+                    {highImpact && (
+                      <div style={{ marginTop:8, padding:'6px 8px', background:'#1a0707', border:'1px solid #f8717122', borderRadius:4, fontSize:9, color:'#f87171' }}>
+                        ⚠ High price impact — consider splitting into smaller swaps
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
             <div className="cc-modal-f">
               <button className="cc-btn-cn" onClick={() => setAmmModal(null)}>CANCEL</button>
               <button className="cc-btn-ok" style={{ background:'linear-gradient(135deg,#16a34a,#15803d)', color:'#fff' }}
                 onClick={async () => {
                   if (!ammQty) { showToast('❌ Enter amount', 'error'); return; }
+
+                  // ✅ FIX: Calculate real minOut with 2% slippage — not hardcoded 0
+                  const pool = ammModal.pool;
+                  const inputAmt = parseFloat(ammQty);
+                  let minOut = 0;
+
+                  if (ammDir === 'buy' && pool.ethReserve > 0 && pool.creditReserve > 0) {
+                    const inputWithFee = inputAmt * 0.997;
+                    const expectedOut = (inputWithFee * pool.creditReserve) / (pool.ethReserve + inputWithFee);
+                    minOut = Math.floor(expectedOut * 0.98); // 2% slippage tolerance
+                  } else if (ammDir === 'sell' && pool.creditReserve > 0 && pool.ethReserve > 0) {
+                    const inputWithFee = inputAmt * 0.997;
+                    const expectedOut = (inputWithFee * pool.ethReserve) / (pool.creditReserve + inputWithFee);
+                    minOut = expectedOut * 0.98;
+                  }
+
                   try {
                     setAmmModal(null);
-                    if (ammDir==='buy') await ammSwapETHForCredits(ammModal.pool.poolId, ammQty, 0);
-                    else await ammSwapCreditsForETH(ammModal.pool.poolId, parseInt(ammQty), 0);
+                    if (ammDir === 'buy') await ammSwapETHForCredits(ammModal.pool.poolId, ammQty, minOut);
+                    else await ammSwapCreditsForETH(ammModal.pool.poolId, parseInt(ammQty), minOut);
                     showToast('✅ Swap successful!');
                   } catch (e) { showToast(`❌ ${e.reason||'Swap failed'}`, 'error'); }
                 }}>
