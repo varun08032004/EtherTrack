@@ -1,24 +1,26 @@
-// App.jsx — EtherTrack v8 PRODUCTION
+// App.jsx — EtherTrack v9
 // ─────────────────────────────────────────────────────────────────────────────
-// CHANGES vs v7:
+// CHANGES vs v8:
+//
+// [FIX-AUTH] handleLogin now correctly handles two separate login paths:
+//   1. Email/password → firebaseUser is null, dbUser comes from backend response
+//   2. Google/Facebook OAuth → firebaseUser is provided, firebase-sync sets cookies
 //
 // [INVITE-1] UserGuard saves invite token to sessionStorage before redirecting
 //            unauthenticated users to /signup?invite=1 instead of /login.
-//            New users can sign up first, then auto-accept the invite after login.
 //
 // [INVITE-2] handleLogin returns { dbUser, redirect } — Login.jsx uses the
 //            redirect value to navigate to /join-org after login if a pending
 //            invite token exists.
 //
-// [PLAN-GATE] Subscription tier locking retained from v7:
+// [PLAN-GATE] Subscription tier locking:
 //          FREE      — dashboard, carbon-credits, trading-history, wallet, profile/settings/notifications/billing
 //          STARTER   — + portfolio
 //          GROWTH    — + emission-tracking
-//          CORPORATE — + compliance, team (everything unlocked)
+//          CORPORATE — + compliance, team
 //
-// [KYC-1]  handleKycComplete sets kyc_status + kyc_tier (retained from v7)
-//
-// [PLAN-SYNC] Background poll every 5 mins retained from v7
+// [KYC-1]  handleKycComplete sets kyc_status + kyc_tier
+// [PLAN-SYNC] Background poll every 5 mins
 // ─────────────────────────────────────────────────────────────────────────────
 
 import React, {
@@ -34,7 +36,6 @@ import * as Sentry from '@sentry/react';
 import './App.css';
 import './index.css';
 
-// ── Eagerly loaded ────────────────────────────────────────────────────────────
 import Login             from './components/Login';
 import Signup            from './components/Signup';
 import Header            from './components/Header';
@@ -50,7 +51,6 @@ import { NotificationProvider } from './context/NotificationContext';
 import { PortfolioProvider }    from './context/PortfolioContext';
 import { authAPI }              from './services/api';
 
-// ── Lazily loaded ─────────────────────────────────────────────────────────────
 const Profile             = lazy(() => import('./components/Profile'));
 const EditProfile         = lazy(() => import('./components/EditProfile'));
 const EmissionTracking    = lazy(() => import('./components/EmissionTracking'));
@@ -102,7 +102,6 @@ const NotFound = lazy(() =>
   }))
 );
 
-// ── Constants ─────────────────────────────────────────────────────────────────
 const USER_CACHE_EXPIRY_MS = 24 * 60 * 60 * 1_000;
 const IS_DEV = process.env.NODE_ENV === 'development';
 
@@ -133,7 +132,6 @@ function readUserCache(email) {
   } catch { return null; }
 }
 
-// ── Subscription tier helpers ─────────────────────────────────────────────────
 const TIER_RANK = { free: 0, starter: 1, growth: 2, corporate: 3 };
 
 function getPlanTier(plan) {
@@ -196,7 +194,6 @@ const PLAN_INFO = {
   },
 };
 
-// ── Upgrade Modal ─────────────────────────────────────────────────────────────
 function UpgradeModal({ requiredPlan, onClose }) {
   const info = PLAN_INFO[requiredPlan];
   if (!info) return null;
@@ -272,7 +269,6 @@ function UpgradeModal({ requiredPlan, onClose }) {
   );
 }
 
-// ── Plan Gate ─────────────────────────────────────────────────────────────────
 function PlanGate({ requiredPlan, children }) {
   const { dbUser }                = useContext(AuthContext);
   const [showModal, setShowModal] = useState(false);
@@ -306,7 +302,6 @@ function PlanGate({ requiredPlan, children }) {
   );
 }
 
-// ── Shared UI ─────────────────────────────────────────────────────────────────
 function ComingSoon({ label }) {
   return (
     <div style={{ color: '#22c55e', fontFamily: 'monospace', padding: 40 }}>
@@ -333,7 +328,6 @@ function Lazy({ children }) {
   return <Suspense fallback={<FullPageSpinner />}>{children}</Suspense>;
 }
 
-// ── Error Boundary ────────────────────────────────────────────────────────────
 class ErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
@@ -378,10 +372,8 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-// ── Auth Context ──────────────────────────────────────────────────────────────
 export const AuthContext = createContext();
 
-// ── Route Guards ──────────────────────────────────────────────────────────────
 const AdminGuard = ({ dbUser, sessionChecked, children }) => {
   if (!sessionChecked)         return <FullPageSpinner />;
   if (!dbUser)                 return <Navigate to="/login"     replace />;
@@ -389,7 +381,6 @@ const AdminGuard = ({ dbUser, sessionChecked, children }) => {
   return children;
 };
 
-// [INVITE-1] UserGuard saves invite token + redirects new users to signup
 const UserGuard = ({ isAuthenticated, sessionChecked, children }) => {
   if (!sessionChecked) return <FullPageSpinner />;
   if (!isAuthenticated) {
@@ -404,7 +395,6 @@ const UserGuard = ({ isAuthenticated, sessionChecked, children }) => {
   return children;
 };
 
-// ── AppInner ──────────────────────────────────────────────────────────────────
 function AppInner() {
   const {
     isAuthenticated, sessionChecked,
@@ -445,13 +435,10 @@ function AppInner() {
         }}
       >
         <Routes>
-
-          {/* ── Public ── */}
           <Route path="/verify/:certId" element={<Lazy><VerifyCertificate /></Lazy>} />
           <Route path="/help"           element={<Lazy><Help /></Lazy>} />
           <Route path="/feedback"       element={<Lazy><Feedback /></Lazy>} />
 
-          {/* ── Root redirect ── */}
           <Route path="/" element={
             !isAuthenticated
               ? <Navigate to="/signup"    replace />
@@ -460,7 +447,6 @@ function AppInner() {
                 : <Navigate to="/dashboard" replace />
           } />
 
-          {/* ── Auth ── */}
           <Route path="/login" element={
             isAuthenticated
               ? <Navigate to={isAdmin ? '/admin' : '/dashboard'} replace />
@@ -472,18 +458,15 @@ function AppInner() {
               : <Signup />
           } />
 
-          {/* ── Admin ── */}
           <Route path="/admin"   element={<AdminGuard dbUser={dbUser} sessionChecked={sessionChecked}><AdminDashboard /></AdminGuard>} />
           <Route path="/admin/*" element={<AdminGuard dbUser={dbUser} sessionChecked={sessionChecked}><AdminDashboard /></AdminGuard>} />
 
-          {/* ── Join org — [INVITE-1] UserGuard handles token save + redirect ── */}
           <Route path="/join-org" element={
             <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
               <Lazy><JoinOrg /></Lazy>
             </UserGuard>
           } />
 
-          {/* ── KYC ── */}
           <Route path="/kyc" element={
             <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
               {kycCompleted
@@ -493,14 +476,12 @@ function AppInner() {
             </UserGuard>
           } />
 
-          {/* ── FREE: Dashboard ── */}
           <Route path="/dashboard" element={
             <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
               {isAdmin ? <Navigate to="/admin" replace /> : <Dashboard />}
             </UserGuard>
           } />
 
-          {/* ── FREE: Profile / settings / notifications / billing ── */}
           <Route path="/profile" element={
             <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
               <Lazy><Profile /></Lazy>
@@ -532,35 +513,30 @@ function AppInner() {
             </UserGuard>
           } />
 
-          {/* ── FREE: Marketplace ── */}
           <Route path="/carbon-credits" element={
             <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
               <Lazy><CarbonCredits /></Lazy>
             </UserGuard>
           } />
 
-          {/* ── FREE: Wallet ── */}
           <Route path="/wallet" element={
             <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
               <KYCGate><Lazy><Wallet /></Lazy></KYCGate>
             </UserGuard>
           } />
 
-          {/* ── FREE: Trading history ── */}
           <Route path="/trading-history" element={
             <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
               <KYCGate><Lazy><TradingHistory /></Lazy></KYCGate>
             </UserGuard>
           } />
 
-          {/* ── FREE: Transaction status ── */}
           <Route path="/transaction-status" element={
             <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
               <KYCGate><Lazy><TransactionStatus /></Lazy></KYCGate>
             </UserGuard>
           } />
 
-          {/* ── STARTER: Portfolio ── */}
           <Route path="/portfolio" element={
             <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
               <PlanGate requiredPlan="starter">
@@ -569,7 +545,6 @@ function AppInner() {
             </UserGuard>
           } />
 
-          {/* ── GROWTH: Emission tracking ── */}
           <Route path="/emission-tracking" element={
             <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
               <PlanGate requiredPlan="growth">
@@ -578,7 +553,6 @@ function AppInner() {
             </UserGuard>
           } />
 
-          {/* ── CORPORATE: Compliance ── */}
           <Route path="/compliance" element={
             <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
               <PlanGate requiredPlan="corporate">
@@ -587,23 +561,19 @@ function AppInner() {
             </UserGuard>
           } />
 
-          {/* ── ALL PAID: Team management ── */}
           <Route path="/team" element={
             <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
               <Lazy><TeamManagement /></Lazy>
             </UserGuard>
           } />
 
-          {/* ── 404 ── */}
           <Route path="*" element={<Lazy><NotFound /></Lazy>} />
-
         </Routes>
       </div>
     </>
   );
 }
 
-// ── App root ──────────────────────────────────────────────────────────────────
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [user,            setUser]            = useState(null);
@@ -624,7 +594,7 @@ function App() {
     localStorage.removeItem('activeEmail');
   }, []);
 
-  // Restore session on mount
+  // Restore session on mount by checking /api/auth/me (uses httpOnly cookie)
   useEffect(() => {
     const restoreSession = async () => {
       devLog('🔵 restoreSession: starting...');
@@ -650,13 +620,11 @@ function App() {
     restoreSession();
   }, []);
 
-  // Global logout event from API interceptor
   useEffect(() => {
     window.addEventListener('auth:logout', handleLogout);
     return () => window.removeEventListener('auth:logout', handleLogout);
   }, [handleLogout]);
 
-  // Cache safe display fields only
   useEffect(() => {
     if (user?.email) {
       localStorage.setItem('activeEmail', user.email);
@@ -664,7 +632,7 @@ function App() {
     }
   }, [user]);
 
-  // [PLAN-SYNC] Background poll every 5 mins — keeps subscription_plan fresh
+  // Background poll every 5 mins — keeps subscription_plan fresh
   useEffect(() => {
     if (!isAuthenticated) return;
     const POLL_MS = 5 * 60 * 1000;
@@ -688,18 +656,21 @@ function App() {
     return () => clearInterval(poll);
   }, [isAuthenticated]);
 
-  // [INVITE-2] handleLogin returns { dbUser, redirect }
-  // redirect = /join-org?token=xxx if pending invite token exists
+  // [FIX-AUTH] handleLogin handles two paths:
+  //   Path 1: Email/password — firebaseUser is null, dbUser is from backend response
+  //   Path 2: OAuth (Google/FB) — firebaseUser is provided, firebase-sync sets cookies
   const handleLogin = useCallback(async (userData, firebaseUser = null) => {
     setUser(userData);
-    localStorage.setItem('activeEmail', userData.email);
+    if (userData.email) localStorage.setItem('activeEmail', userData.email);
 
     let resolvedDbUser = null;
     let redirect       = null;
 
     if (firebaseUser) {
+      // OAuth path — get Firebase token and sync with backend
       try {
         const idToken = await firebaseUser.getIdToken();
+        devLog('🔑 Firebase idToken obtained, length:', idToken?.length);
         const res = await authAPI.syncUser({
           email:       firebaseUser.email,
           firebaseUid: firebaseUser.uid,
@@ -712,9 +683,10 @@ function App() {
           if (res.user.plan_selected) setPlanSelected(true);
         }
       } catch (e) {
-        devLog('Backend sync failed:', e?.message);
+        console.error('[handleLogin] Firebase sync failed:', e?.message);
       }
     } else if (userData.dbUser) {
+      // Email/password path — backend already set cookies, just use returned user
       resolvedDbUser = userData.dbUser;
       setDbUser(userData.dbUser);
       if (userData.dbUser.kyc_verified)  setKycCompleted(true);
@@ -723,17 +695,14 @@ function App() {
 
     setIsAuthenticated(true);
 
-    // Check for pending invite — return redirect so Login.jsx navigates correctly
     const pendingToken = sessionStorage.getItem('pending_invite_token');
     if (pendingToken) {
-      // Don't remove here — JoinOrg.js removes it after successful accept
       redirect = `/join-org?token=${pendingToken}`;
     }
 
     return { dbUser: resolvedDbUser, redirect };
   }, []);
 
-  // [KYC-1] also set kyc_status + kyc_tier so KYCGate unlocks on SSE push
   const handleKycComplete = useCallback((status, payload = {}) => {
     setKycCompleted(status);
     setDbUser((prev) => prev ? {

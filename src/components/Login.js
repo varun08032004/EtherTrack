@@ -1,16 +1,13 @@
 /**
  * Login.jsx — EtherTrack
- * Updated: invite token flow wired up
+ * FIX: Email/password login now calls backend directly (no Firebase for email auth)
+ * Firebase is only used for Google/Facebook OAuth
  */
 
 import React, { useState, useContext } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import {
-  signInWithEmailAndPassword,
   sendPasswordResetEmail,
-  setPersistence,
-  browserLocalPersistence,
-  browserSessionPersistence,
   signInWithPopup,
 } from "firebase/auth";
 import { FaEye, FaEyeSlash, FaGoogle, FaFacebook } from "react-icons/fa";
@@ -23,15 +20,10 @@ let Sentry = null;
 try { Sentry = require("@sentry/react"); } catch {}
 
 const getFriendlyError = (err) => {
-  switch (err.code) {
-    case "auth/invalid-credential":
-    case "auth/user-not-found":
-    case "auth/wrong-password":
-      return "Incorrect email or password.";
-    case "auth/too-many-requests":
-      return "Too many failed attempts. Reset your password or try later.";
-    case "auth/user-disabled":
-      return "This account has been disabled. Contact support.";
+  if (err?.error === "Invalid credentials" || err?.status === 401) return "Incorrect email or password.";
+  if (err?.error === "Email not verified"  || err?.status === 403) return "Please verify your email before logging in. Check your inbox.";
+  if (err?.error === "Account disabled")   return "This account has been disabled. Contact support.";
+  switch (err?.code) {
     case "auth/account-exists-with-different-credential":
       return "An account already exists with this email. Try a different sign-in method.";
     case "auth/popup-closed-by-user":
@@ -39,7 +31,7 @@ const getFriendlyError = (err) => {
     case "auth/popup-blocked":
       return "Popup blocked. Please allow popups for this site.";
     default:
-      return "Login failed. Please try again.";
+      return err?.error || err?.message || "Login failed. Please try again.";
   }
 };
 
@@ -60,7 +52,6 @@ const Login = () => {
   const startLoading  = (method) => { setLoading(true); setActiveMethod(method); clearMessages(); };
   const stopLoading   = ()       => { setLoading(false); setActiveMethod(""); };
 
-  // ── Resolve redirect after login ──────────────────────────────
   const resolveRedirect = (result) => {
     const dbUser = result?.dbUser || result;
     if (dbUser?.role === "admin") return "/admin";
@@ -68,7 +59,7 @@ const Login = () => {
     return "/dashboard";
   };
 
-  // ── Email/password login ──────────────────────────────────────
+  // ── Email/password login — calls backend directly, no Firebase ──
   const handleLoginSubmit = async (e) => {
     e?.preventDefault();
     const trimmedEmail = email.trim();
@@ -78,19 +69,22 @@ const Login = () => {
     }
     startLoading("email");
     try {
-      await setPersistence(auth, remember ? browserLocalPersistence : browserSessionPersistence);
-      const userCredential = await signInWithEmailAndPassword(auth, trimmedEmail, password);
-      const firebaseUser   = userCredential.user;
+      const data = await authAPI.login({ email: trimmedEmail, password });
 
-      const result = await handleLogin({ email: firebaseUser.email }, firebaseUser);
+      if (data?.requires2FA) {
+        navigate("/2fa-verify", { state: { tempToken: data.tempToken } });
+        return;
+      }
+
+      // Backend set httpOnly cookies — now set local React state
+      const result = await handleLogin({
+        email:  trimmedEmail,
+        dbUser: data?.user || null,
+      }, null); // null = no Firebase user for email/password
+
       showToast("✅ Welcome back!", "success");
       navigate(resolveRedirect(result), { replace: true });
     } catch (err) {
-      if (err?.status === 403 || err?.error === "Email not verified") {
-        setError("Please verify your email before logging in. Check your inbox.");
-        stopLoading();
-        return;
-      }
       if (!err.code) Sentry?.captureException(err);
       const msg = getFriendlyError(err);
       if (msg) setError(msg);
@@ -98,27 +92,11 @@ const Login = () => {
     }
   };
 
-  // ── Social login ──────────────────────────────────────────────
+  // ── Social login (Google / Facebook) — still uses Firebase ──
   const handleSocialLogin = async (provider, providerLabel) => {
     startLoading(providerLabel.toLowerCase());
     try {
       const cred = await signInWithPopup(auth, provider);
-      try {
-        await authAPI.syncUser(
-          {
-            email:         cred.user.email,
-            firebaseUid:   cred.user.uid,
-            fullName:      cred.user.displayName || "",
-            provider:      providerLabel.toLowerCase(),
-            emailVerified: cred.user.emailVerified,
-          },
-          await cred.user.getIdToken()
-        );
-      } catch (syncErr) {
-        console.error("Backend sync failed:", syncErr.message);
-        showToast("⚠ Signed in but profile sync failed. Some features may be limited.", "warning");
-      }
-
       const result = await handleLogin({ email: cred.user.email }, cred.user);
       showToast("✅ Welcome back!", "success");
       navigate(resolveRedirect(result), { replace: true });
@@ -130,7 +108,7 @@ const Login = () => {
     }
   };
 
-  // ── Forgot password ───────────────────────────────────────────
+  // ── Forgot password ──
   const handleForgotPassword = async () => {
     const trimmedEmail = email.trim();
     if (!trimmedEmail) { setError("Enter your email address first."); return; }
@@ -199,7 +177,6 @@ const Login = () => {
           <div className="et-auth-title">Welcome Back</div>
           <div className="et-auth-subtitle">SIGN IN TO YOUR ACCOUNT</div>
 
-          {/* Show invite banner if pending token exists */}
           {sessionStorage.getItem('pending_invite_token') && (
             <div className="et-invite-banner">
               🎉 Sign in to accept your team invitation
