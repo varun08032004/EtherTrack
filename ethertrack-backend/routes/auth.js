@@ -486,6 +486,9 @@ router.post('/logout', optionalAuth, async (req, res) => {
    FIREBASE SYNC
 ───────────────────────────────────────────────────────────────── */
 router.post('/firebase-sync', async (req, res) => {
+
+  console.log('[firebase-sync] auth header:', req.headers.authorization?.substring(0, 50) || 'MISSING');
+  console.log('[firebase-sync] origin:', req.headers.origin);
   const idToken = req.headers.authorization?.startsWith('Bearer ')
     ? req.headers.authorization.split(' ')[1]
     : null;
