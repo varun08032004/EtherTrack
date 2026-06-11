@@ -1,66 +1,155 @@
-// services/api.js — EtherTrack Frontend API Service
-const BASE = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+// src/services/api.js — EtherTrack
+// PRODUCTION HARDENED — v9
+// ─────────────────────────────────────────────────────────────────────────────
+// CHANGES vs v8:
+//
+// [API-PAT]       patAPI added — full PAT profile save/load including
+//                 energy_sources, auditor fields, escert_deficit
+// [API-CCTS]      cctsAPI added — profile, monthly GEI, ACVA, Grid India, forms
+// [API-BRSR]      brsrAPI added — environmental P6-E2/E3/E4, summary, forms
+// [API-AUDIT]     auditAPI added — verifiers, logs, verification statements
+// [API-REPORTS]   reportsAPI added — PDF generation centralised (was inline in component)
+// [API-SBTI]      sbtiAPI added — targets, progress
+// [API-PLAN]      actionPlanAPI added — 5-year plan, MRV calendar
+// [API-SUPPLIER]  supplierAPI added — supplier portal CRUD
+// [API-MULTI]     multiEntityAPI added — entity management, consolidated view
+// [API-NOTIF]     notificationsAPI added — was missing entirely
+//
+// All v8 fixes retained.
+// ─────────────────────────────────────────────────────────────────────────────
+'use strict';
 
-// ── Token storage ─────────────────────────────────────────────────
+const BASE            = process.env.REACT_APP_API_URL || '';
+const REQUEST_TIMEOUT = 60_000;
+
+// ── Token storage — no-ops (server sets httpOnly cookies) ─────────────────────
 export const tokenStorage = {
-  getAccess:  () => localStorage.getItem('et_access'),
-  getRefresh: () => localStorage.getItem('et_refresh'),
-  setTokens:  (access, refresh) => {
-    if (access)  localStorage.setItem('et_access',  access);
-    if (refresh) localStorage.setItem('et_refresh', refresh);
-  },
-  clear: () => {
-    localStorage.removeItem('et_access');
-    localStorage.removeItem('et_refresh');
+  getAccess  : () => null,
+  getRefresh : () => null,
+  setTokens  : () => {},
+  clear      : () => {
+    try { localStorage.removeItem('et_access');  } catch {}
+    try { localStorage.removeItem('et_refresh'); } catch {}
   },
 };
+
+// ── CSRF token — read from JS-readable cookie set by server ───────────────────
+function getCsrfToken() {
+  try {
+    const match = document.cookie.match(/(?:^|;\s*)XSRF-TOKEN=([^;]+)/);
+    return match ? decodeURIComponent(match[1]) : '';
+  } catch {
+    return '';
+  }
+}
+
+// ── CSRF seeder ───────────────────────────────────────────────────────────────
+let _csrfPromise = null;
+
+async function ensureCsrfCookie() {
+  if (getCsrfToken()) return;
+
+  if (!_csrfPromise) {
+    _csrfPromise = (async () => {
+      try {
+        const res = await fetch(`${BASE}/api/auth/csrf`, {
+          method: 'GET', credentials: 'include',
+        });
+        if (res.ok || res.status === 204) {
+          await new Promise(r => setTimeout(r, 30));
+        }
+      } catch {
+        // Non-fatal
+      } finally {
+        _csrfPromise = null;
+      }
+    })();
+  }
+
+  await _csrfPromise;
+}
+
+// ── Request timeout via AbortController ──────────────────────────────────────
+function withTimeout(ms) {
+  const ctrl = new AbortController();
+  const id   = setTimeout(() => ctrl.abort(), ms);
+  return { signal: ctrl.signal, clear: () => clearTimeout(id) };
+}
 
 let _loggingOut  = false;
 let _refreshing  = false;
 let _refreshWait = null;
 
-// ── Core fetch ────────────────────────────────────────────────────
+// ── Query string builder ──────────────────────────────────────────────────────
+function qs(params = {}) {
+  const filtered = Object.fromEntries(
+    Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== '')
+  );
+  const str = new URLSearchParams(filtered).toString();
+  return str ? '?' + str : '';
+}
+
+// ── Core fetch ────────────────────────────────────────────────────────────────
 export const apiFetch = async (path, options = {}, retry = true) => {
-  const isAuthRoute    = path.startsWith('/api/auth/');
-  const accessToken    = tokenStorage.getAccess();
-  const authHeader     = accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
+  const isAuthRoute = path.startsWith('/api/auth/');
+  const method      = (options.method || 'GET').toUpperCase();
+  const isFormData  = options.body instanceof FormData;
+  const isWrite     = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
 
-  const res = await fetch(`${BASE}${path}`, {
-    ...options,
-    credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...authHeader,
-      ...options.headers,
-    },
-  });
+  if (isWrite && !isAuthRoute) await ensureCsrfCookie();
 
+  const headers = {
+    ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
+    ...options.headers,
+  };
+
+  if (isWrite) {
+    const csrf = getCsrfToken();
+    if (csrf) headers['X-CSRF-Token'] = csrf;
+  }
+
+  const { signal, clear } = withTimeout(REQUEST_TIMEOUT);
+
+  let res;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      ...options, method, credentials: 'include', headers, signal,
+    });
+  } catch (err) {
+    clear();
+    if (err.name === 'AbortError')
+      throw Object.assign(new Error('Request timed out. Please try again.'), { status: 408 });
+    throw Object.assign(new Error('Network error. Check your connection.'), { status: 0 });
+  }
+  clear();
+
+  // Auto-refresh on 401
   if (res.status === 401 && retry && !isAuthRoute && !_loggingOut) {
     if (_refreshing && _refreshWait) {
       await _refreshWait;
       return apiFetch(path, options, false);
     }
+
     let resolveRefresh;
     _refreshing  = true;
     _refreshWait = new Promise(r => { resolveRefresh = r; });
+
     try {
-      const refreshToken = tokenStorage.getRefresh();
-      if (!refreshToken) throw new Error('No refresh token');
+      const { signal: rSig, clear: rClear } = withTimeout(REQUEST_TIMEOUT);
       const refreshRes = await fetch(`${BASE}/api/auth/refresh`, {
         method: 'POST', credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refreshToken }),
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
+        signal: rSig,
       });
+      rClear();
+
       if (refreshRes.ok) {
-        const d = await refreshRes.json().catch(() => ({}));
-        if (d.accessToken) tokenStorage.setTokens(d.accessToken, d.refreshToken);
-        resolveRefresh();
-        _refreshing = false; _refreshWait = null;
+        resolveRefresh(); _refreshing = false; _refreshWait = null;
         return apiFetch(path, options, false);
-      } else throw new Error('Refresh failed');
+      }
+      throw new Error('Refresh failed');
     } catch {
-      resolveRefresh?.();
-      _refreshing = false; _refreshWait = null;
+      resolveRefresh?.(); _refreshing = false; _refreshWait = null;
       if (!_loggingOut) {
         _loggingOut = true;
         tokenStorage.clear();
@@ -71,123 +160,628 @@ export const apiFetch = async (path, options = {}, retry = true) => {
     }
   }
 
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw { status: res.status, ...data };
+  if (res.status === 404) return null;
+
+  let data = {};
+  try { data = await res.json(); } catch {}
+
+  if (!res.ok) {
+    console.error('[apiFetch error]', res.status, JSON.stringify(data));
+    throw Object.assign(
+      new Error(data?.error || data?.message || data?.detail || `Request failed: ${res.status}`),
+      { status: res.status, ...data }
+    );
+  }
+
   return data;
 };
 
-// ══════════════════════════════════════════════════════════════════
+// ── Multipart fetch ───────────────────────────────────────────────────────────
+export const apiFetchMultipart = async (path, formData, options = {}) => {
+  await ensureCsrfCookie();
+  const csrf = getCsrfToken();
+  if (!csrf)
+    throw Object.assign(
+      new Error('Could not obtain CSRF token. Refresh the page and try again.'),
+      { status: 403 }
+    );
+
+  const { signal, clear } = withTimeout(REQUEST_TIMEOUT);
+  let res;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'X-CSRF-Token': csrf, ...options.headers },
+      body: formData, signal,
+    });
+  } catch (err) {
+    clear();
+    if (err.name === 'AbortError')
+      throw Object.assign(new Error('Upload timed out. Please try again.'), { status: 408 });
+    throw Object.assign(new Error('Network error. Check your connection.'), { status: 0 });
+  }
+  clear();
+
+  let data = {};
+  try { data = await res.json(); } catch {}
+  if (!res.ok)
+    throw Object.assign(
+      new Error(data?.error || data?.message || `Upload failed (${res.status})`),
+      { status: res.status, ...data }
+    );
+  return data;
+};
+
+// ── XHR multipart with progress events ───────────────────────────────────────
+export const apiFetchMultipartWithProgress = (path, formData, options = {}, onProgress) => {
+  let xhr;
+  const promise = (async () => {
+    await ensureCsrfCookie();
+    const csrf = getCsrfToken();
+    if (!csrf)
+      throw Object.assign(
+        new Error('Could not obtain CSRF token. Refresh the page and try again.'),
+        { status: 403 }
+      );
+
+    return new Promise((resolve, reject) => {
+      xhr = new XMLHttpRequest();
+
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable && typeof onProgress === 'function')
+          onProgress(Math.round((e.loaded / e.total) * 95));
+      });
+
+      xhr.addEventListener('load', () => {
+        if (typeof onProgress === 'function') onProgress(100);
+        let data = {};
+        try { data = JSON.parse(xhr.responseText); } catch {}
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(data);
+        } else {
+          reject(Object.assign(
+            new Error(data?.error || data?.message || `Upload failed (${xhr.status})`),
+            { status: xhr.status, ...data }
+          ));
+        }
+      });
+
+      xhr.addEventListener('error',   () => reject(Object.assign(new Error('Network error during upload.'), { status: 0 })));
+      xhr.addEventListener('abort',   () => reject(Object.assign(new Error('Upload cancelled.'), { status: 0 })));
+      xhr.addEventListener('timeout', () => reject(Object.assign(new Error('Upload timed out.'), { status: 408 })));
+
+      xhr.open('POST', `${BASE}${path}`);
+      xhr.timeout         = REQUEST_TIMEOUT;
+      xhr.withCredentials = true;
+      xhr.setRequestHeader('X-CSRF-Token', csrf);
+      if (options.headers) {
+        Object.entries(options.headers).forEach(([k, v]) => xhr.setRequestHeader(k, v));
+      }
+      xhr.send(formData);
+    });
+  })();
+
+  return { promise, abort: () => xhr?.abort() };
+};
+
+// ── Idempotent fetch ──────────────────────────────────────────────────────────
+export const apiFetchWithIdempotency = (path, options = {}, keyPrefix = 'req') => {
+  const key = `${keyPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return apiFetch(path, {
+    ...options,
+    headers: { ...options.headers, 'Idempotency-Key': key },
+  });
+};
+
+// ── SSE stream factory ────────────────────────────────────────────────────────
+export const openKycSseStream = ({ onApproved, onRejected, onError } = {}) => {
+  let es         = null;
+  let closed     = false;
+  let retries    = 0;
+  let retryTimer = null;
+
+  const connect = () => {
+    if (closed) return;
+    es = new EventSource(`${BASE}/api/kyc/stream`, { withCredentials: true });
+
+    es.addEventListener('message', (e) => {
+      retries = 0;
+      try {
+        const payload = JSON.parse(e.data);
+        if (payload.type === 'kyc.approved' && typeof onApproved === 'function') onApproved(payload);
+        if (payload.type === 'kyc.rejected' && typeof onRejected === 'function') onRejected(payload);
+      } catch {}
+    });
+
+    es.addEventListener('error', (err) => {
+      es.close(); es = null;
+      if (closed) return;
+      if (typeof onError === 'function') onError(err);
+      const base  = Math.min(3000 * Math.pow(2, retries), 90_000);
+      const delay = base + Math.random() * 2000;
+      retries    += 1;
+      retryTimer  = setTimeout(connect, delay);
+    });
+  };
+
+  connect();
+  return { close: () => { closed = true; clearTimeout(retryTimer); es?.close(); es = null; } };
+};
+
+// ── Safe wrapper ──────────────────────────────────────────────────────────────
+export const apiFetchStrict = async (path, options) => {
+  const result = await apiFetch(path, options);
+  if (result === null)
+    throw Object.assign(
+      new Error('Session expired or resource not found. Please log in again.'),
+      { status: 401 }
+    );
+  return result;
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// KYC
+// ══════════════════════════════════════════════════════════════════════════════
+export const kycAPI = {
+  submit: ({ fullName, idType, idNumber, phone, docIpfsHash }) =>
+    apiFetchWithIdempotency(
+      '/api/kyc/submit',
+      { method: 'POST', body: JSON.stringify({ fullName, idType, idNumber, phone, docIpfsHash }) },
+      'kyc-submit'
+    ),
+
+  status: () => apiFetch('/api/kyc/status'),
+
+  uploadDoc: (file, idToken, onProgress) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return apiFetchMultipartWithProgress(
+      '/api/ipfs/pin-kyc-doc',
+      formData,
+      { headers: { Authorization: `Bearer ${idToken}` } },
+      onProgress
+    );
+  },
+
+  openStream: (handlers) => openKycSseStream(handlers),
+
+  pending : (page = 0, size = 50) => apiFetch(`/api/kyc/pending${qs({ page, size })}`),
+  detail  : (id)                  => apiFetch(`/api/kyc/${id}`),
+  approve : (id, tier = 'full')   => apiFetch(`/api/kyc/${id}/approve`, { method: 'POST', body: JSON.stringify({ tier }) }),
+  reject  : (id, reason)          => apiFetch(`/api/kyc/${id}/reject`,  { method: 'POST', body: JSON.stringify({ reason }) }),
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
 // AUTH
-// ══════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 export const authAPI = {
-  register:    (body) => apiFetch('/api/auth/register',     { method:'POST', body:JSON.stringify(body) }),
-  verifyEmail: (body) => apiFetch('/api/auth/verify-email', { method:'POST', body:JSON.stringify(body) }),
+  register    : (body) => apiFetch('/api/auth/register',     { method: 'POST', body: JSON.stringify(body) }),
+  verifyEmail : (body) => apiFetch('/api/auth/verify-email', { method: 'POST', body: JSON.stringify(body) }),
+
   login: async (body) => {
-    const data = await apiFetch('/api/auth/login', { method:'POST', body:JSON.stringify(body) });
-    if (data?.accessToken) tokenStorage.setTokens(data.accessToken, data.refreshToken);
+    const data = await apiFetch('/api/auth/login', { method: 'POST', body: JSON.stringify(body) });
+    tokenStorage.clear();
     return data;
   },
-  syncUser: async (body) => {
-    const data = await apiFetch('/api/auth/firebase-sync', { method:'POST', body:JSON.stringify(body) });
-    if (data?.accessToken) tokenStorage.setTokens(data.accessToken, data.refreshToken);
+
+  syncUser: async (body, idToken) => {
+    await ensureCsrfCookie();
+    const data = await apiFetch('/api/auth/firebase-sync', {
+      method  : 'POST',
+      headers : idToken ? { Authorization: `Bearer ${idToken}` } : {},
+      body    : JSON.stringify(body),
+    });
+    tokenStorage.clear();
     return data;
   },
-  me:     () => apiFetch('/api/auth/me'),
-  logout: async () => {
-    try { await apiFetch('/api/auth/logout', { method:'POST' }); } catch {}
+
+  me     : () => apiFetch('/api/auth/me'),
+  logout : async () => {
+    try { await apiFetch('/api/auth/logout', { method: 'POST' }); } catch {}
     tokenStorage.clear();
   },
+
+  setup2FA       : ()                    => apiFetch('/api/auth/2fa/setup',        { method: 'POST' }),
+  verifySetup2FA : (token)               => apiFetch('/api/auth/2fa/verify-setup', { method: 'POST', body: JSON.stringify({ token }) }),
+  validate2FA    : (tempToken, totpCode) => apiFetch('/api/auth/2fa/validate',     { method: 'POST', body: JSON.stringify({ tempToken, totpCode }) }),
+  disable2FA     : (totpCode)            => apiFetch('/api/auth/2fa/disable',      { method: 'POST', body: JSON.stringify({ totpCode }) }),
 };
 
-// ══════════════════════════════════════════════════════════════════
-// WALLET  — MetaMask binding (existing) + INR wallet (new)
-// ══════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+// WALLET
+// ══════════════════════════════════════════════════════════════════════════════
 export const walletAPI = {
-  // ── MetaMask binding (unchanged) ──
-  challenge: ()     => apiFetch('/api/wallet/challenge'),
-  bind:      (body) => apiFetch('/api/wallet/bind',  { method:'POST', body:JSON.stringify(body) }),
-  status:    ()     => apiFetch('/api/wallet/status'),
-  syncKYC:   (body) => apiFetch('/api/wallet/kyc',   { method:'POST', body:JSON.stringify(body) }),
-
-  // ── INR Wallet (new) ──
-
-  // Get balance + last 20 transactions
-  getBalance: () => apiFetch('/api/wallet/balance'),
-
-  // Step 1: Create Razorpay order before opening payment popup
-  createDepositOrder: (amount, method = 'upi') =>
-    apiFetch('/api/wallet/deposit/create-order', {
-      method: 'POST',
-      body: JSON.stringify({ amount, method }),
-    }),
-
-  // Step 2: Verify payment after Razorpay popup closes successfully
-  verifyDeposit: (body) =>
-    apiFetch('/api/wallet/deposit/verify', {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
-
-  // Withdraw to bank account
-  withdraw: (body) =>
-    apiFetch('/api/wallet/withdraw', {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
-
-  // Full transaction history
-  getTransactions: () => apiFetch('/api/wallet/transactions'),
-
-  // Deduct INR balance when buying a credit
-  tradeDeduct: (body) =>
-    apiFetch('/api/wallet/trade-deduct', {
-      method: 'POST',
-      body:   JSON.stringify(body),
-    }),
-
-  // Refund INR if MetaMask rejected after deduction
-  refundTrade: (body) =>
-    apiFetch('/api/wallet/trade-refund', {
-      method: 'POST',
-      body:   JSON.stringify(body),
-    }),
-
-  // ── Bank accounts (persistent in DB) ──
-  getBankAccounts:    ()     => apiFetch('/api/wallet/bank-accounts'),
-  addBankAccount:     (body) => apiFetch('/api/wallet/bank-accounts',           { method:'POST',   body:JSON.stringify(body) }),
-  setDefaultAccount:  (id)   => apiFetch(`/api/wallet/bank-accounts/${id}/default`, { method:'PUT' }),
-  deleteBankAccount:  (id)   => apiFetch(`/api/wallet/bank-accounts/${id}`,     { method:'DELETE' }),
+  challenge  : ()     => apiFetch('/api/wallet/challenge'),
+  bind       : (body) => apiFetch('/api/wallet/bind',   { method: 'POST', body: JSON.stringify(body) }),
+  status     : ()     => apiFetch('/api/wallet/status'),
+  syncKYC    : (body) => apiFetch('/api/wallet/kyc',    { method: 'POST', body: JSON.stringify(body) }),
+  getBalance      : ()       => apiFetch('/api/wallet/balance'),
+  getTransactions : (p = {}) => apiFetch(`/api/wallet/transactions${qs(p)}`),
+  getEthRate      : ()       => apiFetch('/api/wallet/eth-inr-rate'),
+  getLimits       : ()       => apiFetch('/api/wallet/limits'),
+  createDepositOrder : (amount, method = 'upi') => apiFetch('/api/wallet/deposit/create-order', { method: 'POST', body: JSON.stringify({ amount, method }) }),
+  verifyDeposit      : (body) => apiFetch('/api/wallet/deposit/verify', { method: 'POST', body: JSON.stringify(body) }),
+  withdraw           : (body) => apiFetch('/api/wallet/withdraw',       { method: 'POST', body: JSON.stringify(body) }),
+  tradeDeduct        : (body) => apiFetch('/api/wallet/trade-deduct',   { method: 'POST', body: JSON.stringify(body) }),
+  refundTrade        : (body) => apiFetch('/api/wallet/trade-refund',   { method: 'POST', body: JSON.stringify(body) }),
+  getBankAccounts    : ()     => apiFetch('/api/wallet/bank-accounts'),
+  addBankAccount     : (body) => apiFetch('/api/wallet/bank-accounts',               { method: 'POST',   body: JSON.stringify(body) }),
+  setDefaultAccount  : (id)   => apiFetch(`/api/wallet/bank-accounts/${id}/default`, { method: 'PUT' }),
+  deleteBankAccount  : (id)   => apiFetch(`/api/wallet/bank-accounts/${id}`,         { method: 'DELETE' }),
 };
 
-// ══════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+// SUBSCRIPTION
+// ══════════════════════════════════════════════════════════════════════════════
+export const subscriptionAPI = {
+  getPrices: () =>
+    apiFetch('/api/subscription/prices'),
+
+  selectFree: () =>
+    apiFetch('/api/subscription/free', { method: 'POST' }),
+
+  createOrder: (planKey, cycle = 'monthly', idempotencyKey) =>
+    apiFetch('/api/subscription/order', {
+      method: 'POST',
+      body:   JSON.stringify({ plan: planKey, cycle, idempotency_key: idempotencyKey }),
+    }),
+
+  verifyAndActivate: (planKey, cycle, razorpayResponse, gstDetails = {}) =>
+    apiFetch('/api/subscription/verify', {
+      method: 'POST',
+      body:   JSON.stringify({
+        plan:                planKey,
+        cycle,
+        razorpay_order_id:   razorpayResponse.razorpay_order_id,
+        razorpay_payment_id: razorpayResponse.razorpay_payment_id,
+        razorpay_signature:  razorpayResponse.razorpay_signature,
+        gstin:               gstDetails.gstin || undefined,
+        pan:                 gstDetails.pan   || undefined,
+      }),
+    }),
+
+  payWithWallet: (planKey, cycle, idempotencyKey, gstDetails = {}) =>
+    apiFetch('/api/subscription/wallet-pay', {
+      method: 'POST',
+      body:   JSON.stringify({
+        plan:            planKey,
+        cycle,
+        idempotency_key: idempotencyKey,
+        gstin:           gstDetails.gstin || undefined,
+        pan:             gstDetails.pan   || undefined,
+      }),
+    }),
+
+  payWithMetaMask: (planKey, cycle, walletAddress, signature, message, gstDetails = {}) =>
+    apiFetch('/api/subscription/metamask-pay', {
+      method: 'POST',
+      body:   JSON.stringify({
+        plan:           planKey,
+        cycle,
+        wallet_address: walletAddress,
+        signature,
+        message,
+        gstin:          gstDetails.gstin || undefined,
+        pan:            gstDetails.pan   || undefined,
+      }),
+    }),
+
+  getHistory: ({ limit = 20, cursor } = {}) =>
+    apiFetch(
+      `/api/subscription/history?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+    ),
+
+  getCurrentPlan: () =>
+    apiFetch('/api/org/plan'),
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
 // REGISTRY
-// ══════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 export const registryAPI = {
-  getProjects:   (p={}) => apiFetch('/api/registry/projects?'+new URLSearchParams(p)),
-  getProject:    (id)   => apiFetch(`/api/registry/projects/${id}`),
-  myProjects:    ()     => apiFetch('/api/registry/my-projects'),
-  getBatch:      (tid)  => apiFetch(`/api/registry/batches/token/${tid}`),
-  createBatch:   (body) => apiFetch('/api/registry/batches',                { method:'POST', body:JSON.stringify(body) }),
-  tokeniseBatch: (id,b) => apiFetch(`/api/registry/batches/${id}/tokenise`, { method:'POST', body:JSON.stringify(b) }),
+  getProjects   : (p = {}) => apiFetch(`/api/registry/projects${qs(p)}`),
+  getProject    : (id)     => apiFetch(`/api/registry/projects/${id}`),
+  myProjects    : ()       => apiFetch('/api/registry/my-projects'),
+  getBatch      : (tid)    => apiFetch(`/api/registry/batches/token/${tid}`),
+  createBatch   : (body)   => apiFetch('/api/registry/batches',                { method: 'POST', body: JSON.stringify(body) }),
+  tokeniseBatch : (id, b)  => apiFetch(`/api/registry/batches/${id}/tokenise`, { method: 'POST', body: JSON.stringify(b) }),
 };
 
-// ══════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 // TRANSACTIONS
-// ══════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 export const txAPI = {
-  getMy:            ()     => apiFetch('/api/transactions/my'),
-  getStats:         ()     => apiFetch('/api/transactions/stats'),
-  sync:             (body) => apiFetch('/api/transactions/sync',        { method:'POST', body:JSON.stringify(body) }),
-  getRetirements:   ()     => apiFetch('/api/transactions/retirements'),
-  recordRetirement: (body) => apiFetch('/api/transactions/retirements', { method:'POST', body:JSON.stringify(body) }),
-  getCertificate:   (cid)  => apiFetch(`/api/transactions/retirements/${cid}`),
+  getMy            : ()        => apiFetch('/api/transactions/my'),
+  getStats         : ()        => apiFetch('/api/transactions/stats'),
+  sync             : (body)    => apiFetch('/api/transactions/sync',            { method: 'POST', body: JSON.stringify(body) }),
+  getRetirements   : (p = {})  => apiFetch(`/api/transactions/retirements${qs(p)}`),
+  recordRetirement : (body)    => apiFetch('/api/transactions/retirements',     { method: 'POST', body: JSON.stringify(body) }),
+  recordPurchase   : (body)    => apiFetch('/api/transactions/record-purchase', { method: 'POST', body: JSON.stringify(body) }),
+  getCertificate   : (cid)     => apiFetch(`/api/transactions/retirements/${cid}`),
 };
 
-// ══════════════════════════════════════════════════════════════════
-// EMISSIONS
-// ══════════════════════════════════════════════════════════════════
-export const emissionsAPI = {
-  getMy:  ()         => apiFetch('/api/emissions/my'),
-  create: (body)     => apiFetch('/api/emissions',       { method:'POST', body:JSON.stringify(body) }),
-  update: (id, body) => apiFetch(`/api/emissions/${id}`, { method:'PUT',  body:JSON.stringify(body) }),
+// ══════════════════════════════════════════════════════════════════════════════
+// TRADES
+// ══════════════════════════════════════════════════════════════════════════════
+export const tradesAPI = {
+  record  : (payload) => apiFetch('/api/trades/record',  { method: 'POST', body: JSON.stringify(payload) }),
+  history : (p = {})  => apiFetch(`/api/trades/history${qs(p)}`),
+  stats   : ()        => apiFetch('/api/trades/stats'),
+  myFees  : (p = {})  => apiFetch(`/api/trades/my-fees${qs(p)}`),
+  ethRate : ()        => apiFetch('/api/trades/eth-rate'),
 };
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MARKET
+// ══════════════════════════════════════════════════════════════════════════════
+export const marketAPI = {
+  listings     : (p = {}) => apiFetch(`/api/market/listings${qs(p)}`),
+  buyOrders    : (p = {}) => apiFetch(`/api/market/buy-orders${qs(p)}`),
+  tradeHistory : (p = {}) => apiFetch(`/api/market/trade-history${qs(p)}`),
+  stats        : ()       => apiFetch('/api/market/stats'),
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EMISSIONS
+// ══════════════════════════════════════════════════════════════════════════════
+export const emissionsAPI = {
+  getMy          : ()        => apiFetch('/api/emissions/my'),
+  getActivities  : (p = {})  => apiFetch(`/api/emissions/activities${qs(p)}`),
+  log            : (body)    => apiFetch('/api/emissions/log',     { method: 'POST', body: JSON.stringify(body) }),
+  bulk           : (records) => apiFetch('/api/emissions/bulk',    { method: 'POST', body: JSON.stringify({ records }) }),
+  getSummary     : (year)    => apiFetch(`/api/emissions/summary${qs({ year })}`),
+  getProfile     : ()        => apiFetch('/api/emissions/profile'),
+  saveProfile    : (body)    => apiFetch('/api/emissions/profile', { method: 'POST', body: JSON.stringify(body) }),
+  deleteActivity : (id)      => apiFetch(`/api/emissions/activities/${id}`, { method: 'DELETE' }),
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PORTFOLIO
+// ══════════════════════════════════════════════════════════════════════════════
+export const portfolioAPI = {
+  myCredits     : (p = {}) => apiFetch(`/api/portfolio/my-credits${qs(p)}`),
+  myPurchases   : (p = {}) => apiFetch(`/api/portfolio/my-bought-credits${qs(p)}`),
+  mySubmissions : (p = {}) => apiFetch(`/api/portfolio/my-submissions${qs(p)}`),
+  kycStatus     : ()       => apiFetch('/api/portfolio/kyc-status'),
+  emissionsSummary         : (year)   => apiFetch(`/api/portfolio/emissions-summary${qs({ year })}`),
+  checkDuplicateRetirement : (serial) => apiFetch(`/api/portfolio/check-duplicate-retirement${qs({ serial })}`),
+  submitCredit             : (data)   => apiFetch('/api/portfolio/submit-credit',     { method: 'POST',   body: JSON.stringify(data) }),
+  cancelSubmission         : (id)     => apiFetch(`/api/portfolio/submissions/${id}`, { method: 'DELETE' }),
+  getWatchlist             : ()       => apiFetch('/api/portfolio/watchlist'),
+  addToWatchlist           : (lid)    => apiFetch('/api/portfolio/watchlist',        { method: 'POST',   body: JSON.stringify({ listingId: lid }) }),
+  removeFromWatchlist      : (lid)    => apiFetch(`/api/portfolio/watchlist/${lid}`, { method: 'DELETE' }),
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ORG
+// ══════════════════════════════════════════════════════════════════════════════
+export const orgAPI = {
+  me               : ()                   => apiFetch('/api/org/me'),
+  members          : (orgId)              => apiFetch(`/api/org/${orgId}/members`),
+  verifiers        : (orgId)              => apiFetch(`/api/org/${orgId}/verifiers`),
+  portfolioSummary : (orgId)              => apiFetch(`/api/org/${orgId}/portfolio-summary`),
+  auditLog         : (orgId, limit = 100) => apiFetch(`/api/org/${orgId}/audit-log${qs({ limit })}`),
+  retirementQueue  : (orgId)              => apiFetch(`/api/org/${orgId}/retirement-queue`),
+  submitRetirement  : (orgId, data)       => apiFetch(`/api/org/${orgId}/retirement-queue`,               { method: 'POST', body: JSON.stringify(data) }),
+  approveRetirement : (orgId, id)         => apiFetch(`/api/org/${orgId}/retirement-queue/${id}/approve`, { method: 'POST' }),
+  rejectRetirement  : (orgId, id, reason) => apiFetch(`/api/org/${orgId}/retirement-queue/${id}/reject`,  { method: 'POST', body: JSON.stringify({ reason }) }),
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [API-PAT] PAT SCHEME
+// Full payload including v2 fields: energy_sources, auditor_*, escert_deficit
+// ══════════════════════════════════════════════════════════════════════════════
+export const patAPI = {
+  getProfile: () =>
+    apiFetch('/api/pat/profile'),
+
+  saveProfile: (body) =>
+    apiFetch('/api/pat/profile', {
+      method: 'POST',
+      body:   JSON.stringify({
+        sector:               body.sector,
+        cycle:                body.cycle,
+        dc_name:              body.dc_name,
+        dc_number:            body.dc_number,
+        reporting_year:       body.reporting_year,
+        baseline_sec:         body.baseline_sec         ?? null,
+        target_sec:           body.target_sec           ?? null,
+        target_reduction_pct: body.target_reduction_pct ?? null,
+        gate_capacity:        body.gate_capacity        ?? null,
+        monthly_gj:           body.monthly_gj,
+        energy_sources:       body.energy_sources       ?? null,
+        current_sec:          body.current_sec          ?? null,
+        energy_saved_gj:      body.energy_saved_gj      ?? null,
+        escerts:              body.escerts              ?? 0,
+        escert_deficit:       body.escert_deficit       ?? 0,
+        auditor_name:         body.auditor_name         ?? null,
+        auditor_firm:         body.auditor_firm         ?? null,
+        auditor_reg_number:   body.auditor_reg_number   ?? null,
+        audit_date:           body.audit_date           ?? null,
+        audit_verified:       body.audit_verified       ?? false,
+      }),
+    }),
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [API-CCTS] CCTS COMPLIANCE
+// ══════════════════════════════════════════════════════════════════════════════
+export const cctsAPI = {
+  getProfile:  ()     => apiFetch('/api/ccts/profile'),
+  saveProfile: (body) => apiFetch('/api/ccts/profile', {
+    method: 'POST',
+    body:   JSON.stringify(body),
+  }),
+
+  getMonthlyData:  (year)       => apiFetch(`/api/ccts/monthly${qs({ year })}`),
+  saveMonthlyData: (year, body) => apiFetch('/api/ccts/monthly', {
+    method: 'POST',
+    body:   JSON.stringify({ year, ...body }),
+  }),
+
+  getAcvaStatus:     ()     => apiFetch('/api/ccts/acva/status'),
+  submitAcvaRequest: (body) => apiFetch('/api/ccts/acva/submit', {
+    method: 'POST',
+    body:   JSON.stringify(body),
+  }),
+
+  getRegistryStatus: ()     => apiFetch('/api/ccts/registry/status'),
+  submitToRegistry:  (body) => apiFetch('/api/ccts/registry/submit', {
+    method: 'POST',
+    body:   JSON.stringify(body),
+  }),
+
+  exportForm: (formType) => apiFetch(`/api/ccts/forms/${formType}/export`),
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [API-BRSR] BRSR ENVIRONMENTAL
+// P6-E2 (energy), P6-E3 (water), P6-E4 (waste)
+// ══════════════════════════════════════════════════════════════════════════════
+export const brsrAPI = {
+  getEnvironmental:  (year)        => apiFetch(`/api/brsr/environmental${qs({ year })}`),
+  saveEnvironmental: (year, body)  => apiFetch('/api/brsr/environmental', {
+    method: 'POST',
+    body:   JSON.stringify({ year, ...body }),
+  }),
+
+  getSummary: (year) => apiFetch(`/api/brsr/summary${qs({ year })}`),
+
+  getForm:  (formCode, year)       => apiFetch(`/api/brsr/forms/${formCode}${qs({ year })}`),
+  saveForm: (formCode, year, body) => apiFetch(`/api/brsr/forms/${formCode}`, {
+    method: 'POST',
+    body:   JSON.stringify({ year, ...body }),
+  }),
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [API-AUDIT] AUDIT TRAIL
+// ══════════════════════════════════════════════════════════════════════════════
+export const auditAPI = {
+  getVerifiers:    (year)       => apiFetch(`/api/audit/verifiers${qs({ year })}`),
+  requestVerifier: (body)       => apiFetch('/api/audit/verifiers', {
+    method: 'POST',
+    body:   JSON.stringify(body),
+  }),
+  updateVerifier:  (id, body)   => apiFetch(`/api/audit/verifiers/${id}`, {
+    method: 'PATCH',
+    body:   JSON.stringify(body),
+  }),
+  removeVerifier:  (id)         => apiFetch(`/api/audit/verifiers/${id}`, { method: 'DELETE' }),
+
+  getLogs:  (p = {}) => apiFetch(`/api/audit/logs${qs(p)}`),
+  getLog:   (id)     => apiFetch(`/api/audit/logs/${id}`),
+
+  getStatements:   (year)     => apiFetch(`/api/audit/statements${qs({ year })}`),
+  uploadStatement: (formData) => apiFetchMultipart('/api/audit/statements', formData),
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [API-REPORTS] REPORTS — PDF generation
+// Returns raw fetch Response so caller can stream blob + read headers
+// (X-Audit-Hash, Content-Disposition)
+// ══════════════════════════════════════════════════════════════════════════════
+export const reportsAPI = {
+  generate: async (payload) => {
+    await ensureCsrfCookie();
+    const res = await fetch(`${BASE}/api/reports/generate`, {
+      method:      'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': getCsrfToken(),
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      let errMsg = `Server error ${res.status}`;
+      try { const j = await res.json(); errMsg = j.error || errMsg; } catch {}
+      throw Object.assign(new Error(errMsg), { status: res.status });
+    }
+
+    return res;
+  },
+
+  generateGEI: (payload) =>
+    apiFetch('/api/reports/gei', {
+      method: 'POST',
+      body:   JSON.stringify(payload),
+    }),
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [API-SBTI] SBTi TARGETS
+// ══════════════════════════════════════════════════════════════════════════════
+export const sbtiAPI = {
+  getTargets:  ()     => apiFetch('/api/sbti/targets'),
+  saveTargets: (body) => apiFetch('/api/sbti/targets', {
+    method: 'POST',
+    body:   JSON.stringify(body),
+  }),
+  getProgress: (year) => apiFetch(`/api/sbti/progress${qs({ year })}`),
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [API-PLAN] 5-YEAR ACTION PLAN
+// ══════════════════════════════════════════════════════════════════════════════
+export const actionPlanAPI = {
+  getPlan:  ()     => apiFetch('/api/action-plan'),
+  savePlan: (body) => apiFetch('/api/action-plan', {
+    method: 'POST',
+    body:   JSON.stringify(body),
+  }),
+
+  getMRVCalendar:  ()     => apiFetch('/api/action-plan/mrv-calendar'),
+  saveMRVCalendar: (body) => apiFetch('/api/action-plan/mrv-calendar', {
+    method: 'POST',
+    body:   JSON.stringify(body),
+  }),
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [API-SUPPLIER] SUPPLIER PORTAL
+// ══════════════════════════════════════════════════════════════════════════════
+export const supplierAPI = {
+  getSuppliers:     (p = {})    => apiFetch(`/api/suppliers${qs(p)}`),
+  getSupplier:      (id)        => apiFetch(`/api/suppliers/${id}`),
+  inviteSupplier:   (body)      => apiFetch('/api/suppliers/invite', {
+    method: 'POST',
+    body:   JSON.stringify(body),
+  }),
+  saveSupplierData: (id, body)  => apiFetch(`/api/suppliers/${id}/data`, {
+    method: 'POST',
+    body:   JSON.stringify(body),
+  }),
+  getSupplierData:  (id, year)  => apiFetch(`/api/suppliers/${id}/data${qs({ year })}`),
+  removeSupplier:   (id)        => apiFetch(`/api/suppliers/${id}`, { method: 'DELETE' }),
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [API-MULTI] MULTI-ENTITY
+// ══════════════════════════════════════════════════════════════════════════════
+export const multiEntityAPI = {
+  getEntities:      ()           => apiFetch('/api/multi-entity/entities'),
+  addEntity:        (body)       => apiFetch('/api/multi-entity/entities', {
+    method: 'POST',
+    body:   JSON.stringify(body),
+  }),
+  removeEntity:     (id)         => apiFetch(`/api/multi-entity/entities/${id}`, { method: 'DELETE' }),
+  getConsolidated:  (year)       => apiFetch(`/api/multi-entity/consolidated${qs({ year })}`),
+  saveConsolidated: (year, body) => apiFetch('/api/multi-entity/consolidated', {
+    method: 'POST',
+    body:   JSON.stringify({ year, ...body }),
+  }),
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [API-NOTIF] NOTIFICATIONS
+// ══════════════════════════════════════════════════════════════════════════════
+export const notificationsAPI = {
+  getAll:      (p = {}) => apiFetch(`/api/notifications${qs(p)}`),
+  markRead:    (id)     => apiFetch(`/api/notifications/${id}/read`,  { method: 'PATCH' }),
+  markAllRead: ()       => apiFetch('/api/notifications/read-all',    { method: 'PATCH' }),
+  deleteOne:   (id)     => apiFetch(`/api/notifications/${id}`,       { method: 'DELETE' }),
+};
+
+export default apiFetch;

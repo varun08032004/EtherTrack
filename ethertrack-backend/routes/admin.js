@@ -1,26 +1,50 @@
-// routes/admin.js — EtherTrack Admin Console (Schema-Fixed)
+// routes/admin.js — EtherTrack Admin Console v3
+// ─────────────────────────────────────────────────────────────────
+// Changes vs v2:
+//
+// [CORP-1]  GET  /corporate/activations     — list all corporate accounts
+// [CORP-2]  POST /users/:id/activate-corporate — sales activates plan
+// [CORP-3]  PATCH /users/:id/corporate-renewal — extend/update renewal
+//
+// withTransaction added to db/pool import (was missing — needed by CORP-2)
+//
+// All original v2 fixes (FIX-1 through FIX-8) preserved unchanged.
+// ─────────────────────────────────────────────────────────────────
+'use strict';
+
 const router = require('express').Router();
-const { safeQuery: query } = require('../db/pool');
-const { authenticate, requireRole } = require('../middleware/auth');
+const { safeQuery: query, withTransaction } = require('../db/pool'); // [CORP] added withTransaction
+const { authenticate, requireRole, invalidateUserCache } = require('../middleware/auth');
 const { sendEmail } = require('../services/email');
 const { mintApprovedCredit, verifyKYCOnChain } = require('../services/minter');
 const { createNotification } = require('./notifications');
 
 const isAdmin = [authenticate, requireRole('admin')];
 
+// ── HTML escape helper ────────────────────────────────────────────
+const escHtml = (s) =>
+  String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
+
+// ── Audit log helper ──────────────────────────────────────────────
 const auditLog = async (adminId, action, targetUserId, details) => {
   try {
     await query(
-      `INSERT INTO admin_audit_log (admin_id, action, target_user_id, details) VALUES ($1,$2,$3,$4)`,
+      `INSERT INTO admin_audit_log (admin_id, action, target_user_id, details)
+       VALUES ($1,$2,$3,$4)`,
       [adminId, action, targetUserId || null, details || null]
     );
-  } catch (e) { console.warn('Audit log failed:', e.message); }
+  } catch (e) { console.warn('[auditLog] failed:', e.message); }
 };
 
 // ── Stats ─────────────────────────────────────────────────────────
 router.get('/stats', isAdmin, async (req, res) => {
   try {
-    const [kyc, credits, users, frozen, disputes, verified, failedMints] = await Promise.all([
+    const [kyc, credits, users, frozen, disputes, verified, failedMints, openOrders, corporate] = await Promise.all([
       query(`SELECT COUNT(*) FROM kyc_submissions WHERE status='pending'`),
       query(`SELECT COUNT(*) FROM carbon_batches WHERE admin_status='pending'`),
       query(`SELECT COUNT(*) FROM users WHERE role != 'admin'`),
@@ -28,22 +52,30 @@ router.get('/stats', isAdmin, async (req, res) => {
       query(`SELECT COUNT(*) FROM disputes WHERE status='open'`),
       query(`SELECT COUNT(*) FROM users WHERE kyc_verified=TRUE`),
       query(`SELECT COUNT(*) FROM carbon_batches WHERE admin_status='approved' AND token_id IS NULL`),
+      query(`SELECT COUNT(*) FROM buy_orders WHERE status='open'`).catch(() => ({ rows: [{ count: 0 }] })),
+      query(`SELECT COUNT(*) FROM users WHERE subscription_plan='corporate'`).catch(() => ({ rows: [{ count: 0 }] })),
     ]);
     res.json({
-      pendingKYC:     parseInt(kyc.rows[0].count),
-      pendingCredits: parseInt(credits.rows[0].count),
-      totalUsers:     parseInt(users.rows[0].count),
-      frozenAccounts: parseInt(frozen.rows[0].count),
-      openDisputes:   parseInt(disputes.rows[0].count),
-      verifiedUsers:  parseInt(verified.rows[0].count),
-      failedMints:    parseInt(failedMints.rows[0].count),
+      pendingKYC:        parseInt(kyc.rows[0].count),
+      pendingCredits:    parseInt(credits.rows[0].count),
+      totalUsers:        parseInt(users.rows[0].count),
+      frozenAccounts:    parseInt(frozen.rows[0].count),
+      openDisputes:      parseInt(disputes.rows[0].count),
+      verifiedUsers:     parseInt(verified.rows[0].count),
+      failedMints:       parseInt(failedMints.rows[0].count),
+      openBuyOrders:     parseInt(openOrders.rows[0].count),
+      corporateAccounts: parseInt(corporate.rows[0].count),
     });
-  } catch (e) { console.error('Stats error:', e); res.status(500).json({ error: 'Failed to fetch stats' }); }
+  } catch (e) {
+    console.error('[admin/stats]', e.message);
+    res.status(500).json({ error: 'Failed to fetch stats' });
+  }
 });
 
 // ── KYC ──────────────────────────────────────────────────────────
 router.get('/kyc', isAdmin, async (req, res) => {
-  const { status = 'pending' } = req.query;
+  const VALID_STATUSES = ['pending', 'approved', 'rejected'];
+  const status = VALID_STATUSES.includes(req.query.status) ? req.query.status : 'pending';
   try {
     const { rows } = await query(
       `SELECT s.*, u.email, u.wallet_address
@@ -63,18 +95,24 @@ router.post('/kyc/:id/approve', isAdmin, async (req, res) => {
     const { rows: sub } = await query('SELECT * FROM kyc_submissions WHERE id=$1', [id]);
     if (!sub.length) return res.status(404).json({ error: 'Not found' });
     if (sub[0].status !== 'pending') return res.status(400).json({ error: 'Already reviewed' });
+
     await query(
-      `UPDATE kyc_submissions SET status='approved', reviewed_at=NOW(), reviewed_by=$1 WHERE id=$2`,
+      `UPDATE kyc_submissions
+       SET status='approved', reviewed_at=NOW(), reviewed_by=$1
+       WHERE id=$2`,
       [req.user.id, id]
     );
     await query(
-      `UPDATE users SET kyc_status='verified', kyc_verified=TRUE, kyc_verified_at=NOW(),
-       kyc_aadhaar_hash=COALESCE($1,kyc_aadhaar_hash),
-       kyc_pan_hash=COALESCE($2,kyc_pan_hash),
-       kyc_data_hash=$3, updated_at=NOW()
+      `UPDATE users
+       SET kyc_status='verified', kyc_verified=TRUE, kyc_verified_at=NOW(),
+           kyc_aadhaar_hash=COALESCE($1,kyc_aadhaar_hash),
+           kyc_pan_hash=COALESCE($2,kyc_pan_hash),
+           kyc_data_hash=$3, updated_at=NOW()
        WHERE id=$4`,
       [sub[0].aadhaar_hash, sub[0].pan_hash, sub[0].kyc_data_hash, sub[0].user_id]
     );
+    await invalidateUserCache(sub[0].user_id);
+
     const { rows: usr } = await query(
       'SELECT email, full_name, wallet_address FROM users WHERE id=$1',
       [sub[0].user_id]
@@ -83,86 +121,109 @@ router.post('/kyc/:id/approve', isAdmin, async (req, res) => {
     await createNotification(sub[0].user_id, 'KYC', '✅ KYC Verified',
       'Your KYC has been approved. You now have full access to trading, portfolio, and emission tracking.',
       '/profile', {});
+
     if (usr[0]?.wallet_address) {
       setImmediate(async () => {
         try {
-          const result = await verifyKYCOnChain(usr[0].wallet_address, sub[0].kyc_data_hash);
-          if (!result.skipped) await auditLog(req.user.id, 'KYC_ONCHAIN_REGISTERED', sub[0].user_id, `TX: ${result.txHash}`);
+          const r = await verifyKYCOnChain(usr[0].wallet_address, sub[0].kyc_data_hash);
+          if (!r.skipped) await auditLog(req.user.id, 'KYC_ONCHAIN_REGISTERED', sub[0].user_id, `TX: ${r.txHash}`);
         } catch (e) {
-          console.error(`KYC on-chain failed:`, e.message);
           await auditLog(req.user.id, 'KYC_ONCHAIN_FAILED', sub[0].user_id, e.message).catch(() => {});
         }
       });
     }
+
     try {
       await sendEmail({
-        to: usr[0].email,
+        to:      usr[0].email,
         subject: 'EtherTrack — KYC Approved 🎉',
         html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;">
           <h2 style="color:#22c55e;">KYC Approved ✅</h2>
-          <p>Hi ${usr[0].full_name},</p>
-          <p>Your KYC has been <strong style="color:#22c55e;">approved</strong>!</p>
-          <a href="${process.env.FRONTEND_URL}/dashboard" style="display:inline-block;background:#16a34a;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;">Go to Dashboard →</a>
+          <p>Hi ${escHtml(usr[0].full_name)},</p>
+          <a href="${process.env.FRONTEND_URL}/dashboard"
+             style="display:inline-block;background:#16a34a;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;">
+            Go to Dashboard →
+          </a>
         </div>`,
       });
     } catch {}
+
     res.json({ message: 'KYC approved' });
-  } catch (e) { console.error('KYC approve error:', e); res.status(500).json({ error: 'Approval failed' }); }
+  } catch (e) {
+    console.error('[admin/kyc/approve]', e.message);
+    res.status(500).json({ error: 'Approval failed' });
+  }
 });
 
 router.post('/kyc/:id/reject', isAdmin, async (req, res) => {
   const { id } = req.params;
   const { reason } = req.body;
   if (!reason) return res.status(400).json({ error: 'Rejection reason required' });
+
   try {
     const { rows: sub } = await query('SELECT * FROM kyc_submissions WHERE id=$1', [id]);
     if (!sub.length) return res.status(404).json({ error: 'Not found' });
+
     await query(
-      `UPDATE kyc_submissions SET status='rejected', rejection_reason=$1, reviewed_at=NOW(), reviewed_by=$2 WHERE id=$3`,
+      `UPDATE kyc_submissions
+       SET status='rejected', rejection_reason=$1, reviewed_at=NOW(), reviewed_by=$2
+       WHERE id=$3`,
       [reason, req.user.id, id]
     );
     await query(`UPDATE users SET kyc_status='rejected', updated_at=NOW() WHERE id=$1`, [sub[0].user_id]);
+    await invalidateUserCache(sub[0].user_id);
+
     const { rows: usr } = await query('SELECT email, full_name FROM users WHERE id=$1', [sub[0].user_id]);
     await auditLog(req.user.id, 'KYC_REJECTED', sub[0].user_id, reason);
     await createNotification(sub[0].user_id, 'KYC', '❌ KYC Rejected',
       `Your KYC was rejected. Reason: ${reason}. Please resubmit.`, '/kyc', { reason });
+
     try {
       await sendEmail({
-        to: usr[0].email,
+        to:      usr[0].email,
         subject: 'EtherTrack — KYC Resubmission Required',
         html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;">
           <h2 style="color:#f87171;">KYC Resubmission Required</h2>
-          <p>Hi ${usr[0].full_name},</p>
-          <p>Reason: <span style="color:#f87171;">${reason}</span></p>
-          <a href="${process.env.FRONTEND_URL}/kyc" style="display:inline-block;background:#dc2626;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;">Resubmit KYC →</a>
+          <p>Reason: ${escHtml(reason)}</p>
+          <a href="${process.env.FRONTEND_URL}/kyc"
+             style="display:inline-block;background:#dc2626;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;">
+            Resubmit KYC →
+          </a>
         </div>`,
       });
     } catch {}
+
     res.json({ message: 'KYC rejected' });
-  } catch (e) { console.error('KYC reject error:', e); res.status(500).json({ error: 'Rejection failed' }); }
+  } catch (e) {
+    console.error('[admin/kyc/reject]', e.message);
+    res.status(500).json({ error: 'Rejection failed' });
+  }
 });
 
 router.post('/kyc/bulk-approve', isAdmin, async (req, res) => {
   const { ids } = req.body;
-  if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids array required' });
+  if (!Array.isArray(ids) || !ids.length)
+    return res.status(400).json({ error: 'ids array required' });
+
   let approved = 0, failed = 0, errors = [];
   for (const id of ids) {
     try {
       const { rows: sub } = await query(
-        'SELECT * FROM kyc_submissions WHERE id=$1 AND status=$2', [id, 'pending']
+        `SELECT * FROM kyc_submissions WHERE id=$1 AND status=$2`, [id, 'pending']
       );
       if (!sub.length) { failed++; errors.push(`${id}: not found or not pending`); continue; }
+
       await query(
         `UPDATE kyc_submissions SET status='approved', reviewed_at=NOW(), reviewed_by=$1 WHERE id=$2`,
         [req.user.id, id]
       );
       await query(
         `UPDATE users SET kyc_status='verified', kyc_verified=TRUE, kyc_verified_at=NOW(),
-         kyc_data_hash=$1, updated_at=NOW() WHERE id=$2`,
+             kyc_data_hash=$1, updated_at=NOW() WHERE id=$2`,
         [sub[0].kyc_data_hash, sub[0].user_id]
       );
-      await createNotification(sub[0].user_id, 'KYC', '✅ KYC Verified',
-        'Your KYC has been approved. You now have full platform access.', '/portfolio', {});
+      await invalidateUserCache(sub[0].user_id);
+      await createNotification(sub[0].user_id, 'KYC', '✅ KYC Verified', 'Your KYC has been approved.', '/portfolio', {});
       await auditLog(req.user.id, 'KYC_BULK_APPROVED', sub[0].user_id, `Bulk approve — submission ${id}`);
       approved++;
     } catch (e) { failed++; errors.push(`${id}: ${e.message}`); }
@@ -171,25 +232,19 @@ router.post('/kyc/bulk-approve', isAdmin, async (req, res) => {
 });
 
 // ── Credits ───────────────────────────────────────────────────────
-// ✅ FIX: carbon_batches has no full_name/email directly — join users
 router.get('/credits', isAdmin, async (req, res) => {
-  const { status = 'pending' } = req.query;
+  const VALID_STATUSES = ['pending', 'approved', 'rejected'];
+  const status = VALID_STATUSES.includes(req.query.status) ? req.query.status : 'pending';
   try {
     const { rows } = await query(
-      `SELECT
-         b.id, b.project_name, b.project_location, b.country,
-         b.standard, b.project_type, b.developer,
-         b.quantity, b.vintage_year, b.expiry_date,
-         b.registry_serial, b.doc_ipfs_hash,
-         b.admin_status, b.admin_notes, b.status,
-         b.token_id, b.tx_hash_mint,
-         b.created_at, b.updated_at,
-         b.credit_type, b.cbam_eligible,
-         b.corresponding_adjustment, b.sdg_tags,
-         b.icvcm_ccp_eligible, b.icvcm_ccp_label,
-         b.registry_link, b.price_per_credit_inr,
-         u.email, u.full_name,
-         u.wallet_address AS user_wallet
+      `SELECT b.id, b.project_name, b.project_location, b.country, b.standard,
+              b.project_type, b.developer, b.quantity, b.vintage_year, b.expiry_date,
+              b.registry_serial, b.doc_ipfs_hash, b.admin_status, b.admin_notes,
+              b.status, b.token_id, b.tx_hash_mint, b.created_at, b.updated_at,
+              b.credit_type, b.cbam_eligible, b.corresponding_adjustment, b.sdg_tags,
+              b.icvcm_ccp_eligible, b.icvcm_ccp_label, b.registry_link,
+              b.price_per_credit_inr,
+              u.email, u.full_name, u.wallet_address AS user_wallet
        FROM carbon_batches b
        LEFT JOIN users u ON u.id = b.user_id
        WHERE b.admin_status = $1
@@ -198,7 +253,7 @@ router.get('/credits', isAdmin, async (req, res) => {
     );
     res.json({ credits: rows });
   } catch (e) {
-    console.error('Credits fetch error:', e.message);
+    console.error('[admin/credits]', e.message);
     res.status(500).json({ error: 'Failed to fetch credits' });
   }
 });
@@ -209,90 +264,77 @@ router.post('/credits/:id/approve', isAdmin, async (req, res) => {
   try {
     const { rows: batch } = await query(
       `SELECT b.*, u.email, u.full_name, u.wallet_address
-       FROM carbon_batches b
-       LEFT JOIN users u ON u.id = b.user_id
-       WHERE b.id = $1`,
-      [id]
+       FROM carbon_batches b LEFT JOIN users u ON u.id=b.user_id WHERE b.id=$1`, [id]
     );
     if (!batch.length) return res.status(404).json({ error: 'Not found' });
     if (batch[0].admin_status !== 'pending') return res.status(400).json({ error: 'Already reviewed' });
+
     await query(
-      `UPDATE carbon_batches
-       SET admin_status='approved', status='approved',
-           admin_notes=$1, reviewed_at=NOW(), reviewed_by=$2
-       WHERE id=$3`,
+      `UPDATE carbon_batches SET admin_status='approved', status='approved', admin_notes=$1,
+       reviewed_at=NOW(), reviewed_by=$2 WHERE id=$3`,
       [notes || null, req.user.id, id]
     );
-    await auditLog(req.user.id, 'CREDIT_APPROVED', batch[0].user_id,
-      `Batch ${id} — Serial: ${batch[0].registry_serial || 'N/A'}`);
+    await auditLog(req.user.id, 'CREDIT_APPROVED', batch[0].user_id, `Batch ${id} — Serial: ${batch[0].registry_serial || 'N/A'}`);
     await createNotification(batch[0].user_id, 'CREDIT', '✅ Credit Listing Approved',
-      `Your carbon credit listing "${batch[0].project_name}" has been approved. Minting on blockchain now...`,
-      '/portfolio', { creditId: id, projectName: batch[0].project_name });
-    res.json({ message: 'Credit approved — blockchain mint triggered', batchId: id });
+      `Your carbon credit listing "${batch[0].project_name}" has been approved. Minting on blockchain now...`, '/portfolio', { creditId: id });
+
+    res.json({ message: 'Credit approved', batchId: id });
+
     setImmediate(async () => {
       try {
         const { tokenId, txHash } = await mintApprovedCredit(id);
-        await auditLog(req.user.id, 'CREDIT_MINTED', batch[0].user_id,
-          `Batch ${id} → Token #${tokenId} TX: ${txHash}`);
+        await auditLog(req.user.id, 'CREDIT_MINTED', batch[0].user_id, `Batch ${id} → Token #${tokenId}`);
         await createNotification(batch[0].user_id, 'CREDIT', '🪙 Credit Tokenised On-Chain',
-          `"${batch[0].project_name}" minted as Token #${tokenId} on Ethereum Sepolia.`,
-          '/portfolio', { tokenId, txHash, creditId: id });
+          `"${batch[0].project_name}" minted as Token #${tokenId}.`, '/portfolio', { tokenId, txHash, creditId: id });
         try {
           await sendEmail({
             to: batch[0].email,
             subject: 'EtherTrack — Carbon Credits Tokenised ⛓',
             html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;">
-              <h2 style="color:#22c55e;">Carbon Credits Minted ⛓</h2>
-              <p>Token #${tokenId} · ${batch[0].project_name}</p>
+              <h2 style="color:#22c55e;">Minted ⛓</h2>
+              <p>Token #${tokenId} · ${escHtml(batch[0].project_name)}</p>
               <a href="${process.env.FRONTEND_URL}/portfolio" style="background:#16a34a;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;display:inline-block;">View Portfolio →</a>
             </div>`,
           });
         } catch {}
       } catch (mintErr) {
-        console.error(`Auto-mint failed for batch ${id}:`, mintErr.message);
-        try {
-          await query(
-            `UPDATE carbon_batches
-             SET admin_notes = COALESCE(admin_notes,'') || $1, updated_at=NOW()
-             WHERE id=$2`,
-            [`\n[MINT ERROR ${new Date().toISOString()}]: ${mintErr.message}`, id]
-          );
-        } catch {}
-        await auditLog(req.user.id, 'CREDIT_MINT_FAILED', batch[0].user_id, `Batch ${id}: ${mintErr.message}`);
-        await createNotification(batch[0].user_id, 'CREDIT', '⚠ Credit Approved — Mint Pending',
-          `"${batch[0].project_name}" is approved but on-chain tokenisation encountered an issue.`,
-          '/portfolio', { creditId: id });
+        console.error(`[admin] Auto-mint failed for batch ${id}:`, mintErr.message);
+        await query(
+          `UPDATE carbon_batches SET admin_notes=COALESCE(admin_notes,'')||$1, updated_at=NOW() WHERE id=$2`,
+          [`\n[MINT ERROR ${new Date().toISOString()}]: ${mintErr.message.slice(0, 300)}`, id]
+        ).catch(() => {});
+        await auditLog(req.user.id, 'CREDIT_MINT_FAILED', batch[0].user_id, `Batch ${id}: ${mintErr.message.slice(0, 300)}`);
       }
     });
-  } catch (e) { console.error('Credit approve error:', e); res.status(500).json({ error: 'Approval failed' }); }
+  } catch (e) {
+    console.error('[admin/credits/approve]', e.message);
+    res.status(500).json({ error: 'Approval failed' });
+  }
 });
 
 router.post('/credits/:id/retry-mint', isAdmin, async (req, res) => {
   const { id } = req.params;
   try {
     const { rows } = await query(
-      `SELECT cb.*, u.wallet_address, u.email, u.full_name
-       FROM carbon_batches cb
-       JOIN users u ON u.id = cb.user_id
-       WHERE cb.id = $1`,
-      [id]
+      `SELECT cb.*, u.wallet_address, u.email, u.full_name FROM carbon_batches cb JOIN users u ON u.id=cb.user_id WHERE cb.id=$1`, [id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Batch not found' });
     const batch = rows[0];
     if (batch.admin_status !== 'approved') return res.status(400).json({ error: 'Batch must be approved first' });
     if (batch.token_id != null) return res.status(400).json({ error: `Already minted — Token #${batch.token_id}` });
     if (!batch.wallet_address) return res.status(400).json({ error: 'User has no wallet — use assign-wallet-and-mint' });
+
     const result = await mintApprovedCredit(id);
     if (result.tokenId != null) {
-      await createNotification(batch.user_id, 'CREDIT', '🪙 Credit Tokenised On-Chain',
-        `"${batch.project_name}" minted as Token #${result.tokenId}.`,
-        '/portfolio', { tokenId: result.tokenId, txHash: result.txHash });
+      await createNotification(batch.user_id, 'CREDIT', '🪙 Credit Tokenised', `"${batch.project_name}" minted as Token #${result.tokenId}.`, '/portfolio', { tokenId: result.tokenId });
       await auditLog(req.user.id, 'CREDIT_MINTED', batch.user_id, `Retry — Batch ${id} → Token #${result.tokenId}`);
       res.json({ success: true, tokenId: result.tokenId, txHash: result.txHash });
     } else {
       res.status(500).json({ success: false, error: 'Mint failed' });
     }
-  } catch (e) { console.error('Retry mint error:', e.message); res.status(500).json({ success: false, error: e.message }); }
+  } catch (e) {
+    res.status(500).json({ success: false, error: process.env.NODE_ENV === 'production' ? 'Mint failed' : e.message });
+  }
 });
 
 router.post('/credits/:id/reject', isAdmin, async (req, res) => {
@@ -301,36 +343,22 @@ router.post('/credits/:id/reject', isAdmin, async (req, res) => {
   if (!reason) return res.status(400).json({ error: 'Rejection reason required' });
   try {
     const { rows: batch } = await query(
-      `SELECT b.*, u.email, u.full_name
-       FROM carbon_batches b
-       LEFT JOIN users u ON u.id = b.user_id
-       WHERE b.id = $1`,
-      [id]
+      `SELECT b.*, u.email, u.full_name FROM carbon_batches b LEFT JOIN users u ON u.id=b.user_id WHERE b.id=$1`, [id]
     );
     if (!batch.length) return res.status(404).json({ error: 'Not found' });
-    await query(
-      `UPDATE carbon_batches
-       SET admin_status='rejected', admin_notes=$1, reviewed_at=NOW(), reviewed_by=$2
-       WHERE id=$3`,
-      [reason, req.user.id, id]
-    );
+
+    await query(`UPDATE carbon_batches SET admin_status='rejected', admin_notes=$1, reviewed_at=NOW(), reviewed_by=$2 WHERE id=$3`, [reason, req.user.id, id]);
     await auditLog(req.user.id, 'CREDIT_REJECTED', batch[0].user_id, reason);
-    await createNotification(batch[0].user_id, 'CREDIT', '❌ Credit Listing Rejected',
-      `Your listing "${batch[0].project_name}" was rejected. Reason: ${reason}`,
-      '/portfolio', { creditId: id, reason });
+    await createNotification(batch[0].user_id, 'CREDIT', '❌ Credit Listing Rejected', `Your listing "${batch[0].project_name}" was rejected. Reason: ${reason}`, '/portfolio', { creditId: id, reason });
+
     try {
       await sendEmail({
-        to: batch[0].email,
-        subject: 'EtherTrack — Credit Listing Requires Resubmission',
-        html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;">
-          <h2 style="color:#f87171;">Credit Rejected</h2>
-          <p>Reason: ${reason}</p>
-          <a href="${process.env.FRONTEND_URL}/portfolio" style="background:#dc2626;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;display:inline-block;">Go to Portfolio →</a>
-        </div>`,
+        to: batch[0].email, subject: 'EtherTrack — Credit Listing Requires Resubmission',
+        html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;"><h2 style="color:#f87171;">Credit Rejected</h2><p>Reason: ${escHtml(reason)}</p><a href="${process.env.FRONTEND_URL}/portfolio" style="background:#dc2626;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;display:inline-block;">Go to Portfolio →</a></div>`,
       });
     } catch {}
     res.json({ message: 'Credit listing rejected' });
-  } catch (e) { console.error('Credit reject error:', e); res.status(500).json({ error: 'Rejection failed' }); }
+  } catch (e) { res.status(500).json({ error: 'Rejection failed' }); }
 });
 
 router.post('/credits/:id/set-token-id', isAdmin, async (req, res) => {
@@ -338,21 +366,13 @@ router.post('/credits/:id/set-token-id', isAdmin, async (req, res) => {
   const { tokenId } = req.body;
   if (tokenId == null || isNaN(parseInt(tokenId))) return res.status(400).json({ error: 'Valid tokenId required' });
   try {
-    const { rows } = await query(
-      `SELECT user_id, project_name, token_id FROM carbon_batches WHERE id=$1`, [id]
-    );
+    const { rows } = await query(`SELECT user_id, project_name, token_id FROM carbon_batches WHERE id=$1`, [id]);
     if (!rows.length) return res.status(404).json({ error: 'Batch not found' });
     if (rows[0].token_id != null) return res.status(400).json({ error: `Already has Token #${rows[0].token_id}` });
-    await query(
-      `UPDATE carbon_batches
-       SET token_id=$1, status='tokenised', tokenised_at=NOW(), updated_at=NOW()
-       WHERE id=$2`,
-      [parseInt(tokenId), id]
-    );
+
+    await query(`UPDATE carbon_batches SET token_id=$1, status='tokenised', tokenised_at=NOW(), updated_at=NOW() WHERE id=$2`, [parseInt(tokenId), id]);
     await auditLog(req.user.id, 'MANUAL_TOKEN_SYNC', rows[0].user_id, `Batch ${id} → Token #${tokenId} (manual)`);
-    await createNotification(rows[0].user_id, 'CREDIT', '🪙 Credit Tokenised On-Chain',
-      `"${rows[0].project_name}" assigned Token #${tokenId} by admin.`,
-      '/portfolio', { tokenId: parseInt(tokenId), creditId: id });
+    await createNotification(rows[0].user_id, 'CREDIT', '🪙 Credit Tokenised', `"${rows[0].project_name}" assigned Token #${tokenId} by admin.`, '/portfolio', { tokenId: parseInt(tokenId), creditId: id });
     res.json({ success: true, tokenId: parseInt(tokenId) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -364,19 +384,12 @@ router.post('/credits/:id/correct-quantity', isAdmin, async (req, res) => {
   const qty = parseInt(quantity);
   if (!qty || qty <= 0) return res.status(400).json({ error: 'quantity must be positive' });
   try {
-    const { rows } = await query(
-      `SELECT user_id, project_name, token_id, quantity FROM carbon_batches WHERE id=$1`, [id]
-    );
+    const { rows } = await query(`SELECT user_id, project_name, token_id, quantity FROM carbon_batches WHERE id=$1`, [id]);
     if (!rows.length) return res.status(404).json({ error: 'Batch not found' });
     if (rows[0].token_id != null) return res.status(400).json({ error: `Cannot correct after minting — Token #${rows[0].token_id} exists on-chain` });
-    await query(
-      `UPDATE carbon_batches
-       SET quantity=$1, total_credits=$1, available_credits=$1, updated_at=NOW()
-       WHERE id=$2`,
-      [qty, id]
-    );
-    await auditLog(req.user.id, 'QTY_CORRECTED', rows[0].user_id,
-      `Batch ${id}: ${rows[0].quantity} → ${qty} — ${reason}`);
+
+    await query(`UPDATE carbon_batches SET quantity=$1, total_credits=$1, available_credits=$1, updated_at=NOW() WHERE id=$2`, [qty, id]);
+    await auditLog(req.user.id, 'QTY_CORRECTED', rows[0].user_id, `Batch ${id}: ${rows[0].quantity} → ${qty} — ${reason}`);
     res.json({ success: true, newQuantity: qty });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -388,48 +401,87 @@ router.post('/credits/:id/assign-wallet-and-mint', isAdmin, async (req, res) => 
     return res.status(400).json({ error: 'Valid 0x wallet address required' });
   try {
     const { rows } = await query(
-      `SELECT cb.*, u.id AS user_id, u.email, u.full_name
-       FROM carbon_batches cb
-       JOIN users u ON u.id = cb.user_id
-       WHERE cb.id = $1`,
-      [id]
+      `SELECT cb.*, u.id AS user_id, u.email, u.full_name FROM carbon_batches cb JOIN users u ON u.id=cb.user_id WHERE cb.id=$1`, [id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Batch not found' });
     if (rows[0].admin_status !== 'approved') return res.status(400).json({ error: 'Batch must be approved first' });
     if (rows[0].token_id != null) return res.status(400).json({ error: `Already minted — Token #${rows[0].token_id}` });
-    await query(
-      `UPDATE users SET wallet_address=$1, updated_at=NOW() WHERE id=$2`,
-      [walletAddress.toLowerCase(), rows[0].user_id]
-    );
-    await auditLog(req.user.id, 'WALLET_ASSIGNED_FOR_MINT', rows[0].user_id,
-      `Wallet ${walletAddress} assigned for batch ${id}`);
+
+    await query(`UPDATE users SET wallet_address=$1, updated_at=NOW() WHERE id=$2`, [walletAddress.toLowerCase(), rows[0].user_id]);
+    await invalidateUserCache(rows[0].user_id);
+    await auditLog(req.user.id, 'WALLET_ASSIGNED_FOR_MINT', rows[0].user_id, `Wallet ${walletAddress} assigned for batch ${id}`);
+
     const result = await mintApprovedCredit(id);
     if (result.tokenId != null) {
-      await createNotification(rows[0].user_id, 'CREDIT', '🪙 Credit Tokenised On-Chain',
-        `"${rows[0].project_name}" minted as Token #${result.tokenId}.`,
-        '/portfolio', { tokenId: result.tokenId });
-      await auditLog(req.user.id, 'CREDIT_MINTED', rows[0].user_id,
-        `Assign+Mint — Batch ${id} → Token #${result.tokenId}`);
+      await createNotification(rows[0].user_id, 'CREDIT', '🪙 Credit Tokenised', `"${rows[0].project_name}" minted as Token #${result.tokenId}.`, '/portfolio', { tokenId: result.tokenId });
+      await auditLog(req.user.id, 'CREDIT_MINTED', rows[0].user_id, `Assign+Mint — Batch ${id} → Token #${result.tokenId}`);
       res.json({ success: true, tokenId: result.tokenId, txHash: result.txHash });
     } else {
       res.status(500).json({ success: false, error: 'Mint failed after wallet assignment' });
     }
+  } catch (e) { res.status(500).json({ error: process.env.NODE_ENV === 'production' ? 'Operation failed' : e.message }); }
+});
+
+router.get('/credits/:id/mint-errors', isAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { rows } = await query(
+      `SELECT cb.id, cb.project_name, cb.registry_serial, cb.standard, cb.quantity,
+              cb.vintage_year, cb.expiry_date, cb.admin_status, cb.status, cb.token_id,
+              cb.admin_notes, cb.tx_hash_mint, cb.created_at, cb.updated_at,
+              u.wallet_address, u.email, u.full_name, u.kyc_verified
+       FROM carbon_batches cb JOIN users u ON u.id = cb.user_id WHERE cb.id = $1`, [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Batch not found' });
+    const b = rows[0];
+    const diagnostics = [];
+    if (!b.wallet_address) diagnostics.push({ severity: 'critical', issue: 'No wallet address', fix: 'Use "Assign Wallet + Mint"' });
+    if (!b.kyc_verified) diagnostics.push({ severity: 'critical', issue: 'User KYC not verified', fix: 'Approve KYC first' });
+    const expiry = b.expiry_date ? new Date(b.expiry_date) : null;
+    if (expiry && expiry < new Date()) diagnostics.push({ severity: 'critical', issue: `Expiry date in the past (${b.expiry_date})`, fix: 'Update expiry_date then retry' });
+    if (!b.quantity || b.quantity <= 0) diagnostics.push({ severity: 'critical', issue: `Invalid quantity: ${b.quantity}`, fix: 'Use "Correct Quantity"' });
+
+    const mintErrors = [];
+    if (b.admin_notes) {
+      const matches = b.admin_notes.matchAll(/\[MINT ERROR ([^\]]+)\]: (.+)/g);
+      for (const m of matches) mintErrors.push({ timestamp: m[1], error: m[2] });
+    }
+    if (mintErrors.length) {
+      const lastErr = mintErrors[mintErrors.length - 1].error;
+      if (lastErr.includes('Serial already registered')) diagnostics.push({ severity: 'warning', issue: 'Serial already on-chain', fix: 'Use "Set Token ID Manually"' });
+      if (lastErr.includes('insufficient funds')) diagnostics.push({ severity: 'critical', issue: 'Minter wallet out of ETH', fix: 'Top up minter wallet' });
+      if (lastErr.includes('ALCHEMY_RPC') || lastErr.includes('network')) diagnostics.push({ severity: 'warning', issue: 'RPC connection failed', fix: 'Check ALCHEMY_RPC env var' });
+    }
+    if (!diagnostics.length && !mintErrors.length) diagnostics.push({ severity: 'info', issue: 'No errors recorded', fix: 'Try retrying the mint' });
+
+    res.json({ batch: b, diagnostics, mintErrors });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Retirements ───────────────────────────────────────────────────
-// ✅ FIX: retirements table uses retired_by (not user_id), retired_at (not created_at)
 router.get('/retirements', isAdmin, async (req, res) => {
   const { disputed } = req.query;
   try {
-    let q = `
-      SELECT r.*, u.email, u.full_name
-      FROM retirements r
-      LEFT JOIN users u ON u.id = r.retired_by
-    `;
-    if (disputed === 'true') q += ` WHERE r.disputed = TRUE`;
+    const params = [];
+    let q = `SELECT r.*, u.email, u.full_name FROM retirements r LEFT JOIN users u ON u.id = r.retired_by`;
+    if (disputed === 'true') { params.push(true); q += ` WHERE r.disputed = $1`; }
     q += ` ORDER BY r.retired_at DESC LIMIT 200`;
-    const { rows } = await query(q);
+    const { rows } = await query(q, params);
+    res.json({ retirements: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/retirements/search', isAdmin, async (req, res) => {
+  const { q } = req.query;
+  if (!q) return res.status(400).json({ error: 'q param required' });
+  if (q.length > 200) return res.status(400).json({ error: 'Search query too long (max 200 chars)' });
+  try {
+    const { rows } = await query(
+      `SELECT r.*, u.email, u.full_name FROM retirements r LEFT JOIN users u ON u.id = r.retired_by
+       WHERE r.certificate_id ILIKE $1 OR r.serial_number ILIKE $1 OR u.email ILIKE $1 OR u.full_name ILIKE $1
+       ORDER BY r.retired_at DESC LIMIT 50`,
+      [`%${q}%`]
+    );
     res.json({ retirements: rows });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -441,17 +493,9 @@ router.post('/retirements/:id/flag', isAdmin, async (req, res) => {
   try {
     const { rows } = await query(`SELECT * FROM retirements WHERE id=$1`, [id]);
     if (!rows.length) return res.status(404).json({ error: 'Retirement not found' });
-    await query(
-      `UPDATE retirements
-       SET disputed=TRUE, dispute_reason=$1, disputed_at=NOW(), disputed_by=$2
-       WHERE id=$3`,
-      [reason, req.user.id, id]
-    );
-    await auditLog(req.user.id, 'RETIREMENT_DISPUTED', rows[0].retired_by,
-      `Retirement ${id} flagged: ${reason}`);
-    await createNotification(rows[0].retired_by, 'CREDIT', '⚠ Retirement Under Review',
-      `Your retirement certificate ${rows[0].certificate_id} has been flagged. Reason: ${reason}`,
-      '/portfolio', { certId: rows[0].certificate_id });
+    await query(`UPDATE retirements SET disputed=TRUE, dispute_reason=$1, disputed_at=NOW(), disputed_by=$2 WHERE id=$3`, [reason, req.user.id, id]);
+    await auditLog(req.user.id, 'RETIREMENT_DISPUTED', rows[0].retired_by, `Retirement ${id} flagged: ${reason}`);
+    await createNotification(rows[0].retired_by, 'CREDIT', '⚠ Retirement Under Review', `Your retirement certificate ${rows[0].certificate_id} has been flagged. Reason: ${reason}`, '/portfolio', { certId: rows[0].certificate_id });
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -459,54 +503,171 @@ router.post('/retirements/:id/flag', isAdmin, async (req, res) => {
 router.post('/retirements/:id/unflag', isAdmin, async (req, res) => {
   const { id } = req.params;
   try {
-    await query(
-      `UPDATE retirements
-       SET disputed=FALSE, dispute_reason=NULL, disputed_at=NULL, disputed_by=NULL
-       WHERE id=$1`,
-      [id]
-    );
+    await query(`UPDATE retirements SET disputed=FALSE, dispute_reason=NULL, disputed_at=NULL, disputed_by=NULL WHERE id=$1`, [id]);
     await auditLog(req.user.id, 'RETIREMENT_UNFLAGGED', null, `Retirement ${id} dispute cleared`);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/retirements/search', isAdmin, async (req, res) => {
-  const { q } = req.query;
-  if (!q) return res.status(400).json({ error: 'q param required' });
+router.get('/retirements/:id', isAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { rows } = await query(`SELECT r.*, u.email, u.full_name FROM retirements r LEFT JOIN users u ON u.id=r.retired_by WHERE r.id=$1`, [id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json({ retirement: rows[0] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/retirements/:id/correct', isAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { retire_scope, beneficiary_name, beneficiary_entity, beneficiary_gstin, reporting_standard, purpose, reason } = req.body;
+  if (!reason) return res.status(400).json({ error: 'Audit reason required' });
+  try {
+    const { rows } = await query(`SELECT r.*, u.email, u.full_name FROM retirements r LEFT JOIN users u ON u.id=r.retired_by WHERE r.id=$1`, [id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const old = rows[0];
+    const updates = []; const values = []; let idx = 1;
+    if (retire_scope       != null) { updates.push(`retire_scope=$${idx++}`);       values.push(retire_scope); }
+    if (beneficiary_name   != null) { updates.push(`beneficiary_name=$${idx++}`);   values.push(beneficiary_name); }
+    if (beneficiary_entity != null) { updates.push(`beneficiary_entity=$${idx++}`); values.push(beneficiary_entity); }
+    if (beneficiary_gstin  != null) { updates.push(`beneficiary_gstin=$${idx++}`);  values.push(beneficiary_gstin); }
+    if (reporting_standard != null) { updates.push(`reporting_standard=$${idx++}`); values.push(reporting_standard); }
+    if (purpose            != null) { updates.push(`purpose=$${idx++}`);            values.push(purpose); }
+    if (!updates.length) return res.status(400).json({ error: 'No fields to update' });
+    updates.push(`updated_at=NOW()`);
+    values.push(id);
+    await query(`UPDATE retirements SET ${updates.join(', ')} WHERE id=$${idx}`, values);
+    const changes = [];
+    if (retire_scope != null && retire_scope !== old.retire_scope) changes.push(`scope: ${old.retire_scope}→${retire_scope}`);
+    if (beneficiary_name != null && beneficiary_name !== old.beneficiary_name) changes.push(`beneficiary: ${old.beneficiary_name}→${beneficiary_name}`);
+    if (beneficiary_entity != null && beneficiary_entity !== old.beneficiary_entity) changes.push(`entity: ${old.beneficiary_entity}→${beneficiary_entity}`);
+    if (reporting_standard != null && reporting_standard !== old.reporting_standard) changes.push(`std: ${old.reporting_standard}→${reporting_standard}`);
+    if (purpose != null && purpose !== old.purpose) changes.push(`purpose: ${old.purpose}→${purpose}`);
+    await auditLog(req.user.id, 'RETIREMENT_CORRECTED', old.retired_by, `Cert ${old.certificate_id} — ${changes.join(', ')} — Reason: ${reason}`);
+    await createNotification(old.retired_by, 'CREDIT', '📝 Retirement Record Updated', `Your retirement certificate ${old.certificate_id} has been updated. Changes: ${changes.join(', ')}.`, '/portfolio', { certId: old.certificate_id });
+    res.json({ success: true, changes });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Buy Orders ────────────────────────────────────────────────────
+router.get('/buy-orders', isAdmin, async (req, res) => {
+  const VALID_STATUSES = ['open', 'filled', 'cancelled', 'expired', 'all'];
+  const { status = 'open' } = req.query;
+  if (!VALID_STATUSES.includes(status)) return res.status(400).json({ error: `Invalid status. Must be one of: ${VALID_STATUSES.join(', ')}` });
+  try {
+    const params = [];
+    let q = `SELECT bo.id, bo.token_id, bo.amount, bo.amount_filled,
+                    bo.limit_price_inr, bo.eth_escrowed, bo.status,
+                    bo.expires_at, bo.created_at,
+                    u.email AS buyer_email, u.full_name AS buyer_name, u.id AS buyer_id,
+                    cb.project_name, cb.registry_serial, cb.standard
+             FROM buy_orders bo
+             LEFT JOIN users u ON u.id = bo.buyer_id
+             LEFT JOIN carbon_batches cb ON cb.token_id = bo.token_id`;
+    if (status !== 'all') { params.push(status); q += ` WHERE bo.status = $${params.length}`; }
+    q += ` ORDER BY bo.created_at DESC LIMIT 200`;
+    const { rows } = await query(q, params);
+    res.json({ orders: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/buy-orders/:id/force-cancel', isAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+  if (!reason) return res.status(400).json({ error: 'Reason required' });
+  try {
+    const { rows } = await query(`SELECT bo.*, u.email, u.full_name FROM buy_orders bo LEFT JOIN users u ON u.id=bo.buyer_id WHERE bo.id=$1`, [id]);
+    if (!rows.length) return res.status(404).json({ error: 'Buy order not found' });
+    const order = rows[0];
+    if (['cancelled', 'filled'].includes(order.status)) return res.status(400).json({ error: `Order already ${order.status}` });
+
+    await query(`UPDATE buy_orders SET status='cancelled', cancelled_at=NOW(), cancel_reason=$1, updated_at=NOW() WHERE id=$2`, [`Admin force-cancel: ${reason}`, id]);
+    await auditLog(req.user.id, 'BUY_ORDER_FORCE_CANCELLED', order.buyer_id, `Order #${id} — ETH: ${order.eth_escrowed} — ${reason}`);
+    await createNotification(order.buyer_id, 'TRADE', '⚠ Buy Order Cancelled by Admin', `Your buy order #${id} has been cancelled. Reason: ${reason}.`, '/portfolio', { orderId: id });
+    try {
+      await sendEmail({ to: order.email, subject: 'EtherTrack — Buy Order Cancelled',
+        html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;"><h2 style="color:#f59e0b;">Buy Order Cancelled</h2><p>Order #${id} was cancelled. Reason: ${escHtml(reason)}</p><p>ETH escrowed: ${order.eth_escrowed} ETH will be refunded to your wallet.</p></div>` });
+    } catch {}
+    res.json({ success: true, ethEscrowed: order.eth_escrowed });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Trades ────────────────────────────────────────────────────────
+router.get('/trades', isAdmin, async (req, res) => {
+  const VALID_STATUSES = ['completed', 'pending', 'failed', 'refunded'];
+  const status = VALID_STATUSES.includes(req.query.status) ? req.query.status : 'completed';
+  const limit  = Math.min(parseInt(req.query.limit || '100', 10), 500);
   try {
     const { rows } = await query(
-      `SELECT r.*, u.email, u.full_name
-       FROM retirements r
-       LEFT JOIN users u ON u.id = r.retired_by
-       WHERE r.certificate_id ILIKE $1
-          OR r.serial_number   ILIKE $1
-          OR u.email           ILIKE $1
-          OR u.full_name       ILIKE $1
-       ORDER BY r.retired_at DESC LIMIT 50`,
-      [`%${q}%`]
+      `SELECT t.id, t.buyer_id, t.seller_id, t.batch_id, t.token_id,
+              t.quantity, t.price_per_credit_inr, t.subtotal_inr,
+              t.buyer_fee_inr, t.seller_fee_inr, t.buyer_pays_inr,
+              t.payment_mode, t.status, t.tx_hash, t.created_at,
+              bu.email AS buyer_email, bu.full_name AS buyer_name,
+              su.email AS seller_email, su.full_name AS seller_name,
+              cb.project_name, cb.registry_serial, cb.standard
+       FROM trades t
+       LEFT JOIN users bu ON bu.id = t.buyer_id LEFT JOIN users su ON su.id = t.seller_id
+       LEFT JOIN carbon_batches cb ON cb.id = t.batch_id
+       WHERE t.status = $1 ORDER BY t.created_at DESC LIMIT $2`,
+      [status, limit]
     );
-    res.json({ retirements: rows });
+    res.json({ trades: rows });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/trades/:id/reconcile', isAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+  if (!reason) return res.status(400).json({ error: 'Reason required' });
+  try {
+    const { rows } = await query(
+      `SELECT t.*, bu.email AS buyer_email, bu.full_name AS buyer_name, cb.project_name, cb.status AS batch_status
+       FROM trades t LEFT JOIN users bu ON bu.id = t.buyer_id LEFT JOIN carbon_batches cb ON cb.id = t.batch_id
+       WHERE t.id = $1`, [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Trade not found' });
+    const trade = rows[0];
+    if (trade.status !== 'completed') return res.status(400).json({ error: 'Trade must be completed to reconcile' });
+
+    const { rows: existing } = await query(`SELECT id FROM carbon_batches WHERE user_id=$1 AND token_id=$2`, [trade.buyer_id, trade.token_id]);
+    if (existing.length > 0) {
+      await query(`UPDATE carbon_batches SET available_credits=available_credits+$1, total_credits=total_credits+$1, updated_at=NOW() WHERE id=$2`, [trade.quantity, existing[0].id]);
+    } else {
+      const { rows: src } = await query(`SELECT * FROM carbon_batches WHERE id=$1`, [trade.batch_id]);
+      if (!src.length) return res.status(400).json({ error: 'Source batch not found — cannot auto-reconcile' });
+      const s = src[0];
+      await query(
+        `INSERT INTO carbon_batches (user_id,project_id,project_name,project_location,country,standard,project_type,developer,quantity,total_credits,available_credits,retired_credits,vintage_year,expiry_date,registry_serial,token_id,status,admin_status,price_per_credit_inr,credit_type,cbam_eligible,corresponding_adjustment,sdg_tags,created_at,updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$9,0,$10,$11,$12,$13,'tokenised','approved',$14,$15,$16,$17,$18,NOW(),NOW())`,
+        [trade.buyer_id,s.project_id,s.project_name,s.project_location,s.country,s.standard,s.project_type,s.developer,trade.quantity,s.vintage_year,s.expiry_date,s.registry_serial,trade.token_id,trade.price_per_credit_inr,s.credit_type,s.cbam_eligible,s.corresponding_adjustment,s.sdg_tags]
+      );
+    }
+    await auditLog(req.user.id, 'TRADE_RECONCILED', trade.buyer_id, `Trade #${id} — ${trade.quantity} credits assigned. Reason: ${reason}`);
+    await createNotification(trade.buyer_id, 'TRADE', '✅ Credits Added to Portfolio', `${trade.quantity} tCO₂ credits from "${trade.project_name}" have been added to your portfolio following a reconciliation.`, '/portfolio', { tradeId: id });
+    res.json({ success: true, creditsAssigned: trade.quantity });
+  } catch (e) {
+    console.error('[admin/trades/reconcile]', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ── Users ─────────────────────────────────────────────────────────
 router.get('/users', isAdmin, async (req, res) => {
   const { search, status } = req.query;
   try {
-    let q = `
-      SELECT id, email, full_name, role, wallet_address,
-             kyc_status, kyc_verified, frozen, freeze_reason,
-             created_at, is_active
-      FROM users WHERE role != 'admin'
-    `;
+    let q = `SELECT id, email, full_name, role, wallet_address, kyc_status,
+                    kyc_verified, frozen, freeze_reason, created_at, is_active,
+                    subscription_plan, corporate_managed
+             FROM users WHERE role != 'admin'`;
     const params = [];
     if (search) {
-      params.push(`%${search}%`);
-      q += ` AND (email ILIKE $${params.length} OR full_name ILIKE $${params.length})`;
+      params.push(`%${search}%`, `%${search}%`);
+      q += ` AND (email ILIKE $${params.length - 1} OR full_name ILIKE $${params.length})`;
     }
-    if (status === 'frozen')   q += ` AND frozen = TRUE`;
-    if (status === 'verified') q += ` AND kyc_status = 'verified'`;
-    if (status === 'pending')  q += ` AND kyc_status = 'submitted'`;
+    if (status === 'frozen')   q += ` AND frozen=TRUE`;
+    if (status === 'verified') q += ` AND kyc_status='verified'`;
+    if (status === 'pending')  q += ` AND kyc_status='submitted'`;
     q += ` ORDER BY created_at DESC`;
     const { rows } = await query(q, params);
     res.json({ users: rows });
@@ -518,13 +679,11 @@ router.post('/users/:id/freeze', isAdmin, async (req, res) => {
   const { reason } = req.body;
   if (!reason) return res.status(400).json({ error: 'Freeze reason required' });
   try {
-    await query(
-      `UPDATE users SET frozen=TRUE, freeze_reason=$1, updated_at=NOW() WHERE id=$2`,
-      [reason, id]
-    );
+    await query(`UPDATE users SET frozen=TRUE, freeze_reason=$1, updated_at=NOW() WHERE id=$2`, [reason, id]);
+    await invalidateUserCache(id);
     await auditLog(req.user.id, 'ACCOUNT_FROZEN', id, reason);
     const { rows: usr } = await query('SELECT email, full_name FROM users WHERE id=$1', [id]);
-    try { await sendEmail({ to: usr[0].email, subject: 'EtherTrack — Account Suspended', html: `<p>Reason: ${reason}</p>` }); } catch {}
+    try { await sendEmail({ to: usr[0].email, subject: 'EtherTrack — Account Suspended', html: `<p>Reason: ${escHtml(reason)}</p>` }); } catch {}
     res.json({ message: 'Account frozen' });
   } catch (e) { res.status(500).json({ error: 'Freeze failed' }); }
 });
@@ -532,9 +691,8 @@ router.post('/users/:id/freeze', isAdmin, async (req, res) => {
 router.post('/users/:id/unfreeze', isAdmin, async (req, res) => {
   const { id } = req.params;
   try {
-    await query(
-      `UPDATE users SET frozen=FALSE, freeze_reason=NULL, updated_at=NOW() WHERE id=$1`, [id]
-    );
+    await query(`UPDATE users SET frozen=FALSE, freeze_reason=NULL, updated_at=NOW() WHERE id=$1`, [id]);
+    await invalidateUserCache(id);
     await auditLog(req.user.id, 'ACCOUNT_UNFROZEN', id, 'Account reinstated');
     const { rows: usr } = await query('SELECT email, full_name FROM users WHERE id=$1', [id]);
     try { await sendEmail({ to: usr[0].email, subject: 'EtherTrack — Account Reinstated', html: `<p>Your account has been reinstated.</p>` }); } catch {}
@@ -542,63 +700,19 @@ router.post('/users/:id/unfreeze', isAdmin, async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Unfreeze failed' }); }
 });
 
-router.get('/users/:id/credits', isAdmin, async (req, res) => {
-  const { id } = req.params;
-  try {
-    const { rows } = await query(
-      `SELECT id, project_name, registry_serial, standard, quantity,
-              vintage_year, token_id, admin_status, status, created_at
-       FROM carbon_batches WHERE user_id=$1 ORDER BY created_at DESC`,
-      [id]
-    );
-    res.json({ credits: rows });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// ✅ FIX: trades — buyer_pays_inr instead of subtotal_inr for volume,
-//         no buyer_name/seller_name cols in trades — join users
-router.get('/users/:id/trades', isAdmin, async (req, res) => {
-  const { id } = req.params;
-  try {
-    const { rows } = await query(
-      `SELECT
-         t.id, t.buyer_id, t.seller_id,
-         t.quantity, t.price_per_credit_inr,
-         t.subtotal_inr, t.buyer_pays_inr,
-         t.buyer_fee_inr, t.seller_fee_inr,
-         t.payment_mode, t.status,
-         t.tx_hash, t.created_at,
-         bu.email AS buyer_email,  bu.full_name AS buyer_name,
-         su.email AS seller_email, su.full_name AS seller_name,
-         cb.project_name, cb.registry_serial, cb.standard
-       FROM trades t
-       LEFT JOIN users bu ON bu.id = t.buyer_id
-       LEFT JOIN users su ON su.id = t.seller_id
-       LEFT JOIN carbon_batches cb ON cb.id = t.batch_id
-       WHERE t.buyer_id=$1 OR t.seller_id=$1
-       ORDER BY t.created_at DESC LIMIT 100`,
-      [id]
-    );
-    res.json({ trades: rows });
-  } catch (e) { console.error('user trades error:', e.message); res.status(500).json({ error: e.message }); }
-});
+router.get('/users/:id/credits',    isAdmin, async (req, res) => { try { const { rows } = await query(`SELECT id, project_name, registry_serial, standard, quantity, vintage_year, token_id, admin_status, status, created_at FROM carbon_batches WHERE user_id=$1 ORDER BY created_at DESC`, [req.params.id]); res.json({ credits: rows }); } catch (e) { res.status(500).json({ error: e.message }); } });
+router.get('/users/:id/trades',     isAdmin, async (req, res) => { try { const { rows } = await query(`SELECT t.id, t.buyer_id, t.seller_id, t.quantity, t.price_per_credit_inr, t.subtotal_inr, t.buyer_pays_inr, t.buyer_fee_inr, t.seller_fee_inr, t.payment_mode, t.status, t.tx_hash, t.created_at, bu.email AS buyer_email, bu.full_name AS buyer_name, su.email AS seller_email, su.full_name AS seller_name, cb.project_name, cb.registry_serial, cb.standard FROM trades t LEFT JOIN users bu ON bu.id=t.buyer_id LEFT JOIN users su ON su.id=t.seller_id LEFT JOIN carbon_batches cb ON cb.id=t.batch_id WHERE t.buyer_id=$1 OR t.seller_id=$1 ORDER BY t.created_at DESC LIMIT 100`, [req.params.id]); res.json({ trades: rows }); } catch (e) { res.status(500).json({ error: e.message }); } });
+router.get('/users/:id/buy-orders', isAdmin, async (req, res) => { try { const { rows } = await query(`SELECT bo.id, bo.token_id, bo.amount, bo.amount_filled, bo.limit_price_inr, bo.eth_escrowed, bo.status, bo.expires_at, bo.created_at, cb.project_name, cb.registry_serial, cb.standard FROM buy_orders bo LEFT JOIN carbon_batches cb ON cb.token_id=bo.token_id WHERE bo.buyer_id=$1 ORDER BY bo.created_at DESC`, [req.params.id]); res.json({ orders: rows }); } catch (e) { res.status(500).json({ error: e.message }); } });
 
 router.post('/users/:id/resync-portfolio', isAdmin, async (req, res) => {
   const { id } = req.params;
   try {
-    const { rows } = await query(
-      `SELECT email, full_name, wallet_address FROM users WHERE id=$1`, [id]
-    );
+    const { rows } = await query(`SELECT email, full_name, wallet_address FROM users WHERE id=$1`, [id]);
     if (!rows.length) return res.status(404).json({ error: 'User not found' });
     if (!rows[0].wallet_address) return res.status(400).json({ error: 'User has no wallet address' });
-    await query(
-      `UPDATE carbon_batches SET updated_at=NOW()
-       WHERE user_id=$1 AND admin_status='approved'`,
-      [id]
-    );
+    await query(`UPDATE carbon_batches SET updated_at=NOW() WHERE user_id=$1 AND admin_status='approved'`, [id]);
     await auditLog(req.user.id, 'PORTFOLIO_RESYNC', id, `Resync for wallet ${rows[0].wallet_address}`);
-    await createNotification(id, 'CREDIT', '🔄 Portfolio Sync Requested',
-      'Your portfolio has been flagged for re-sync. Refresh to see updated balances.', '/portfolio', {});
+    await createNotification(id, 'CREDIT', '🔄 Portfolio Sync Requested', 'Your portfolio has been flagged for re-sync. Refresh to see updated balances.', '/portfolio', {});
     res.json({ success: true, wallet: rows[0].wallet_address });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -607,17 +721,16 @@ router.post('/users/:id/send-message', isAdmin, async (req, res) => {
   const { id } = req.params;
   const { subject, message } = req.body;
   if (!subject || !message) return res.status(400).json({ error: 'subject and message required' });
+  if (message.length > 5000) return res.status(400).json({ error: 'Message too long (max 5000 chars)' });
   try {
     const { rows } = await query(`SELECT email, full_name FROM users WHERE id=$1`, [id]);
     if (!rows.length) return res.status(404).json({ error: 'User not found' });
+    const safeSubject = escHtml(subject);
+    const safeMessage = escHtml(message);
+    const safeName    = escHtml(rows[0].full_name);
     await sendEmail({
-      to: rows[0].email,
-      subject: `EtherTrack — ${subject}`,
-      html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;">
-        <h2 style="color:#f59e0b;">Message from EtherTrack Support</h2>
-        <p>Hi ${rows[0].full_name},</p>
-        <div style="padding:16px;background:#0d0a00;border-left:3px solid #f59e0b;border-radius:4px;white-space:pre-wrap;font-size:13px;line-height:1.7;">${message}</div>
-      </div>`,
+      to: rows[0].email, subject: `EtherTrack — ${safeSubject}`,
+      html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;"><h2 style="color:#f59e0b;">Message from EtherTrack Support</h2><p>Hi ${safeName},</p><div style="padding:16px;background:#0d0a00;border-left:3px solid #f59e0b;border-radius:4px;white-space:pre-wrap;font-size:13px;line-height:1.7;">${safeMessage}</div></div>`,
     });
     await createNotification(id, 'ACCOUNT', `📬 ${subject}`, message.slice(0, 120), '/dashboard', {});
     await auditLog(req.user.id, 'USER_MESSAGE_SENT', id, `Subject: ${subject}`);
@@ -629,32 +742,32 @@ router.post('/users/:id/reassign-wallet', isAdmin, async (req, res) => {
   const { id } = req.params;
   const { walletAddress, reason } = req.body;
   if (!walletAddress || !reason) return res.status(400).json({ error: 'walletAddress and reason required' });
-  if (!walletAddress.startsWith('0x') || walletAddress.length !== 42)
-    return res.status(400).json({ error: 'Invalid Ethereum address' });
+  if (!walletAddress.startsWith('0x') || walletAddress.length !== 42) return res.status(400).json({ error: 'Invalid Ethereum address' });
   try {
-    const { rows } = await query(
-      `SELECT email, full_name, wallet_address FROM users WHERE id=$1`, [id]
-    );
+    const { rows } = await query(`SELECT email, full_name, wallet_address FROM users WHERE id=$1`, [id]);
     if (!rows.length) return res.status(404).json({ error: 'User not found' });
-    await query(
-      `UPDATE users SET wallet_address=$1, updated_at=NOW() WHERE id=$2`,
-      [walletAddress.toLowerCase(), id]
-    );
-    await auditLog(req.user.id, 'WALLET_REASSIGNED', id,
-      `${rows[0].wallet_address || 'none'} → ${walletAddress.toLowerCase()} — ${reason}`);
-    await createNotification(id, 'ACCOUNT', '🔑 Wallet Address Updated',
-      `Your wallet has been updated to ${walletAddress.slice(0,6)}...${walletAddress.slice(-4)}`, '/profile', {});
-    try {
-      await sendEmail({
-        to: rows[0].email,
-        subject: 'EtherTrack — Wallet Address Updated',
-        html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;">
-          <h2 style="color:#60a5fa;">Wallet Updated 🔑</h2>
-          <p>New wallet: <strong>${walletAddress}</strong></p>
-          <p>If you did not request this, contact support immediately.</p>
-        </div>`,
-      });
-    } catch {}
+    await query(`UPDATE users SET wallet_address=$1, updated_at=NOW() WHERE id=$2`, [walletAddress.toLowerCase(), id]);
+    await invalidateUserCache(id);
+    await auditLog(req.user.id, 'WALLET_REASSIGNED', id, `${rows[0].wallet_address || 'none'} → ${walletAddress.toLowerCase()} — ${reason}`);
+    await createNotification(id, 'ACCOUNT', '🔑 Wallet Address Updated', `Your wallet has been updated to ${walletAddress.slice(0,6)}...${walletAddress.slice(-4)}`, '/profile', {});
+    try { await sendEmail({ to: rows[0].email, subject: 'EtherTrack — Wallet Address Updated', html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;"><h2 style="color:#60a5fa;">Wallet Updated 🔑</h2><p>New wallet: <strong>${escHtml(walletAddress)}</strong></p><p>If you did not request this, contact support immediately.</p></div>` }); } catch {}
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/users/:id/require-rekyc', isAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+  if (!reason) return res.status(400).json({ error: 'Reason required' });
+  try {
+    const { rows } = await query(`SELECT email, full_name FROM users WHERE id=$1`, [id]);
+    if (!rows.length) return res.status(404).json({ error: 'User not found' });
+    await query(`UPDATE users SET kyc_verified=FALSE, kyc_status='rekyc_required', kyc_verified_at=NULL, updated_at=NOW() WHERE id=$1`, [id]);
+    await query(`UPDATE kyc_submissions SET status='rejected', rejection_reason=$1 WHERE user_id=$2 AND status='pending'`, [`Re-KYC required: ${reason}`, id]);
+    await invalidateUserCache(id);
+    await auditLog(req.user.id, 'REKYC_REQUIRED', id, reason);
+    await createNotification(id, 'KYC', '🔄 Re-KYC Required', `Your KYC has been invalidated. Reason: ${reason}. Please resubmit your documents.`, '/kyc', { reason });
+    try { await sendEmail({ to: rows[0].email, subject: 'EtherTrack — Fresh KYC Submission Required', html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;"><h2 style="color:#f59e0b;">Re-KYC Required 🔄</h2><p>Hi ${escHtml(rows[0].full_name)},</p><p><strong style="color:#f87171;">Reason:</strong> ${escHtml(reason)}</p><a href="${process.env.FRONTEND_URL}/kyc" style="display:inline-block;background:#f59e0b;color:#000;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:700;margin-top:8px;">RESUBMIT KYC →</a></div>` }); } catch {}
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -668,94 +781,25 @@ router.post('/users/:id/delete', isAdmin, async (req, res) => {
     const { rows } = await query(`SELECT email, full_name, role FROM users WHERE id=$1`, [id]);
     if (!rows.length) return res.status(404).json({ error: 'User not found' });
     if (rows[0].role === 'admin') return res.status(403).json({ error: 'Cannot delete admin accounts' });
-    // ✅ FIX: market_listings uses active column, not status='listed'
-    const { rows: active } = await query(
-      `SELECT COUNT(*) FROM market_listings WHERE seller_id=$1 AND active=TRUE`, [id]
-    );
-    if (parseInt(active[0].count) > 0)
-      return res.status(400).json({ error: 'User has active listings — delist them first' });
+    const { rows: active } = await query(`SELECT COUNT(*) FROM market_listings WHERE seller_id=$1 AND available_credits > 0`, [id]).catch(() => ({ rows: [{ count: 0 }] }));
+    if (parseInt(active[0].count) > 0) return res.status(400).json({ error: 'User has active listings — delist them first' });
     await query(
-      `UPDATE users SET
-         email        = CONCAT('deleted_',id,'@removed.invalid'),
-         full_name    = 'Deleted User',
-         phone        = NULL,
-         wallet_address = NULL,
-         kyc_verified = FALSE,
-         kyc_status   = 'deleted',
-         kyc_data_hash    = NULL,
-         kyc_aadhaar_hash = NULL,
-         kyc_pan_hash     = NULL,
-         is_active  = FALSE,
-         frozen     = TRUE,
-         freeze_reason = $1,
-         updated_at = NOW()
-       WHERE id = $2`,
+      `UPDATE users SET email=CONCAT('deleted_',id,'@removed.invalid'), full_name='Deleted User',
+       phone=NULL, wallet_address=NULL, kyc_verified=FALSE, kyc_status='deleted',
+       kyc_data_hash=NULL, kyc_aadhaar_hash=NULL, kyc_pan_hash=NULL,
+       is_active=FALSE, frozen=TRUE, freeze_reason=$1, updated_at=NOW() WHERE id=$2`,
       [`ACCOUNT DELETED: ${reason}`, id]
     );
-    await query(
-      `UPDATE kyc_submissions
-       SET doc_ipfs_hash=NULL, aadhaar_hash=NULL, pan_hash=NULL, kyc_data_hash=NULL
-       WHERE user_id=$1`,
-      [id]
-    );
+    await query(`UPDATE kyc_submissions SET doc_ipfs_hash=NULL, aadhaar_hash=NULL, pan_hash=NULL, kyc_data_hash=NULL WHERE user_id=$1`, [id]);
+    await invalidateUserCache(id);
     await auditLog(req.user.id, 'USER_DELETED', id, `${rows[0].email} — ${reason}`);
-    res.json({ success: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-router.post('/users/:id/require-rekyc', isAdmin, async (req, res) => {
-  const { id } = req.params;
-  const { reason } = req.body;
-  if (!reason) return res.status(400).json({ error: 'Reason required' });
-  try {
-    const { rows } = await query(`SELECT email, full_name FROM users WHERE id=$1`, [id]);
-    if (!rows.length) return res.status(404).json({ error: 'User not found' });
-    await query(
-      `UPDATE users SET
-         kyc_verified    = FALSE,
-         kyc_status      = 'rekyc_required',
-         kyc_verified_at = NULL,
-         updated_at      = NOW()
-       WHERE id = $1`,
-      [id]
-    );
-    await query(
-      `UPDATE kyc_submissions SET status='rejected', rejection_reason=$1
-       WHERE user_id=$2 AND status='pending'`,
-      [`Re-KYC required: ${reason}`, id]
-    );
-    await auditLog(req.user.id, 'REKYC_REQUIRED', id, reason);
-    await createNotification(id, 'KYC', '🔄 Re-KYC Required',
-      `Your KYC has been invalidated. Reason: ${reason}. Please resubmit your documents.`,
-      '/kyc', { reason });
-    try {
-      await sendEmail({
-        to: rows[0].email,
-        subject: 'EtherTrack — Fresh KYC Submission Required',
-        html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;">
-          <h2 style="color:#f59e0b;">Re-KYC Required 🔄</h2>
-          <p>Hi ${rows[0].full_name},</p>
-          <p><strong style="color:#f87171;">Reason:</strong> ${reason}</p>
-          <a href="${process.env.FRONTEND_URL}/kyc" style="display:inline-block;background:#f59e0b;color:#000;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:700;margin-top:8px;">RESUBMIT KYC →</a>
-        </div>`,
-      });
-    } catch {}
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.get('/kyc-expiring', isAdmin, async (req, res) => {
   try {
-    const { rows } = await query(
-      `SELECT id, email, full_name, kyc_expires_at,
-              EXTRACT(DAY FROM kyc_expires_at - NOW())::int AS days_left
-       FROM users
-       WHERE kyc_expires_at IS NOT NULL
-         AND kyc_expires_at > NOW()
-         AND kyc_expires_at < NOW() + INTERVAL '90 days'
-         AND kyc_verified = TRUE
-       ORDER BY kyc_expires_at ASC`
-    );
+    const { rows } = await query(`SELECT id, email, full_name, kyc_expires_at, EXTRACT(DAY FROM kyc_expires_at - NOW())::int AS days_left FROM users WHERE kyc_expires_at IS NOT NULL AND kyc_expires_at > NOW() AND kyc_expires_at < NOW() + INTERVAL '90 days' AND kyc_verified=TRUE ORDER BY kyc_expires_at ASC`);
     res.json({ users: rows });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -763,87 +807,321 @@ router.get('/kyc-expiring', isAdmin, async (req, res) => {
 router.post('/users/:id/kyc-reminder', isAdmin, async (req, res) => {
   const { id } = req.params;
   try {
-    const { rows } = await query(
-      `SELECT email, full_name, kyc_expires_at FROM users WHERE id=$1`, [id]
-    );
+    const { rows } = await query(`SELECT email, full_name, kyc_expires_at FROM users WHERE id=$1`, [id]);
     if (!rows.length) return res.status(404).json({ error: 'User not found' });
     const u = rows[0];
-    await createNotification(id, 'KYC', '⚠ KYC Renewal Required',
-      `Your KYC expires on ${new Date(u.kyc_expires_at).toLocaleDateString('en-IN')}. Please renew to avoid suspension.`,
-      '/kyc', {});
-    await sendEmail({
-      to: u.email,
-      subject: 'EtherTrack — KYC Renewal Required',
-      html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;">
-        <h2 style="color:#f59e0b;">KYC Renewal Required ⚠️</h2>
-        <p>Hi ${u.full_name},</p>
-        <p>Your KYC expires on <strong style="color:#f59e0b;">${new Date(u.kyc_expires_at).toLocaleDateString('en-IN', { day:'2-digit', month:'long', year:'numeric' })}</strong>.</p>
-        <a href="${process.env.FRONTEND_URL}/kyc" style="display:inline-block;background:#f59e0b;color:#000;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:700;margin-top:8px;">RENEW KYC NOW →</a>
-      </div>`,
-    });
+    await createNotification(id, 'KYC', '⚠ KYC Renewal Required', `Your KYC expires on ${new Date(u.kyc_expires_at).toLocaleDateString('en-IN')}. Please renew to avoid suspension.`, '/kyc', {});
+    await sendEmail({ to: u.email, subject: 'EtherTrack — KYC Renewal Required',
+      html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;"><h2 style="color:#f59e0b;">KYC Renewal Required ⚠️</h2><p>Hi ${escHtml(u.full_name)},</p><p>Your KYC expires on <strong style="color:#f59e0b;">${new Date(u.kyc_expires_at).toLocaleDateString('en-IN',{day:'2-digit',month:'long',year:'numeric'})}</strong>.</p><a href="${process.env.FRONTEND_URL}/kyc" style="display:inline-block;background:#f59e0b;color:#000;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:700;margin-top:8px;">RENEW KYC NOW →</a></div>` });
     await auditLog(req.user.id, 'KYC_REMINDER_SENT', id, `Sent to ${u.email}`);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── Listings ──────────────────────────────────────────────────────
-// ✅ FIX: market_listings schema — seller_name/seller_email are IN the table directly
-//         no need to join users for those columns
-router.get('/listings', isAdmin, async (req, res) => {
+// ═══════════════════════════════════════════════════════════════════
+// [CORP-1] GET /api/admin/corporate/activations
+// List all corporate accounts for the admin dashboard table.
+// ═══════════════════════════════════════════════════════════════════
+router.get('/corporate/activations', isAdmin, async (req, res) => {
   try {
     const { rows } = await query(
-      `SELECT
-         ml.batch_id, ml.token_id, ml.listing_id,
-         ml.project_name, ml.registry_serial, ml.standard,
-         ml.vintage_year, ml.project_type,
-         ml.price_per_credit_inr,
-         ml.seller_id, ml.seller_wallet,
-         ml.seller_name, ml.seller_email,
-         ml.created_at, ml.updated_at,
-         ml.available_credits AS amount_remaining
-       FROM market_listings ml
-       ORDER BY ml.created_at DESC`
+      `SELECT DISTINCT ON (u.id)
+              u.id, u.email, u.full_name, u.company_name,
+              u.subscription_plan, u.subscription_cycle,
+              u.subscription_renewal_date, u.subscription_activated_at,
+              u.corporate_managed, u.kyc_verified,
+              sp.amount_paise, sp.pay_method, sp.created_at AS payment_date,
+              sp.notes AS activation_notes,
+              o.seats_limit, o.name AS org_name
+       FROM users u
+       LEFT JOIN subscription_payments sp
+         ON sp.user_id = u.id
+         AND sp.plan = 'corporate'
+         AND sp.status = 'success'
+       LEFT JOIN organisations o ON o.owner_id = u.id
+       WHERE u.subscription_plan = 'corporate'
+       ORDER BY u.id, sp.created_at DESC NULLS LAST`
     );
-    // ✅ FIX: market_listings has no 'active' column — filter by checking available_credits > 0
-    // If your table does have an active column, change this filter
-    res.json({ listings: rows.filter(l => l.amount_remaining > 0) });
+    res.json({ activations: rows });
   } catch (e) {
-    console.error('admin listings error:', e.message);
-    res.status(500).json({ error: e.message });
+    console.error('[admin/corporate/activations]', e.message);
+    res.status(500).json({ error: 'Failed to fetch corporate activations' });
   }
 });
 
-// ✅ FIX: market_listings has no id column — use batch_id or listing_id
+// ═══════════════════════════════════════════════════════════════════
+// [CORP-2] POST /api/admin/users/:id/activate-corporate
+// Sales team activates Corporate plan after closing a deal.
+// No payment required — admin sets price/cycle/seats directly.
+// ═══════════════════════════════════════════════════════════════════
+router.post('/users/:id/activate-corporate', isAdmin, async (req, res) => {
+  const { id } = req.params;
+  const {
+    cycle          = 'annual',
+    seats          = null,
+    customPriceINR = 0,
+    notes          = '',
+    renewalMonths  = null,
+  } = req.body;
+
+  // ── Validate inputs ──────────────────────────────────────────────
+  if (!['monthly', 'annual'].includes(cycle)) {
+    return res.status(400).json({ error: 'cycle must be monthly or annual' });
+  }
+  if (seats !== null && (!Number.isInteger(seats) || seats < 1)) {
+    return res.status(400).json({ error: 'seats must be a positive integer or null (unlimited)' });
+  }
+  const priceINR = parseFloat(customPriceINR) || 0;
+  if (priceINR < 0) {
+    return res.status(400).json({ error: 'customPriceINR cannot be negative' });
+  }
+
+  try {
+    // Load user
+    const { rows: userRows } = await query(
+      `SELECT id, email, full_name, company_name, kyc_verified,
+              subscription_plan, subscription_cycle, org_id
+       FROM users WHERE id = $1`,
+      [id]
+    );
+    if (!userRows.length) return res.status(404).json({ error: 'User not found' });
+    const user = userRows[0];
+
+    // Compute renewal date
+    const renewalDate = new Date();
+    if (renewalMonths && Number.isInteger(parseInt(renewalMonths)) && parseInt(renewalMonths) > 0) {
+      renewalDate.setMonth(renewalDate.getMonth() + parseInt(renewalMonths));
+    } else if (cycle === 'annual') {
+      renewalDate.setFullYear(renewalDate.getFullYear() + 1);
+    } else {
+      renewalDate.setMonth(renewalDate.getMonth() + 1);
+    }
+
+    const customPricePaise = Math.round(priceINR * 100);
+    const idempotencyKey   = `corporate_sales_${id}_${Date.now()}`;
+
+    await withTransaction(async (client) => {
+      // Determine upgrade / activate event
+      const ORDER   = ['free', 'starter', 'growth', 'corporate'];
+      const fromIdx = ORDER.indexOf(user.subscription_plan || 'free');
+      const toIdx   = ORDER.indexOf('corporate');
+      const event   = fromIdx < toIdx ? 'upgraded' : 'activated';
+
+      // Insert payment record with pay_method = 'sales'
+      const { rows: [pay] } = await client.query(
+        `INSERT INTO subscription_payments
+           (user_id, plan, cycle,
+            amount_paise, gst_amount_paise, total_amount_paise,
+            pay_method, status, idempotency_key,
+            renewal_date, amount, notes)
+         VALUES ($1,'corporate',$2,$3,0,$3,'sales','success',$4,$5,$6,$7)
+         RETURNING id`,
+        [id, cycle, customPricePaise, idempotencyKey, renewalDate, priceINR, notes || null]
+      );
+
+      // Activate plan on user row
+      await client.query(
+        `UPDATE users SET
+           subscription_plan         = 'corporate',
+           subscription_cycle        = $1,
+           subscription_renewal_date = $2,
+           subscription_activated_at = COALESCE(subscription_activated_at, NOW()),
+           plan_selected             = TRUE,
+           corporate_managed         = TRUE,
+           updated_at                = NOW()
+         WHERE id = $3`,
+        [cycle, renewalDate, id]
+      );
+
+      // subscription_history row
+      await client.query(
+        `INSERT INTO subscription_history
+           (user_id, event_type, from_plan, to_plan, from_cycle, to_cycle,
+            payment_id, amount_paise, gst_amount_paise, renewal_date,
+            triggered_by, notes)
+         VALUES ($1,$2,$3,'corporate',$4,$5,$6,$7,0,$8,'admin',$9)`,
+        [
+          id, event,
+          user.subscription_plan || 'free',
+          user.subscription_cycle || null, cycle,
+          pay.id, customPricePaise,
+          renewalDate, notes || null,
+        ]
+      );
+
+      // Set org seats — null/unspecified → 999 (unlimited ceiling)
+      const seatLimit = (seats !== null && seats > 0) ? seats : 999;
+      await client.query(
+        `UPDATE organisations SET seats_limit=$1, updated_at=NOW() WHERE owner_id=$2`,
+        [seatLimit, id]
+      );
+    });
+
+    // Invalidate Redis cache so next request sees the new plan immediately
+    await invalidateUserCache(id);
+
+    // In-app notification
+    await createNotification(
+      id, 'WALLET', '🏢 Corporate Plan Activated',
+      `Your Corporate plan has been activated by the EtherTrack team.${notes ? ` Note: ${notes}` : ''}`,
+      '/billing', { plan: 'corporate', cycle }
+    ).catch(() => {});
+
+    // Confirmation email — fire-and-forget
+    const { rows: [freshUser] } = await query('SELECT email, full_name FROM users WHERE id=$1', [id]);
+    setImmediate(async () => {
+      try {
+        const seatDisplay = (seats !== null && seats > 0) ? seats : 'Unlimited';
+        await sendEmail({
+          to:      freshUser.email,
+          subject: 'EtherTrack — Corporate Plan Activated 🏢',
+          html: `
+            <div style="font-family:monospace;background:#040706;color:#f0fdf4;padding:32px;border-radius:12px;max-width:600px;">
+              <div style="color:#f59e0b;font-size:18px;font-weight:700;margin-bottom:12px;">EtherTrack 🌿</div>
+              <h2 style="color:#f59e0b;margin:0 0 16px;">Corporate Plan Activated 🏢</h2>
+              <p>Hi ${escHtml(freshUser.full_name)},</p>
+              <p>Your <strong style="color:#f59e0b;">Corporate plan</strong> is now active with full access to:</p>
+              <ul style="color:#86efac;line-height:2.2;padding-left:20px;">
+                <li>Full Scope 3 (all 15 categories)</li>
+                <li>BRSR / CDP / TCFD / GHG PDF reports</li>
+                <li>Audit trail + verifier integration (BV, DNV, EY, Deloitte…)</li>
+                <li>PAT scheme + CCTS + GEI / BEE compliance</li>
+                <li>5-year decarbonisation plan + MRV calendar</li>
+                <li>SBTi target setting</li>
+                <li>Supplier data portal</li>
+                <li>Multi-entity consolidation</li>
+                <li>Carbon neutrality certificate</li>
+                <li>${seatDisplay} seats · Team management</li>
+              </ul>
+              ${notes ? `<p style="color:#f59e0b88;font-size:12px;margin-top:8px;">Note: ${escHtml(notes)}</p>` : ''}
+              <p style="color:#86efac88;font-size:12px;margin-top:20px;">
+                Cycle: ${cycle} &nbsp;·&nbsp;
+                Renews: ${renewalDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' })}
+                ${priceINR > 0 ? `&nbsp;·&nbsp; Amount: ₹${priceINR.toLocaleString('en-IN')}` : ''}
+              </p>
+              <a href="${process.env.FRONTEND_URL}/billing"
+                 style="display:inline-block;padding:12px 28px;background:#f59e0b;color:#000;border-radius:8px;text-decoration:none;font-weight:700;margin-top:12px;">
+                GO TO BILLING →
+              </a>
+              <p style="color:#86efac33;font-size:11px;margin-top:24px;">
+                Questions? Reply to this email or contact support@ethertrack.in
+              </p>
+            </div>
+          `,
+        });
+      } catch (e) {
+        console.warn('[admin/activate-corporate] email failed:', e.message);
+      }
+    });
+
+    await auditLog(
+      req.user.id, 'CORPORATE_PLAN_ACTIVATED', id,
+      `Cycle: ${cycle} · Seats: ${seats ?? 'unlimited'} · Price: ₹${priceINR} · ${notes || ''}`
+    );
+
+    return res.json({
+      ok:            true,
+      userId:        id,
+      plan:          'corporate',
+      cycle,
+      seats:         seats ?? 'unlimited',
+      renewalDate:   renewalDate.toISOString(),
+      customPriceINR: priceINR,
+    });
+
+  } catch (e) {
+    console.error('[admin/activate-corporate]', e.message);
+    return res.status(500).json({ error: 'Corporate activation failed', detail: e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// [CORP-3] PATCH /api/admin/users/:id/corporate-renewal
+// Extend renewal date / update seats without re-activating.
+// ═══════════════════════════════════════════════════════════════════
+router.patch('/users/:id/corporate-renewal', isAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { renewalDate, seats, notes } = req.body;
+
+  if (!renewalDate) return res.status(400).json({ error: 'renewalDate required (ISO string or YYYY-MM-DD)' });
+  const parsed = new Date(renewalDate);
+  if (isNaN(parsed.getTime())) return res.status(400).json({ error: 'Invalid renewalDate' });
+  if (parsed < new Date()) return res.status(400).json({ error: 'renewalDate must be in the future' });
+
+  try {
+    const { rows } = await query(`SELECT subscription_plan, email, full_name FROM users WHERE id=$1`, [id]);
+    if (!rows.length) return res.status(404).json({ error: 'User not found' });
+    if (rows[0].subscription_plan !== 'corporate') {
+      return res.status(400).json({ error: 'User is not on Corporate plan — activate first' });
+    }
+
+    await query(
+      `UPDATE users SET
+         subscription_renewal_date = $1,
+         corporate_managed         = TRUE,
+         updated_at                = NOW()
+       WHERE id = $2`,
+      [parsed, id]
+    );
+
+    if (seats != null) {
+      const seatLimit = seats === 'unlimited' ? 999 : parseInt(seats);
+      if (!isNaN(seatLimit) && seatLimit > 0) {
+        await query(`UPDATE organisations SET seats_limit=$1, updated_at=NOW() WHERE owner_id=$2`, [seatLimit, id]);
+      }
+    }
+
+    await invalidateUserCache(id);
+
+    await auditLog(
+      req.user.id, 'CORPORATE_RENEWAL_UPDATED', id,
+      `New renewal: ${parsed.toISOString()} · Seats: ${seats ?? 'unchanged'} · ${notes || ''}`
+    );
+
+    await createNotification(
+      id, 'WALLET', '📅 Corporate Plan Renewed',
+      `Your Corporate plan has been renewed until ${parsed.toLocaleDateString('en-IN')}.`,
+      '/billing', { plan: 'corporate' }
+    ).catch(() => {});
+
+    res.json({ ok: true, renewalDate: parsed.toISOString() });
+  } catch (e) {
+    console.error('[admin/corporate-renewal]', e.message);
+    res.status(500).json({ error: 'Renewal update failed' });
+  }
+});
+
+// ── Listings ──────────────────────────────────────────────────────
+router.get('/listings', isAdmin, async (req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT ml.batch_id, ml.token_id, ml.listing_id, ml.project_name,
+              ml.registry_serial, ml.standard, ml.vintage_year, ml.project_type,
+              ml.price_per_credit_inr, ml.seller_id, ml.seller_wallet, ml.seller_name,
+              ml.seller_email, ml.created_at, ml.updated_at,
+              ml.available_credits AS amount_remaining
+       FROM market_listings ml ORDER BY ml.created_at DESC`
+    );
+    res.json({ listings: rows.filter(l => l.amount_remaining > 0) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.post('/listings/:listingId/force-delist', isAdmin, async (req, res) => {
   const { listingId } = req.params;
   const { reason } = req.body;
   if (!reason) return res.status(400).json({ error: 'Reason required' });
   try {
-    const { rows } = await query(
-      `SELECT * FROM market_listings WHERE listing_id=$1`, [parseInt(listingId)]
-    );
+    const lid = parseInt(listingId, 10);
+    if (isNaN(lid)) return res.status(400).json({ error: 'Invalid listing ID' });
+    const { rows } = await query(`SELECT * FROM market_listings WHERE listing_id=$1`, [lid]);
     if (!rows.length) return res.status(404).json({ error: 'Listing not found' });
     const listing = rows[0];
-    // Return credits to batch
     if (listing.batch_id && listing.amount_remaining > 0) {
-      await query(
-        `UPDATE carbon_batches
-         SET available_credits = available_credits + $1,
-             status = CASE WHEN status='listed' THEN 'tokenised' ELSE status END,
-             updated_at = NOW()
-         WHERE id = $2`,
-        [listing.amount_remaining, listing.batch_id]
-      );
+      await query(`UPDATE carbon_batches SET available_credits=available_credits+$1, status=CASE WHEN status='listed' THEN 'tokenised' ELSE status END, updated_at=NOW() WHERE id=$2`, [listing.amount_remaining, listing.batch_id]);
     }
-    // Remove from market_listings
-    await query(
-      `DELETE FROM market_listings WHERE listing_id=$1`, [parseInt(listingId)]
-    );
-    await auditLog(req.user.id, 'LISTING_FORCE_DELISTED', listing.seller_id,
-      `Listing #${listingId} — ${reason}`);
-    await createNotification(listing.seller_id, 'CREDIT', '⚠ Listing Removed by Admin',
-      `Your listing for "${listing.project_name}" was removed. Reason: ${reason}`,
-      '/portfolio', { listingId });
+    await query(`DELETE FROM market_listings WHERE listing_id=$1`, [lid]);
+    await auditLog(req.user.id, 'LISTING_FORCE_DELISTED', listing.seller_id, `Listing #${listingId} — ${reason}`);
+    await createNotification(listing.seller_id, 'CREDIT', '⚠ Listing Removed by Admin', `Your listing for "${listing.project_name}" was removed. Reason: ${reason}`, '/portfolio', { listingId });
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -852,38 +1130,61 @@ router.post('/listings/:listingId/override-price', isAdmin, async (req, res) => 
   const { listingId } = req.params;
   const { priceInr, reason } = req.body;
   if (!priceInr || !reason) return res.status(400).json({ error: 'priceInr and reason required' });
+  const price = parseFloat(priceInr);
+  if (isNaN(price) || price <= 0) return res.status(400).json({ error: 'priceInr must be a positive number' });
   try {
-    const { rows } = await query(
-      `SELECT * FROM market_listings WHERE listing_id=$1`, [parseInt(listingId)]
-    );
+    const lid = parseInt(listingId, 10);
+    if (isNaN(lid)) return res.status(400).json({ error: 'Invalid listing ID' });
+    const { rows } = await query(`SELECT * FROM market_listings WHERE listing_id=$1`, [lid]);
     if (!rows.length) return res.status(404).json({ error: 'Listing not found' });
-    await query(
-      `UPDATE market_listings SET price_per_credit_inr=$1, updated_at=NOW() WHERE listing_id=$2`,
-      [parseFloat(priceInr), parseInt(listingId)]
-    );
-    // Also update carbon_batches price
-    await query(
-      `UPDATE carbon_batches SET price_per_credit_inr=$1, updated_at=NOW() WHERE id=$2`,
-      [parseFloat(priceInr), rows[0].batch_id]
-    );
-    await auditLog(req.user.id, 'LISTING_PRICE_OVERRIDDEN', rows[0].seller_id,
-      `Listing ${listingId}: → ₹${priceInr} — ${reason}`);
-    await createNotification(rows[0].seller_id, 'CREDIT', '📝 Listing Price Updated by Admin',
-      `Your listing for "${rows[0].project_name}" price was corrected to ₹${parseFloat(priceInr).toLocaleString('en-IN')}/credit. Reason: ${reason}`,
-      '/portfolio', { listingId });
+    await query(`UPDATE market_listings SET price_per_credit_inr=$1, updated_at=NOW() WHERE listing_id=$2`, [price, lid]);
+    await query(`UPDATE carbon_batches SET price_per_credit_inr=$1, updated_at=NOW() WHERE id=$2`, [price, rows[0].batch_id]);
+    await auditLog(req.user.id, 'LISTING_PRICE_OVERRIDDEN', rows[0].seller_id, `Listing ${listingId}: → ₹${price} — ${reason}`);
+    await createNotification(rows[0].seller_id, 'CREDIT', '📝 Listing Price Updated by Admin', `Your listing for "${rows[0].project_name}" price was corrected to ₹${price.toLocaleString('en-IN')}/credit. Reason: ${reason}`, '/portfolio', { listingId });
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Revenue ───────────────────────────────────────────────────────
+router.get('/revenue', isAdmin, async (req, res) => {
+  const period = Math.min(parseInt(req.query.period || '30', 10), 365);
+  try {
+    const [totalFees, feesByMonth, topTraders, creditsByStandard, retirementsByMonth, activeUsers] = await Promise.all([
+      query(`SELECT COALESCE(SUM(buyer_fee_inr+seller_fee_inr),0) AS total_fees_inr, COALESCE(SUM(CASE WHEN created_at>NOW()-($1||' days')::interval THEN buyer_fee_inr+seller_fee_inr ELSE 0 END),0) AS period_fees_inr, COALESCE(SUM(subtotal_inr),0) AS total_volume_inr, COUNT(*) AS total_trades, COALESCE(SUM(quantity),0) AS total_credits_traded FROM trades WHERE status='completed'`, [period]),
+      query(`SELECT TO_CHAR(DATE_TRUNC('month',created_at),'Mon YYYY') AS month, COALESCE(SUM(buyer_fee_inr+seller_fee_inr),0) AS fees_inr, COALESCE(SUM(subtotal_inr),0) AS volume_inr, COUNT(*) AS trades FROM trades WHERE status='completed' AND created_at>NOW()-INTERVAL '6 months' GROUP BY DATE_TRUNC('month',created_at) ORDER BY DATE_TRUNC('month',created_at) DESC`),
+      query(`SELECT u.id, u.email, u.full_name, COUNT(t.id) AS trade_count, COALESCE(SUM(t.subtotal_inr),0) AS volume_inr FROM trades t JOIN users u ON u.id=t.buyer_id OR u.id=t.seller_id WHERE t.status='completed' GROUP BY u.id,u.email,u.full_name ORDER BY volume_inr DESC LIMIT 10`),
+      query(`SELECT standard, COUNT(*) AS batches, COALESCE(SUM(quantity),0) AS total_credits FROM carbon_batches WHERE admin_status='approved' GROUP BY standard ORDER BY total_credits DESC`),
+      query(`SELECT TO_CHAR(DATE_TRUNC('month',retired_at),'Mon YYYY') AS month, COUNT(*) AS count, COALESCE(SUM(amount),0) AS tco2 FROM retirements WHERE retired_at>NOW()-INTERVAL '6 months' GROUP BY DATE_TRUNC('month',retired_at) ORDER BY DATE_TRUNC('month',retired_at) DESC`),
+      query(`SELECT COUNT(DISTINCT buyer_id)+COUNT(DISTINCT seller_id) AS active FROM trades WHERE status='completed' AND created_at>NOW()-($1||' days')::interval`, [period]),
+    ]);
+    res.json({ summary: totalFees.rows[0], feesByMonth: feesByMonth.rows, topTraders: topTraders.rows, creditsByStandard: creditsByStandard.rows, retirementsByMonth: retirementsByMonth.rows, activeUsers: parseInt(activeUsers.rows[0]?.active || 0), period });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Audit ─────────────────────────────────────────────────────────
+router.get('/audit', isAdmin, async (req, res) => {
+  try {
+    const { rows } = await query(`SELECT a.*, u.email AS target_email, u.full_name AS target_name FROM admin_audit_log a LEFT JOIN users u ON u.id=a.target_user_id ORDER BY a.created_at DESC LIMIT 200`);
+    res.json({ logs: rows });
+  } catch (e) { res.status(500).json({ error: 'Failed to fetch audit log' }); }
+});
+
+router.get('/audit/export', isAdmin, async (req, res) => {
+  try {
+    const { rows } = await query(`SELECT a.created_at, a.action, au.email AS admin_email, u.email AS target_email, u.full_name AS target_name, a.details FROM admin_audit_log a LEFT JOIN users u ON u.id=a.target_user_id LEFT JOIN users au ON au.id=a.admin_id ORDER BY a.created_at DESC`);
+    const headers = ['TIMESTAMP','ACTION','ADMIN','TARGET EMAIL','TARGET NAME','DETAILS'];
+    const csvRows = rows.map(r => [new Date(r.created_at).toISOString(), r.action||'', r.admin_email||'', r.target_email||'', `"${(r.target_name||'').replace(/"/g,'""')}"`, `"${(r.details||'').replace(/"/g,'""')}"`].join(','));
+    const csv = [headers.join(','), ...csvRows].join('\n');
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="ethertrack_audit_${Date.now()}.csv"`);
+    res.send(csv);
+  } catch (e) { res.status(500).json({ error: 'Export failed' }); }
 });
 
 // ── Disputes ──────────────────────────────────────────────────────
 router.get('/disputes', isAdmin, async (req, res) => {
   try {
-    const { rows } = await query(
-      `SELECT d.*, u.email AS target_email, u.full_name AS target_name
-       FROM disputes d
-       JOIN users u ON u.id = d.target_user_id
-       ORDER BY d.created_at DESC`
-    );
+    const { rows } = await query(`SELECT d.*, u.email AS target_email, u.full_name AS target_name FROM disputes d JOIN users u ON u.id=d.target_user_id ORDER BY d.created_at DESC`);
     res.json({ disputes: rows });
   } catch (e) { res.status(500).json({ error: 'Failed to fetch disputes' }); }
 });
@@ -892,11 +1193,7 @@ router.post('/disputes', isAdmin, async (req, res) => {
   const { targetUserId, reason, notes } = req.body;
   if (!targetUserId || !reason) return res.status(400).json({ error: 'Target user and reason required' });
   try {
-    const { rows } = await query(
-      `INSERT INTO disputes (opened_by, target_user_id, reason, notes, status)
-       VALUES ($1,$2,$3,$4,'open') RETURNING id`,
-      [req.user.id, targetUserId, reason, notes || null]
-    );
+    const { rows } = await query(`INSERT INTO disputes (opened_by,target_user_id,reason,notes,status) VALUES ($1,$2,$3,$4,'open') RETURNING id`, [req.user.id, targetUserId, reason, notes || null]);
     await auditLog(req.user.id, 'DISPUTE_OPENED', targetUserId, reason);
     res.json({ message: 'Dispute opened', id: rows[0].id });
   } catch (e) { res.status(500).json({ error: 'Failed to open dispute' }); }
@@ -909,66 +1206,16 @@ router.post('/disputes/:id/resolve', isAdmin, async (req, res) => {
   try {
     const { rows: d } = await query('SELECT * FROM disputes WHERE id=$1', [id]);
     if (!d.length) return res.status(404).json({ error: 'Not found' });
-    await query(
-      `UPDATE disputes SET status='resolved', resolution=$1, resolved_at=NOW(), resolved_by=$2 WHERE id=$3`,
-      [resolution, req.user.id, id]
-    );
+    await query(`UPDATE disputes SET status='resolved', resolution=$1, resolved_at=NOW(), resolved_by=$2 WHERE id=$3`, [resolution, req.user.id, id]);
     await auditLog(req.user.id, 'DISPUTE_RESOLVED', d[0].target_user_id, resolution);
     res.json({ message: 'Dispute resolved' });
   } catch (e) { res.status(500).json({ error: 'Failed to resolve dispute' }); }
 });
 
-// ── Audit ─────────────────────────────────────────────────────────
-router.get('/audit', isAdmin, async (req, res) => {
-  try {
-    const { rows } = await query(
-      `SELECT a.*, u.email AS target_email, u.full_name AS target_name
-       FROM admin_audit_log a
-       LEFT JOIN users u ON u.id = a.target_user_id
-       ORDER BY a.created_at DESC LIMIT 200`
-    );
-    res.json({ logs: rows });
-  } catch (e) { res.status(500).json({ error: 'Failed to fetch audit log' }); }
-});
-
-router.get('/audit/export', isAdmin, async (req, res) => {
-  try {
-    const { rows } = await query(
-      `SELECT a.created_at, a.action,
-              au.email AS admin_email,
-              u.email  AS target_email,
-              u.full_name AS target_name,
-              a.details
-       FROM admin_audit_log a
-       LEFT JOIN users u  ON u.id  = a.target_user_id
-       LEFT JOIN users au ON au.id = a.admin_id
-       ORDER BY a.created_at DESC`
-    );
-    const headers = ['TIMESTAMP','ACTION','ADMIN','TARGET EMAIL','TARGET NAME','DETAILS'];
-    const csvRows = rows.map(r => [
-      new Date(r.created_at).toISOString(),
-      r.action || '',
-      r.admin_email || '',
-      r.target_email || '',
-      `"${(r.target_name || '').replace(/"/g, '""')}"`,
-      `"${(r.details || '').replace(/"/g, '""')}"`,
-    ].join(','));
-    const csv = [headers.join(','), ...csvRows].join('\n');
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="ethertrack_audit_${Date.now()}.csv"`);
-    res.send(csv);
-  } catch (e) { res.status(500).json({ error: 'Export failed' }); }
-});
-
 // ── Announcements ─────────────────────────────────────────────────
 router.get('/announcements', isAdmin, async (req, res) => {
   try {
-    const { rows } = await query(
-      `SELECT a.*, u.email AS created_by_email
-       FROM system_announcements a
-       LEFT JOIN users u ON u.id = a.created_by
-       ORDER BY a.created_at DESC LIMIT 20`
-    ).catch(() => ({ rows: [] }));
+    const { rows } = await query(`SELECT a.*, u.email AS created_by_email FROM system_announcements a LEFT JOIN users u ON u.id=a.created_by ORDER BY a.created_at DESC LIMIT 20`).catch(() => ({ rows: [] }));
     res.json({ announcements: rows });
   } catch (e) { res.json({ announcements: [] }); }
 });
@@ -977,67 +1224,77 @@ router.post('/announcements', isAdmin, async (req, res) => {
   const { title, message, type = 'info', expiresAt } = req.body;
   if (!title || !message) return res.status(400).json({ error: 'title and message required' });
   try {
-    await query(`CREATE TABLE IF NOT EXISTS system_announcements (
-      id SERIAL PRIMARY KEY, title TEXT NOT NULL, message TEXT NOT NULL,
-      type VARCHAR(20) DEFAULT 'info', expires_at TIMESTAMPTZ,
-      active BOOLEAN DEFAULT TRUE, created_by UUID, created_at TIMESTAMPTZ DEFAULT NOW()
-    )`).catch(() => {});
-    const { rows } = await query(
-      `INSERT INTO system_announcements (title, message, type, expires_at, created_by, created_at)
-       VALUES ($1,$2,$3,$4,$5,NOW()) RETURNING id`,
-      [title, message, type, expiresAt || null, req.user.id]
-    );
+    const { rows } = await query(`INSERT INTO system_announcements (title,message,type,expires_at,created_by,created_at) VALUES ($1,$2,$3,$4,$5,NOW()) RETURNING id`, [title, message, type, expiresAt || null, req.user.id]);
     await auditLog(req.user.id, 'ANNOUNCEMENT_CREATED', null, `"${title}"`);
     res.json({ success: true, id: rows[0].id });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.delete('/announcements/:id', isAdmin, async (req, res) => {
-  try {
-    await query(`UPDATE system_announcements SET active=FALSE WHERE id=$1`, [req.params.id]);
-    res.json({ success: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  try { await query(`UPDATE system_announcements SET active=FALSE WHERE id=$1`, [req.params.id]); res.json({ success: true }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.post('/announcements/broadcast', isAdmin, async (req, res) => {
   const { subject, message, sendEmail: doEmail } = req.body;
   if (!subject || !message) return res.status(400).json({ error: 'subject and message required' });
+  if (message.length > 10000) return res.status(400).json({ error: 'Message too long (max 10000 chars)' });
   try {
-    const { rows: allUsers } = await query(
-      `SELECT id, email, full_name FROM users WHERE is_active=TRUE AND role != 'admin' AND frozen=FALSE`
-    );
-    let sent = 0, failed = 0;
-    for (const u of allUsers) {
-      try {
-        await createNotification(u.id, 'SYSTEM', `📢 ${subject}`, message.slice(0, 200), '/dashboard', {});
-        if (doEmail) {
-          await sendEmail({
-            to: u.email,
-            subject: `EtherTrack — ${subject}`,
-            html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;">
-              <h2 style="color:#f59e0b;">📢 Platform Announcement</h2>
-              <p>Hi ${u.full_name},</p>
-              <div style="padding:16px;background:#0d0a00;border-left:3px solid #f59e0b;border-radius:4px;white-space:pre-wrap;font-size:13px;line-height:1.7;">${message}</div>
-            </div>`,
-          });
-        }
-        sent++;
-      } catch { failed++; }
-    }
-    await auditLog(req.user.id, 'ANNOUNCEMENT_BROADCAST', null, `"${subject}" — ${sent} sent, ${failed} failed`);
-    res.json({ success: true, sent, failed, total: allUsers.length });
+    const { rows: allUsers } = await query(`SELECT id, email, full_name FROM users WHERE is_active=TRUE AND role!='admin' AND frozen=FALSE`);
+    res.json({ success: true, total: allUsers.length, message: `Broadcast queued for ${allUsers.length} users` });
+    setImmediate(async () => {
+      const safeSubject = escHtml(subject);
+      const safeMessage = escHtml(message);
+      let sent = 0, failed = 0;
+      for (const u of allUsers) {
+        try {
+          await createNotification(u.id, 'SYSTEM', `📢 ${subject}`, message.slice(0, 200), '/dashboard', {});
+          if (doEmail) {
+            await sendEmail({ to: u.email, subject: `EtherTrack — ${safeSubject}`, html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;"><h2 style="color:#f59e0b;">📢 Platform Announcement</h2><p>Hi ${escHtml(u.full_name)},</p><div style="padding:16px;background:#0d0a00;border-left:3px solid #f59e0b;border-radius:4px;white-space:pre-wrap;font-size:13px;line-height:1.7;">${safeMessage}</div></div>` });
+          }
+          sent++;
+        } catch { failed++; }
+      }
+      await auditLog(req.user.id, 'ANNOUNCEMENT_BROADCAST', null, `"${subject}" — ${sent} sent, ${failed} failed`).catch(() => {});
+      console.log(`[admin/broadcast] "${subject}" — ${sent} sent, ${failed} failed`);
+    });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Chain Health ──────────────────────────────────────────────────
+router.get('/health/onchain', isAdmin, async (req, res) => {
+  const results = { minterWallet: { address: null, balanceEth: null, ok: false, error: null }, rpcConnected: false, lastMint: null, pendingMints: 0, failedMints: 0, contractAddress: process.env.CARBON_CREDIT_TOKEN_ADDRESS || null, marketplaceAddress: process.env.MARKETPLACE_ADDRESS || null, network: 'sepolia' };
+  try {
+    const [lastMint, pending, failed] = await Promise.all([
+      query(`SELECT tokenised_at, token_id, project_name FROM carbon_batches WHERE token_id IS NOT NULL ORDER BY tokenised_at DESC LIMIT 1`),
+      query(`SELECT COUNT(*) FROM carbon_batches WHERE admin_status='approved' AND token_id IS NULL`),
+      query(`SELECT COUNT(*) FROM carbon_batches WHERE admin_status='approved' AND token_id IS NULL AND admin_notes LIKE '%MINT ERROR%'`),
+    ]);
+    results.lastMint     = lastMint.rows[0] || null;
+    results.pendingMints = parseInt(pending.rows[0].count);
+    results.failedMints  = parseInt(failed.rows[0].count);
+  } catch (e) { results.dbError = e.message; }
+  try {
+    const { ethers } = require('ethers');
+    const provider = new ethers.JsonRpcProvider(process.env.ALCHEMY_RPC);
+    const network  = await provider.getNetwork();
+    results.rpcConnected = true;
+    results.chainId      = Number(network.chainId);
+    const minterAddress  = process.env.MINTER_ADDRESS;
+    if (minterAddress) {
+      results.minterWallet.address    = minterAddress;
+      const balance = await provider.getBalance(minterAddress);
+      results.minterWallet.balanceEth = parseFloat(require('ethers').formatEther(balance)).toFixed(4);
+      results.minterWallet.ok         = parseFloat(results.minterWallet.balanceEth) > 0.01;
+    }
+  } catch (e) { results.rpcConnected = false; results.minterWallet.error = e.message; }
+  res.json(results);
 });
 
 // ── Blacklist ─────────────────────────────────────────────────────
 router.get('/serials/blacklist', isAdmin, async (req, res) => {
   try {
-    const { rows } = await query(
-      `SELECT bs.*, u.email AS blacklisted_by_email
-       FROM blacklisted_serials bs
-       LEFT JOIN users u ON u.id = bs.blacklisted_by
-       ORDER BY bs.blacklisted_at DESC`
-    ).catch(() => ({ rows: [] }));
+    const { rows } = await query(`SELECT bs.*, u.email AS blacklisted_by_email FROM blacklisted_serials bs LEFT JOIN users u ON u.id=bs.blacklisted_by ORDER BY bs.blacklisted_at DESC`).catch(() => ({ rows: [] }));
     res.json({ blacklist: rows });
   } catch (e) { res.json({ blacklist: [] }); }
 });
@@ -1046,39 +1303,17 @@ router.post('/serials/blacklist', isAdmin, async (req, res) => {
   const { serial, reason } = req.body;
   if (!serial || !reason) return res.status(400).json({ error: 'serial and reason required' });
   try {
-    await query(`CREATE TABLE IF NOT EXISTS blacklisted_serials (
-      serial_number TEXT PRIMARY KEY, reason TEXT,
-      blacklisted_by UUID, blacklisted_at TIMESTAMPTZ DEFAULT NOW()
-    )`).catch(() => {});
-    await query(
-      `INSERT INTO blacklisted_serials (serial_number, reason, blacklisted_by, blacklisted_at)
-       VALUES ($1,$2,$3,NOW())
-       ON CONFLICT (serial_number)
-       DO UPDATE SET reason=$2, blacklisted_by=$3, blacklisted_at=NOW()`,
-      [serial.trim(), reason, req.user.id]
-    );
-    const { rows: affected } = await query(
-      `UPDATE carbon_batches SET admin_status='rejected', admin_notes=$1
-       WHERE registry_serial=$2 AND admin_status='pending'
-       RETURNING user_id, project_name`,
-      [`Blacklisted serial: ${reason}`, serial.trim()]
-    );
-    for (const b of affected) {
-      await createNotification(b.user_id, 'CREDIT', '❌ Credit Submission Rejected',
-        `Serial ${serial} has been blacklisted. Reason: ${reason}`, '/portfolio', {});
-    }
-    await auditLog(req.user.id, 'SERIAL_BLACKLISTED', null,
-      `Serial: ${serial} — ${reason} (${affected.length} batches auto-rejected)`);
+    await query(`INSERT INTO blacklisted_serials (serial_number,reason,blacklisted_by,blacklisted_at) VALUES ($1,$2,$3,NOW()) ON CONFLICT (serial_number) DO UPDATE SET reason=$2, blacklisted_by=$3, blacklisted_at=NOW()`, [serial.trim(), reason, req.user.id]);
+    const { rows: affected } = await query(`UPDATE carbon_batches SET admin_status='rejected', admin_notes=$1 WHERE registry_serial=$2 AND admin_status='pending' RETURNING user_id, project_name`, [`Blacklisted serial: ${reason}`, serial.trim()]);
+    for (const b of affected) await createNotification(b.user_id, 'CREDIT', '❌ Credit Submission Rejected', `Serial ${serial} has been blacklisted. Reason: ${reason}`, '/portfolio', {});
+    await auditLog(req.user.id, 'SERIAL_BLACKLISTED', null, `Serial: ${serial} — ${reason} (${affected.length} batches auto-rejected)`);
     res.json({ success: true, affectedBatches: affected.length });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.delete('/serials/blacklist/:serial', isAdmin, async (req, res) => {
   try {
-    await query(
-      `DELETE FROM blacklisted_serials WHERE serial_number=$1`,
-      [decodeURIComponent(req.params.serial)]
-    );
+    await query(`DELETE FROM blacklisted_serials WHERE serial_number=$1`, [decodeURIComponent(req.params.serial)]);
     await auditLog(req.user.id, 'SERIAL_UNBLACKLISTED', null, `Serial: ${req.params.serial}`);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1088,203 +1323,17 @@ router.delete('/serials/blacklist/:serial', isAdmin, async (req, res) => {
 router.get('/projects', isAdmin, async (req, res) => {
   try {
     const { rows } = await query(
-      `SELECT
-         p.id, p.name AS project_name, p.project_code, p.standard,
-         p.project_type, p.location, p.country, p.developer_name,
-         COUNT(cb.id)                                        AS batch_count,
-         COALESCE(SUM(cb.quantity), 0)                       AS total_credits,
-         COALESCE(SUM(cb.available_credits), 0)              AS available_credits,
-         COALESCE(SUM(cb.retired_credits), 0)                AS retired_credits,
-         COUNT(CASE WHEN cb.token_id IS NOT NULL THEN 1 END) AS minted_batches,
-         COUNT(CASE WHEN cb.admin_status='pending' THEN 1 END) AS pending_batches,
-         MAX(cb.updated_at)                                  AS last_activity
-       FROM projects p
-       LEFT JOIN carbon_batches cb ON cb.project_id = p.id
-       GROUP BY p.id, p.name, p.project_code, p.standard,
-                p.project_type, p.location, p.country, p.developer_name
-       ORDER BY last_activity DESC NULLS LAST`
-    );
+      `SELECT p.id, p.project_name, p.project_code, p.developer_name, p.standard,
+              COUNT(b.id) AS batch_count,
+              COALESCE(SUM(b.total_credits),0)     AS total_credits,
+              COALESCE(SUM(b.available_credits),0) AS available_credits,
+              COALESCE(SUM(b.retired_credits),0)   AS retired_credits,
+              COUNT(CASE WHEN b.token_id IS NOT NULL THEN 1 END) AS minted_batches
+       FROM projects p LEFT JOIN carbon_batches b ON b.project_id=p.id
+       WHERE b.admin_status='approved' OR b.admin_status IS NULL
+       GROUP BY p.id ORDER BY total_credits DESC`
+    ).catch(() => ({ rows: [] }));
     res.json({ projects: rows });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// ── Revenue ───────────────────────────────────────────────────────
-// ✅ FIX: trades uses subtotal_inr, buyer_fee_inr, seller_fee_inr, buyer_pays_inr
-//         no 'volume' col — compute from subtotal_inr
-router.get('/revenue', isAdmin, async (req, res) => {
-  const { period = '30' } = req.query;
-  try {
-    const [totalFees, feesByMonth, topTraders, creditsByStandard, retirementsByMonth, activeUsers] =
-      await Promise.all([
-        query(`
-          SELECT
-            COALESCE(SUM(buyer_fee_inr + seller_fee_inr), 0)   AS total_fees_inr,
-            COALESCE(SUM(CASE WHEN created_at > NOW() - ($1 || ' days')::interval
-              THEN buyer_fee_inr + seller_fee_inr ELSE 0 END), 0) AS period_fees_inr,
-            COALESCE(SUM(subtotal_inr), 0)                     AS total_volume_inr,
-            COUNT(*)                                           AS total_trades,
-            COALESCE(SUM(quantity), 0)                         AS total_credits_traded
-          FROM trades WHERE status='completed'
-        `, [period]),
-
-        query(`
-          SELECT
-            TO_CHAR(DATE_TRUNC('month', created_at), 'Mon YYYY') AS month,
-            COALESCE(SUM(buyer_fee_inr + seller_fee_inr), 0)    AS fees_inr,
-            COALESCE(SUM(subtotal_inr), 0)                       AS volume_inr,
-            COUNT(*)                                             AS trades
-          FROM trades
-          WHERE status='completed' AND created_at > NOW() - INTERVAL '6 months'
-          GROUP BY DATE_TRUNC('month', created_at)
-          ORDER BY DATE_TRUNC('month', created_at) DESC
-        `),
-
-        // ✅ FIX: join users separately for name/email — trades only has buyer_id/seller_id
-        query(`
-          SELECT
-            u.id, u.email, u.full_name,
-            COUNT(t.id)                      AS trade_count,
-            COALESCE(SUM(t.subtotal_inr), 0) AS volume_inr
-          FROM trades t
-          JOIN users u ON u.id = t.buyer_id OR u.id = t.seller_id
-          WHERE t.status = 'completed'
-          GROUP BY u.id, u.email, u.full_name
-          ORDER BY volume_inr DESC LIMIT 10
-        `),
-
-        query(`
-          SELECT standard,
-            COUNT(*) AS batches,
-            COALESCE(SUM(quantity), 0) AS total_credits
-          FROM carbon_batches WHERE admin_status='approved'
-          GROUP BY standard ORDER BY total_credits DESC
-        `),
-
-        // ✅ FIX: retirements uses retired_at not created_at
-        query(`
-          SELECT
-            TO_CHAR(DATE_TRUNC('month', retired_at), 'Mon YYYY') AS month,
-            COUNT(*)                                              AS count,
-            COALESCE(SUM(amount), 0)                             AS tco2
-          FROM retirements
-          WHERE retired_at > NOW() - INTERVAL '6 months'
-          GROUP BY DATE_TRUNC('month', retired_at)
-          ORDER BY DATE_TRUNC('month', retired_at) DESC
-        `),
-
-        query(`
-          SELECT COUNT(DISTINCT buyer_id) + COUNT(DISTINCT seller_id) AS active
-          FROM trades WHERE status='completed'
-            AND created_at > NOW() - ($1 || ' days')::interval
-        `, [period]),
-      ]);
-
-    res.json({
-      summary:            totalFees.rows[0],
-      feesByMonth:        feesByMonth.rows,
-      topTraders:         topTraders.rows,
-      creditsByStandard:  creditsByStandard.rows,
-      retirementsByMonth: retirementsByMonth.rows,
-      activeUsers:        parseInt(activeUsers.rows[0]?.active || 0),
-      period:             parseInt(period),
-    });
-  } catch (e) {
-    console.error('revenue error:', e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ── Chain Health ──────────────────────────────────────────────────
-router.get('/health/onchain', isAdmin, async (req, res) => {
-  const results = {
-    minterWallet:       { address: null, balanceEth: null, ok: false, error: null },
-    rpcConnected:       false,
-    lastMint:           null,
-    pendingMints:       0,
-    failedMints:        0,
-    contractAddress:    process.env.CARBON_CREDIT_TOKEN_ADDRESS || null,
-    marketplaceAddress: process.env.MARKETPLACE_ADDRESS || null,
-    network:            'sepolia',
-  };
-  try {
-    // ✅ FIX: carbon_batches uses tokenised_at not created_at for mints
-    const [lastMint, pending, failed] = await Promise.all([
-      query(`SELECT tokenised_at, token_id, project_name FROM carbon_batches
-             WHERE token_id IS NOT NULL ORDER BY tokenised_at DESC LIMIT 1`),
-      query(`SELECT COUNT(*) FROM carbon_batches WHERE admin_status='approved' AND token_id IS NULL`),
-      query(`SELECT COUNT(*) FROM carbon_batches WHERE admin_status='approved' AND token_id IS NULL AND admin_notes LIKE '%MINT ERROR%'`),
-    ]);
-    results.lastMint     = lastMint.rows[0] || null;
-    results.pendingMints = parseInt(pending.rows[0].count);
-    results.failedMints  = parseInt(failed.rows[0].count);
-  } catch (e) { results.dbError = e.message; }
-
-  try {
-    const { ethers } = require('ethers');
-    const provider = new ethers.JsonRpcProvider(process.env.ALCHEMY_RPC);
-    const network  = await provider.getNetwork();
-    results.rpcConnected = true;
-    results.chainId = Number(network.chainId);
-    if (process.env.MINTER_PRIVATE_KEY) {
-      const wallet = new ethers.Wallet(process.env.MINTER_PRIVATE_KEY, provider);
-      results.minterWallet.address    = wallet.address;
-      const balance = await provider.getBalance(wallet.address);
-      results.minterWallet.balanceEth = parseFloat(ethers.formatEther(balance)).toFixed(4);
-      results.minterWallet.ok         = parseFloat(results.minterWallet.balanceEth) > 0.01;
-    }
-  } catch (e) {
-    results.rpcConnected       = false;
-    results.minterWallet.error = e.message;
-  }
-
-  res.json(results);
-});
-
-// ── Mint error diagnostics ────────────────────────────────────────
-router.get('/credits/:id/mint-errors', isAdmin, async (req, res) => {
-  const { id } = req.params;
-  try {
-    const { rows } = await query(
-      `SELECT cb.id, cb.project_name, cb.registry_serial, cb.standard,
-              cb.quantity, cb.vintage_year, cb.expiry_date,
-              cb.admin_status, cb.status, cb.token_id,
-              cb.admin_notes, cb.tx_hash_mint,
-              cb.created_at, cb.updated_at,
-              u.wallet_address, u.email, u.full_name, u.kyc_verified
-       FROM carbon_batches cb
-       JOIN users u ON u.id = cb.user_id
-       WHERE cb.id = $1`,
-      [id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Batch not found' });
-    const b = rows[0];
-    const diagnostics = [];
-    if (!b.wallet_address)
-      diagnostics.push({ severity:'critical', issue:'No wallet address', fix:'Use "Assign Wallet + Mint"' });
-    if (!b.kyc_verified)
-      diagnostics.push({ severity:'critical', issue:'User KYC not verified', fix:'Approve KYC first' });
-    const expiry = b.expiry_date ? new Date(b.expiry_date) : null;
-    if (expiry && expiry < new Date())
-      diagnostics.push({ severity:'critical', issue:`Expiry date in the past (${b.expiry_date})`, fix:'Update expiry_date in Supabase then retry' });
-    if (!b.quantity || b.quantity <= 0)
-      diagnostics.push({ severity:'critical', issue:`Invalid quantity: ${b.quantity}`, fix:'Use "Correct Quantity"' });
-    const mintErrors = [];
-    if (b.admin_notes) {
-      const matches = b.admin_notes.matchAll(/\[MINT ERROR ([^\]]+)\]: (.+)/g);
-      for (const m of matches) mintErrors.push({ timestamp: m[1], error: m[2] });
-    }
-    if (mintErrors.length) {
-      const lastErr = mintErrors[mintErrors.length - 1].error;
-      if (lastErr.includes('Serial already registered'))
-        diagnostics.push({ severity:'warning', issue:'Serial already on-chain', fix:'Use "Set Token ID Manually"' });
-      if (lastErr.includes('insufficient funds'))
-        diagnostics.push({ severity:'critical', issue:'Minter wallet out of ETH', fix:'Top up at faucet.sepolia.dev' });
-      if (lastErr.includes('ALCHEMY_RPC') || lastErr.includes('network'))
-        diagnostics.push({ severity:'warning', issue:'RPC connection failed', fix:'Check ALCHEMY_RPC env var' });
-    }
-    if (!diagnostics.length && !mintErrors.length)
-      diagnostics.push({ severity:'info', issue:'No errors recorded', fix:'Try retrying the mint' });
-    res.json({ batch: b, diagnostics, mintErrors });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

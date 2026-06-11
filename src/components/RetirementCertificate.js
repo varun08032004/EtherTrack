@@ -1,8 +1,9 @@
-// RetirementCertificate.js — extracted from Portfolio.js
-// FIXES:
-//   1. jsPDF lazy import now shows loading spinner — no silent 300KB stall
-//   2. certId always comes from DB (passed as prop) — never re-generated locally
-//   3. QR code fallback to Etherscan link if QR server is down
+// RetirementCertificate.js
+// CHANGES FROM YOUR VERSION:
+//   [1] handleDownloadPDF now calls /api/certificates/:certId/pdf (server-side Puppeteer)
+//       instead of jsPDF. No more .txt fallback for enterprise auditors.
+//   [2] Verifier badge shown when credit.verifier is passed
+//   [3] aria-label + data-testid on action buttons
 
 import React, { useState } from 'react';
 
@@ -28,8 +29,8 @@ function QRCodeImg({ value, size = 120 }) {
   const url = `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(value)}&bgcolor=0a0f0c&color=22c55e&margin=2`;
   if (failed) {
     return (
-      <div style={{ width: size, height: size, display:'flex', alignItems:'center', justifyContent:'center', flexDirection:'column', gap:4 }}>
-        <span style={{ fontSize: 9, color:'#86efac33', textAlign:'center', lineHeight:1.4 }}>QR unavailable</span>
+      <div style={{ width:size, height:size, display:'flex', alignItems:'center', justifyContent:'center', flexDirection:'column', gap:4 }}>
+        <span style={{ fontSize:9, color:'#86efac33', textAlign:'center', lineHeight:1.4 }}>QR unavailable</span>
         <a href={value} target="_blank" rel="noreferrer" style={{ fontSize:8, color:'#22c55e88', textDecoration:'none' }}>Open link ↗</a>
       </div>
     );
@@ -37,7 +38,7 @@ function QRCodeImg({ value, size = 120 }) {
   return (
     <div style={{ textAlign:'center' }}>
       <img
-        src={url} alt="QR Code" width={size} height={size}
+        src={url} alt="QR code to verify certificate" width={size} height={size}
         style={{ borderRadius:8, border:'1px solid #22c55e22', background:'#0a0f0c' }}
         onError={() => setFailed(true)}
       />
@@ -46,143 +47,40 @@ function QRCodeImg({ value, size = 120 }) {
   );
 }
 
-export function RetirementCertificate({ credit, txHash, onClose }) {
-  // ✅ FIX: pdfLoading state — no silent stall on 300KB jsPDF import
+// [1] verifiers prop — array from useRBAC, same as PortfolioV3 passes
+export function RetirementCertificate({ credit, txHash, onClose, verifiers }) {
   const [pdfLoading, setPdfLoading] = useState(false);
 
   const date           = new Date().toLocaleDateString('en-IN', { day:'2-digit', month:'long', year:'numeric' });
   const tokenDisplay   = credit.tokenHex || (credit.tokenId ? `0x${Number(credit.tokenId).toString(16).padStart(8,'0').toUpperCase()}` : '—');
-
-  // ✅ FIX: certId ALWAYS comes from the DB via props — never re-generated here.
-  // Portfolio.js passes certId from retireSteps.certId which comes from backend response.
-  // If certId is missing (old code path), we show a warning rather than silently wrong.
-  const certId    = credit.certId || credit.certificate_id;
-  const verifyUrl = certId ? `${VERIFY_BASE_URL}/${certId}` : null;
-
-  const reg         = REGISTRIES[credit.standard] || REGISTRIES.VCS;
-  const scopeLabel  = credit.retireScope ? `Scope ${credit.retireScope}` : 'Scope 1/2/3';
+  const certId         = credit.certId || credit.certificate_id;
+  const verifyUrl      = certId ? `${VERIFY_BASE_URL}/${certId}` : null;
+  const reg            = REGISTRIES[credit.standard] || REGISTRIES.VCS;
+  const scopeLabel     = credit.retireScope ? `Scope ${credit.retireScope}` : 'Scope 1/2/3';
   const creditTypeLabel = credit.creditType === 'compliance' ? 'CCC — Compliance (India CCTS)' : 'VCU — Voluntary Carbon Unit';
-  const verifiedBy  = credit.acvaName || 'Pending third-party verification';
-  const caLabel     = CA_OPTIONS.find(o => o.value === credit.correspondingAdjustment)?.label || 'None';
-  const sdgList     = (credit.sdgTags || []).join(', ') || '—';
+  const verifiedBy     = credit.acvaName || 'Pending third-party verification';
+  const caLabel        = CA_OPTIONS.find(o => o.value === credit.correspondingAdjustment)?.label || 'None';
+  const sdgList        = (credit.sdgTags || []).join(', ') || '—';
 
+  // [2] Connected verifier — shown as independent verification badge
+  const connectedVerifier = verifiers?.find(v => v.status === 'connected');
+
+  // [1] Server-side PDF — calls Puppeteer backend instead of jsPDF
+  //     No more .txt fallback. If the server is down the button shows an error toast.
   const handleDownloadPDF = async () => {
-    // ✅ FIX: show loading state immediately — jsPDF is ~300KB
+    if (!certId) return;
     setPdfLoading(true);
     try {
-      const { jsPDF } = await import('jspdf');
-      const doc = new jsPDF({ orientation:'portrait', unit:'mm', format:'a4' });
-      const W = 210, ml = 20, tw = W - 40;
-      let y = 20;
-
-      doc.setFillColor(4, 7, 6); doc.rect(0, 0, W, 297, 'F');
-      doc.setFillColor(13, 46, 31); doc.rect(0, 0, W, 40, 'F');
-
-      // Logo
-      try {
-        const logoRes = await fetch('/et_logo.png');
-        if (logoRes.ok) {
-          const blob = await logoRes.blob();
-          const logoB64 = await new Promise((resolve) => {
-            const img = new Image();
-            const url = URL.createObjectURL(blob);
-            img.onload = () => {
-              try {
-                const canvas = document.createElement('canvas');
-                canvas.width  = img.naturalWidth  || 200;
-                canvas.height = img.naturalHeight || 200;
-                const ctx = canvas.getContext('2d');
-                ctx.fillStyle = '#ffffff';
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
-                ctx.drawImage(img, 0, 0);
-                URL.revokeObjectURL(url);
-                resolve(canvas.toDataURL('image/jpeg', 0.92));
-              } catch { URL.revokeObjectURL(url); resolve(null); }
-            };
-            img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
-            img.src = url;
-          });
-          if (logoB64 && logoB64.startsWith('data:image/jpeg')) {
-            doc.addImage(logoB64, 'JPEG', ml, 6, 28, 28);
-          }
-        }
-      } catch { /* logo optional */ }
-
-      doc.setTextColor(34,197,94); doc.setFontSize(8); doc.setFont('helvetica','normal');
-      doc.text('ETHERTRACK CARBON EXCHANGE — CORPORATE RETIREMENT CERTIFICATE', W/2, y, { align:'center' }); y += 7;
-      doc.setFontSize(16); doc.setFont('helvetica','bold'); doc.setTextColor(240,253,244);
-      doc.text('Carbon Retirement Certificate', W/2, y, { align:'center' }); y += 6;
-      doc.setFontSize(7); doc.setFont('helvetica','normal'); doc.setTextColor(134,239,172);
-      doc.text('VERIFIED · ISO 14064-3 · GHG PROTOCOL · BRSR · CDP · TCFD · ETHEREUM SEPOLIA', W/2, y, { align:'center' }); y += 14;
-
-      const fields = [
-        ['CERTIFICATE ID',      certId || 'PENDING'],
-        ['TOKEN ID',            tokenDisplay],
-        ['CREDIT TYPE',         creditTypeLabel],
-        ['OFFSET SCOPE',        scopeLabel],
-        ['ARTICLE 6 / CA',      caLabel],
-        ['SDG CO-BENEFITS',     sdgList],
-        ['PROJECT NAME',        credit.projectName || '—'],
-        ['SERIAL NO.',          credit.serialNumber || '—'],
-        ['REGISTRY',            reg.label],
-        ['STANDARD',            credit.standard || '—'],
-        ['CREDITS RETIRED',     `${(credit.retiredQty || credit.credits)?.toLocaleString()} tCO₂e`],
-        ['VINTAGE YEAR',        String(credit.vintageYear || '—')],
-        ['COUNTRY',             credit.country || '—'],
-        ['BENEFICIARY NAME',    credit.beneficiaryName || '—'],
-        ['BENEFICIARY ENTITY',  credit.beneficiaryEntity || '—'],
-        ['BENEFICIARY GSTIN',   credit.beneficiaryGstin || '—'],
-        ['REPORTING STANDARD',  credit.reportingStandard || 'GHG Protocol'],
-        ['PURPOSE',             credit.purpose || 'Voluntary Offset'],
-        ['ACVA VERIFIER',       verifiedBy],
-        ['ICVCM CCP',           credit.icvcm_ccp_eligible ? `Yes — ${credit.icvcm_ccp_label || 'CCP Eligible'}` : 'Not assessed'],
-        ['RETIREMENT DATE',     date],
-        ['CBAM ELIGIBLE',       credit.cbamEligible ? 'YES — EU CBAM Article 7' : 'NO'],
-      ];
-
-      const colW = (tw - 6) / 2;
-      fields.forEach(([label, value], i) => {
-        const col = i % 2, x = ml + col * (colW + 6);
-        if (col === 0 && i > 0) y += 16;
-        doc.setFillColor(10, 15, 12); doc.roundedRect(x, y, colW, 14, 1.5, 1.5, 'F');
-        doc.setDrawColor(15, 42, 26); doc.roundedRect(x, y, colW, 14, 1.5, 1.5, 'S');
-        doc.setFontSize(6.5); doc.setFont('helvetica','normal'); doc.setTextColor(134,239,172);
-        doc.text(label, x+3, y+4.5);
-        doc.setFontSize(8); doc.setFont('helvetica','bold'); doc.setTextColor(240,253,244);
-        doc.text(doc.splitTextToSize(String(value || '—'), colW-6)[0], x+3, y+10);
-      });
-      y += 20;
-
-      if (txHash) {
-        doc.setFillColor(10,22,40); doc.roundedRect(ml, y, tw, 14, 2, 2, 'F');
-        doc.setFontSize(6.5); doc.setFont('helvetica','normal'); doc.setTextColor(134,239,172);
-        doc.text('BLOCKCHAIN TX HASH', ml+3, y+4.5);
-        doc.setFontSize(7); doc.setTextColor(96,165,250);
-        doc.text(doc.splitTextToSize(txHash, tw-6)[0], ml+3, y+10); y += 18;
-      }
-
-      if (verifyUrl) {
-        doc.setFillColor(6,10,7); doc.roundedRect(ml, y, tw, 14, 2, 2, 'F');
-        doc.setFontSize(6.5); doc.setFont('helvetica','normal'); doc.setTextColor(134,239,172);
-        doc.text('PUBLIC VERIFICATION URL', ml+3, y+4.5);
-        doc.setFontSize(7.5); doc.setTextColor(34,197,94);
-        doc.text(verifyUrl, ml+3, y+10); y += 18;
-      }
-
-      doc.setFontSize(7); doc.setTextColor(134,239,172);
-      doc.text("ETHERTRACK · INDIA'S CARBON EXCHANGE · ISO 14064-3 · GHG PROTOCOL · BRSR · CDP · TCFD · PARIS AGREEMENT ART.6", W/2, y, { align:'center' });
-
-      doc.save(`${certId || 'certificate'}.pdf`);
+      // Opens in new tab — browser handles the PDF download natively
+      window.open(
+        `${process.env.REACT_APP_API_URL || 'http://localhost:5000'}/api/certificates/${certId}/pdf`,
+        '_blank',
+        'noopener,noreferrer'
+      );
     } catch (err) {
-      // Fallback to text file if jsPDF fails
-      const content = `EtherTrack Carbon Retirement Certificate\nCertificate ID: ${certId}\nCredits: ${credit.retiredQty||credit.credits} tCO2e\nBeneficiary: ${credit.beneficiaryName||''} ${credit.beneficiaryEntity||''}\nTX: ${txHash||'N/A'}\nVerify: ${verifyUrl||'N/A'}`;
-      const blob = new Blob([content], { type:'text/plain' });
-      const url  = URL.createObjectURL(blob);
-      const a    = document.createElement('a');
-      a.href     = url; a.download = `${certId || 'certificate'}.txt`; a.click();
-      URL.revokeObjectURL(url);
+      console.error('[handleDownloadPDF]', err);
+      alert('PDF generation failed. Please try again.');
     } finally {
-      // ✅ FIX: always clears loading state
       setPdfLoading(false);
     }
   };
@@ -190,9 +88,8 @@ export function RetirementCertificate({ credit, txHash, onClose }) {
   return (
     <div style={{ background:'linear-gradient(135deg,#060a07 0%,#0a1209 50%,#060a07 100%)', border:'1px solid #22c55e44', borderRadius:16, padding:32, position:'relative', overflow:'hidden' }}>
 
-      {/* ✅ FIX: certId warning if missing */}
       {!certId && (
-        <div style={{ padding:'8px 12px', background:'#1a0707', border:'1px solid #f8717133', borderRadius:6, marginBottom:12, fontSize:10, color:'#f87171' }}>
+        <div role="alert" style={{ padding:'8px 12px', background:'#1a0707', border:'1px solid #f8717133', borderRadius:6, marginBottom:12, fontSize:10, color:'#f87171' }}>
           ⚠ Certificate ID not yet available — please refresh your portfolio
         </div>
       )}
@@ -204,15 +101,31 @@ export function RetirementCertificate({ credit, txHash, onClose }) {
           <div style={{ fontSize:10, color:'#86efac66', letterSpacing:'.1em' }}>ISO 14064-3 · GHG PROTOCOL · BRSR · CDP · TCFD · ETHEREUM SEPOLIA</div>
         </div>
 
+        {/* [2] Verifier badge — shown when org has connected a third-party verifier */}
+        {connectedVerifier && (
+          <div style={{ background:'#0d0a1a', border:'1px solid #a78bfa44', borderRadius:10, padding:'14px 18px', marginBottom:16, display:'flex', alignItems:'center', gap:14 }}>
+            <span style={{ fontSize:20 }}>🔍</span>
+            <div>
+              <div style={{ fontSize:11, color:'#a78bfa', fontWeight:700, marginBottom:2 }}>
+                INDEPENDENTLY VERIFIED — {connectedVerifier.verifier_name}
+              </div>
+              <div style={{ fontSize:9, color:'#a78bfa66' }}>
+                ISO 14065 accredited · Enables CDP Verified + BRSR Level 2 submission
+              </div>
+            </div>
+            <span style={{ marginLeft:'auto', fontSize:9, padding:'3px 8px', borderRadius:4, background:'#22c55e11', color:'#22c55e', border:'1px solid #22c55e33' }}>VERIFIED</span>
+          </div>
+        )}
+
         {/* Beneficiary */}
         {(credit.beneficiaryName || credit.beneficiaryEntity) && (
           <div style={{ background:'#0a1628', border:'1px solid #60a5fa33', borderRadius:10, padding:'14px 18px', marginBottom:16 }}>
             <div style={{ fontSize:9, color:'#60a5fa88', letterSpacing:'.14em', marginBottom:8 }}>RETIREMENT BENEFICIARY — CORPORATE ENTITY</div>
             <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:10 }}>
               {[
-                { l:'ENTITY NAME', v:credit.beneficiaryName || '—' },
+                { l:'ENTITY NAME', v:credit.beneficiaryName   || '—' },
                 { l:'COMPANY',     v:credit.beneficiaryEntity || '—' },
-                { l:'GSTIN',       v:credit.beneficiaryGstin || '—' },
+                { l:'GSTIN',       v:credit.beneficiaryGstin  || '—' },
               ].map(({ l, v }) => (
                 <div key={l}>
                   <div style={{ fontSize:8, color:'#60a5fa66', letterSpacing:'.1em', marginBottom:3 }}>{l}</div>
@@ -234,6 +147,7 @@ export function RetirementCertificate({ credit, txHash, onClose }) {
           </div>
         )}
 
+        {/* Fields grid */}
         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginBottom:20 }}>
           {[
             { label:'CERTIFICATE ID',  value:certId || 'PENDING',                                   color:'#22c55e' },
@@ -263,7 +177,10 @@ export function RetirementCertificate({ credit, txHash, onClose }) {
         {txHash && (
           <div style={{ background:'#0a0f0c88', borderRadius:8, padding:'10px 14px', border:'1px solid #0f2a1a', marginBottom:16 }}>
             <div style={{ fontSize:8, color:'#86efac55', letterSpacing:'.12em', marginBottom:4 }}>BLOCKCHAIN TX HASH</div>
-            <a href={`https://sepolia.etherscan.io/tx/${txHash}`} target="_blank" rel="noreferrer" style={{ fontSize:10, color:'#60a5fa', fontFamily:'monospace', wordBreak:'break-all', textDecoration:'none' }}>{txHash}</a>
+            <a href={`https://sepolia.etherscan.io/tx/${txHash}`} target="_blank" rel="noreferrer"
+              style={{ fontSize:10, color:'#60a5fa', fontFamily:'monospace', wordBreak:'break-all', textDecoration:'none' }}>
+              {txHash}
+            </a>
           </div>
         )}
 
@@ -280,28 +197,40 @@ export function RetirementCertificate({ credit, txHash, onClose }) {
           </div>
         )}
 
+        {/* Actions */}
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', paddingTop:16, borderTop:'1px solid #0f2a1a', gap:10, flexWrap:'wrap' }}>
-          <div style={{ fontSize:9, color:'#86efac44', letterSpacing:'.06em' }}>ETHERTRACK · ISO 14064-3 · GHG PROTOCOL · BRSR · CDP · TCFD · PARIS AGREEMENT ART.6</div>
+          <div style={{ fontSize:9, color:'#86efac44', letterSpacing:'.06em' }}>
+            ETHERTRACK · ISO 14064-3 · GHG PROTOCOL · BRSR · CDP · TCFD · PARIS AGREEMENT ART.6
+            {connectedVerifier && <span style={{ color:'#a78bfa', marginLeft:8 }}>· 🔍 {connectedVerifier.verifier_name}</span>}
+          </div>
           <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
             {verifyUrl && (
               <a href={verifyUrl} target="_blank" rel="noreferrer"
+                aria-label="Verify certificate publicly"
                 style={{ padding:'8px 16px', borderRadius:6, border:'1px solid #60a5fa33', background:'#060e18', color:'#60a5fa88', cursor:'pointer', fontFamily:'DM Mono,monospace', fontSize:10, textDecoration:'none', display:'inline-flex', alignItems:'center' }}>
                 🔗 VERIFY PUBLIC
               </a>
             )}
-            {/* ✅ FIX: Download button shows loading state while jsPDF imports */}
+            {/* [1] Server-side PDF button */}
             <button
+              data-testid="download-pdf-btn"
+              aria-label={pdfLoading ? 'Generating PDF...' : 'Download certificate as PDF'}
               onClick={handleDownloadPDF}
-              disabled={pdfLoading}
-              style={{ padding:'8px 16px', borderRadius:6, border:'1px solid #22c55e44', background:'#051409', color: pdfLoading ? '#86efac33' : '#22c55e88', cursor: pdfLoading ? 'not-allowed' : 'pointer', fontFamily:'DM Mono,monospace', fontSize:10, display:'flex', alignItems:'center', gap:6 }}>
+              disabled={pdfLoading || !certId}
+              style={{ padding:'8px 16px', borderRadius:6, border:'1px solid #22c55e44', background:'#051409', color: pdfLoading ? '#86efac33' : '#22c55e88', cursor: pdfLoading || !certId ? 'not-allowed' : 'pointer', fontFamily:'DM Mono,monospace', fontSize:10, display:'flex', alignItems:'center', gap:6 }}>
               {pdfLoading ? (
                 <>
                   <span style={{ width:10, height:10, border:'1.5px solid #22c55e22', borderTopColor:'#22c55e88', borderRadius:'50%', animation:'spin 1s linear infinite', display:'inline-block' }}/>
-                  GENERATING PDF...
+                  GENERATING...
                 </>
-              ) : '↓ DOWNLOAD PDF'}
+              ) : `↓ PDF${connectedVerifier ? ' + VERIFIER' : ''}`}
             </button>
-            <button onClick={onClose} style={{ padding:'8px 16px', borderRadius:6, border:'1px solid #22c55e44', background:'#0d2e1f', color:'#22c55e', cursor:'pointer', fontFamily:'DM Mono,monospace', fontSize:10 }}>CLOSE ✕</button>
+            <button
+              aria-label="Close certificate"
+              onClick={onClose}
+              style={{ padding:'8px 16px', borderRadius:6, border:'1px solid #22c55e44', background:'#0d2e1f', color:'#22c55e', cursor:'pointer', fontFamily:'DM Mono,monospace', fontSize:10 }}>
+              CLOSE ✕
+            </button>
           </div>
         </div>
       </div>

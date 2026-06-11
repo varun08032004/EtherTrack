@@ -1,0 +1,741 @@
+'use strict';
+// routes/subscription.js — EtherTrack v3
+// Prices updated to confirmed tier structure:
+//   Free:      ₹0
+//   Starter:   ₹1,499/mo  ₹14,990/yr  (save 17%)
+//   Growth:    ₹7,999/mo  ₹79,990/yr  (save 17%)
+//   Corporate: Contact Sales (custom)
+// Gas fees:
+//   Free: 1.5%  Starter: 1%  Growth: 0.75%  Corporate: 0.5% negotiated
+
+const express    = require('express');
+const crypto     = require('crypto');
+const Razorpay   = require('razorpay');
+const { ethers } = require('ethers');
+const { body, query: qv, validationResult } = require('express-validator');
+
+const { safeQuery: query, withTransaction } = require('../db/pool');
+const { authenticate, requireKYC }          = require('../middleware/auth');
+const { generateGSTInvoice, serveInvoice }  = require('../services/invoice');
+const { createNotification }               = require('../routes/notifications');
+const { rateLimit, ipKeyGenerator }        = require('express-rate-limit');
+
+const router = express.Router();
+
+const razorpay = new Razorpay({
+  key_id:     process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
+
+// ── Rate limiters ─────────────────────────────────────────────────
+const payLimiter = rateLimit({
+  windowMs:     60 * 1000,
+  max:          10,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  keyGenerator: (req) => req.user?.id ?? ipKeyGenerator(req),
+  handler:      (req, res) => res.status(429).json({ error: 'Too many payment requests. Slow down.', code: 'RATE_LIMITED' }),
+  skip:         () => process.env.NODE_ENV === 'test',
+});
+
+const priceLimiter = rateLimit({
+  windowMs:     60 * 1000,
+  max:          60,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  keyGenerator: (req) => ipKeyGenerator(req),
+  skip:         () => process.env.NODE_ENV === 'test',
+});
+
+// ── PLAN CONFIG — canonical prices in PAISE ───────────────────────
+const PLAN_CONFIG = {
+  free: {
+    label:          'Free',
+    badge:          'Explorer',
+    monthly_paise:  0,
+    annual_paise:   0,
+    gas_fee_bps:    150,
+    seats:          1,
+    trial_days:     0,
+  },
+  starter: {
+    label:          'Starter',
+    badge:          'Trader',
+    monthly_paise:  149900,
+    annual_paise:   1499000,
+    gas_fee_bps:    100,
+    seats:          3,
+    trial_days:     14,
+  },
+  growth: {
+    label:          'Growth',
+    badge:          'Business',
+    monthly_paise:  799900,
+    annual_paise:   7999000,
+    gas_fee_bps:    75,
+    seats:          10,
+    trial_days:     14,
+  },
+  corporate: {
+    label:          'Corporate',
+    badge:          'Enterprise',
+    monthly_paise:  null,
+    annual_paise:   null,
+    gas_fee_bps:    50,
+    seats:          null,
+    trial_days:     0,
+  },
+};
+
+const VALID_PLANS  = Object.keys(PLAN_CONFIG);
+const VALID_CYCLES = ['monthly', 'annual'];
+const GST_RATE_BPS = 1800;
+const MM_MAX_AGE   = 5 * 60 * 1000;
+
+const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/;
+const PAN_RE   = /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/;
+
+// ── Helpers ────────────────────────────────────────────────────────
+const getPricePaise = (plan, cycle) => {
+  const cfg = PLAN_CONFIG[plan];
+  if (!cfg) return null;
+  return cycle === 'annual' ? cfg.annual_paise : cfg.monthly_paise;
+};
+
+const getGstPaise   = (p) => Math.round((p * GST_RATE_BPS) / 10000);
+const getTotalPaise = (p) => p + getGstPaise(p);
+
+const getRenewalDate = (cycle, trialDays = 0) => {
+  const d = new Date();
+  if (trialDays > 0) { d.setDate(d.getDate() + trialDays); return d; }
+  if (cycle === 'annual') d.setFullYear(d.getFullYear() + 1);
+  else                    d.setMonth(d.getMonth() + 1);
+  return d;
+};
+
+const validate = (req, res) => {
+  const errs = validationResult(req);
+  if (!errs.isEmpty()) { res.status(400).json({ error: errs.array()[0].msg }); return false; }
+  return true;
+};
+
+const checkIdempotency = async (userId, key) => {
+  const { rows } = await query(
+    `SELECT id, status FROM subscription_payments
+     WHERE user_id=$1 AND idempotency_key=$2
+       AND status IN ('success','pending') LIMIT 1`,
+    [userId, key]
+  );
+  return rows[0] || null;
+};
+
+// FIX: pass amount_paise/100 as explicit $18 param to avoid pg type conflict
+const insertPayment = async (f) => {
+  const { rows } = await query(
+    `INSERT INTO subscription_payments
+       (user_id, plan, cycle,
+        amount_paise, gst_amount_paise, total_amount_paise,
+        pay_method, status, idempotency_key,
+        razorpay_order_id, wallet_address, signature,
+        metamask_address, metamask_message,
+        gstin, pan, renewal_date, amount)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+     RETURNING id`,
+    [
+      f.user_id, f.plan, f.cycle,
+      f.amount_paise, f.gst_amount_paise, f.total_amount_paise,
+      f.pay_method, f.status, f.idempotency_key,
+      f.razorpay_order_id  || null,
+      f.wallet_address     || null,
+      f.signature          || null,
+      f.metamask_address   || null,
+      f.metamask_message   || null,
+      f.gstin              || null,
+      f.pan                || null,
+      f.renewal_date       || null,
+      f.amount_paise / 100,
+    ]
+  );
+  return rows[0].id;
+};
+
+const activatePlan = async ({ userId, plan, cycle, paymentId, renewalDate }) => {
+  await withTransaction(async (client) => {
+    const { rows: [cur] } = await client.query(
+      `SELECT subscription_plan, subscription_cycle FROM users WHERE id=$1 FOR UPDATE`,
+      [userId]
+    );
+    const ORDER   = ['free','starter','growth','corporate'];
+    const fromIdx = ORDER.indexOf(cur?.subscription_plan);
+    const toIdx   = ORDER.indexOf(plan);
+    const event   =
+      !cur?.subscription_plan || cur.subscription_plan === 'free' ? 'activated' :
+      toIdx > fromIdx ? 'upgraded' : toIdx < fromIdx ? 'downgraded' : 'renewed';
+
+    await client.query(
+      `UPDATE users SET
+         subscription_plan=$1, subscription_cycle=$2,
+         subscription_renewal_date=$3,
+         subscription_activated_at=COALESCE(subscription_activated_at,NOW()),
+         plan_selected=TRUE, updated_at=NOW()
+       WHERE id=$4`,
+      [plan, cycle, renewalDate, userId]
+    );
+
+    const { rows: [pay] } = await client.query(
+      `SELECT amount_paise, gst_amount_paise, gstin, pan, invoice_number
+       FROM subscription_payments WHERE id=$1`, [paymentId]
+    );
+
+    await client.query(
+      `INSERT INTO subscription_history
+         (user_id,event_type,from_plan,to_plan,from_cycle,to_cycle,
+          payment_id,amount_paise,gst_amount_paise,renewal_date,
+          triggered_by,gstin,pan,invoice_number)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'user',$11,$12,$13)`,
+      [
+        userId, event,
+        cur?.subscription_plan || null, plan,
+        cur?.subscription_cycle || null, cycle,
+        paymentId,
+        pay?.amount_paise || 0, pay?.gst_amount_paise || 0,
+        renewalDate,
+        pay?.gstin || null, pay?.pan || null, pay?.invoice_number || null,
+      ]
+    );
+  });
+};
+
+const issueInvoice = async ({ paymentId, plan, cycle, amountPaise, gstin, pan, user }) => {
+  try {
+    const invoiceUrl = await generateGSTInvoice({
+      paymentId, plan, cycle,
+      amount:     amountPaise / 100,
+      gstin:      gstin || null,
+      pan:        pan   || null,
+      buyerName:  user.full_name || user.email,
+      buyerEmail: user.email,
+    });
+    if (invoiceUrl) {
+      await query(
+        `UPDATE subscription_payments SET invoice_url=$1 WHERE id=$2`,
+        [invoiceUrl, paymentId]
+      ).catch(() => {});
+    }
+    return invoiceUrl;
+  } catch (e) {
+    console.error('[subscription/issueInvoice] non-critical:', e.message);
+    return null;
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// 1. GET /api/subscription/prices
+// ═══════════════════════════════════════════════════════════════════
+router.get('/prices', priceLimiter, (req, res) => {
+  res.set('Cache-Control', 'public, max-age=300');
+  const prices = {};
+  for (const [key, cfg] of Object.entries(PLAN_CONFIG)) {
+    prices[key] = {
+      monthly: cfg.monthly_paise !== null ? cfg.monthly_paise / 100 : null,
+      annual:  cfg.annual_paise  !== null ? cfg.annual_paise  / 100 : null,
+    };
+  }
+  return res.json({ prices });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// 2. POST /api/subscription/order
+// ═══════════════════════════════════════════════════════════════════
+router.post('/order',
+  authenticate, requireKYC, payLimiter,
+  [
+    body('plan').isIn(VALID_PLANS).withMessage('Invalid plan.'),
+    body('cycle').isIn(VALID_CYCLES).withMessage('Invalid cycle.'),
+    body('idempotency_key').isString().trim().isLength({ min: 8, max: 64 }),
+  ],
+  async (req, res) => {
+    if (!validate(req, res)) return;
+    const { plan, cycle, idempotency_key } = req.body;
+    const userId = req.user.id;
+    try {
+      const existing = await checkIdempotency(userId, idempotency_key);
+      if (existing?.status === 'success') return res.json({ ok: true, duplicate: true });
+
+      const amountPaise = getPricePaise(plan, cycle);
+      if (amountPaise === null) return res.status(400).json({ error: 'Corporate plan requires contacting sales at support@ethertrack.in.' });
+      if (amountPaise === 0)   return res.status(400).json({ error: 'Use /free endpoint for free plan.' });
+
+      const totalPaise = getTotalPaise(amountPaise);
+      const order = await razorpay.orders.create({
+        amount: totalPaise, currency: 'INR',
+        receipt: `et_${Date.now()}`,
+        notes:   { user_id: userId, plan, cycle, idempotency_key },
+      });
+
+      await insertPayment({
+        user_id: userId, plan, cycle,
+        amount_paise:       amountPaise,
+        gst_amount_paise:   getGstPaise(amountPaise),
+        total_amount_paise: totalPaise,
+        pay_method: 'razorpay', status: 'pending',
+        razorpay_order_id: order.id, idempotency_key,
+      });
+
+      return res.json({ orderId: order.id, amount: totalPaise, currency: 'INR' });
+    } catch (err) {
+      console.error('[POST /subscription/order]', err.message);
+      return res.status(500).json({ error: 'Could not create payment order.' });
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// 3. POST /api/subscription/verify
+// ═══════════════════════════════════════════════════════════════════
+router.post('/verify',
+  authenticate, requireKYC, payLimiter,
+  [
+    body('plan').isIn(VALID_PLANS).withMessage('Invalid plan.'),
+    body('cycle').isIn(VALID_CYCLES).withMessage('Invalid cycle.'),
+    body('razorpay_order_id').isString().notEmpty(),
+    body('razorpay_payment_id').isString().notEmpty(),
+    body('razorpay_signature').isString().notEmpty(),
+    body('gstin').optional().matches(GSTIN_RE).withMessage('Invalid GSTIN.'),
+    body('pan').optional().matches(PAN_RE).withMessage('Invalid PAN.'),
+  ],
+  async (req, res) => {
+    if (!validate(req, res)) return;
+    const { plan, cycle, razorpay_order_id, razorpay_payment_id, razorpay_signature, gstin, pan } = req.body;
+    const userId = req.user.id;
+    try {
+      const expected = crypto
+        .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+        .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+        .digest('hex');
+      if (expected !== razorpay_signature)
+        return res.status(400).json({ error: 'Payment signature verification failed.', code: 'SIGNATURE_MISMATCH' });
+
+      const { rows: [payment] } = await query(
+        `SELECT id, amount_paise, status FROM subscription_payments
+         WHERE razorpay_order_id=$1 AND user_id=$2 LIMIT 1`,
+        [razorpay_order_id, userId]
+      );
+      if (!payment) return res.status(400).json({ error: 'Payment record not found.' });
+      if (payment.status === 'success') return res.json({ ok: true, duplicate: true });
+
+      const expectedPaise = getPricePaise(plan, cycle);
+      if (expectedPaise === null)
+        return res.status(400).json({ error: 'Corporate plan requires contacting sales.' });
+      if (payment.amount_paise !== expectedPaise)
+        return res.status(400).json({ error: 'Payment amount mismatch. Contact support.', code: 'AMOUNT_MISMATCH' });
+
+      const gstPaise    = getGstPaise(expectedPaise);
+      const totalPaise  = expectedPaise + gstPaise;
+      const renewalDate = getRenewalDate(cycle, PLAN_CONFIG[plan].trial_days);
+
+      await query(
+        `UPDATE subscription_payments SET
+           status='success', razorpay_payment_id=$1,
+           gst_amount_paise=$2, total_amount_paise=$3,
+           gstin=$4, pan=$5, gstin_validated=$6, pan_validated=$7,
+           renewal_date=$8, webhook_verified_at=NOW()
+         WHERE id=$9`,
+        [
+          razorpay_payment_id, gstPaise, totalPaise,
+          gstin || null, pan || null,
+          gstin ? GSTIN_RE.test(gstin) : false,
+          pan   ? PAN_RE.test(pan)     : false,
+          renewalDate, payment.id,
+        ]
+      );
+
+      await activatePlan({ userId, plan, cycle, paymentId: payment.id, renewalDate });
+      const invoiceUrl = await issueInvoice({ paymentId: payment.id, plan, cycle, amountPaise: expectedPaise, gstin, pan, user: req.user });
+
+      await createNotification(userId, 'WALLET',
+        `${PLAN_CONFIG[plan].label} Plan Activated`,
+        `Payment confirmed via Razorpay. ${PLAN_CONFIG[plan].label} plan is now active.`,
+        '/billing', { plan, cycle }
+      ).catch(() => {});
+
+      return res.json({ ok: true, plan, cycle, renewalDate: renewalDate.toISOString(), invoiceUrl: invoiceUrl || null });
+    } catch (err) {
+      console.error('[POST /subscription/verify]', err.message);
+      return res.status(500).json({ error: 'Activation failed after payment. Contact support@ethertrack.in.', code: 'ACTIVATION_FAILED' });
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// 4. POST /api/subscription/wallet-pay
+// ═══════════════════════════════════════════════════════════════════
+router.post('/wallet-pay',
+  authenticate, requireKYC, payLimiter,
+  [
+    body('plan').isIn(VALID_PLANS).withMessage('Invalid plan.'),
+    body('cycle').isIn(VALID_CYCLES).withMessage('Invalid cycle.'),
+    body('idempotency_key').isString().trim().isLength({ min: 8, max: 64 }),
+    body('gstin').optional().matches(GSTIN_RE).withMessage('Invalid GSTIN.'),
+    body('pan').optional().matches(PAN_RE).withMessage('Invalid PAN.'),
+  ],
+  async (req, res) => {
+    if (!validate(req, res)) return;
+    const { plan, cycle, idempotency_key, gstin, pan } = req.body;
+    const userId = req.user.id;
+    try {
+      const existing = await checkIdempotency(userId, idempotency_key);
+      if (existing?.status === 'success') return res.json({ ok: true, duplicate: true });
+
+      const amountPaise = getPricePaise(plan, cycle);
+      if (amountPaise === null) return res.status(400).json({ error: 'Corporate plan requires contacting sales at support@ethertrack.in.' });
+      if (amountPaise === 0)   return res.status(400).json({ error: 'Use /free endpoint for free plan.' });
+
+      const gstPaise   = getGstPaise(amountPaise);
+      const totalPaise = amountPaise + gstPaise;
+
+      // FIX: read inr_balance when inr_balance_paise is 0
+      const { rows: [freshUser] } = await query(
+        `SELECT inr_balance_paise, inr_balance FROM users WHERE id=$1`, [userId]
+      );
+      const balancePaise = freshUser?.inr_balance_paise > 0
+        ? parseInt(freshUser.inr_balance_paise)
+        : Math.round((parseFloat(freshUser?.inr_balance) || 0) * 100);
+
+      if (balancePaise < totalPaise)
+        return res.status(400).json({
+          error: `Insufficient wallet balance. Need ₹${(totalPaise/100).toFixed(2)}, have ₹${(balancePaise/100).toFixed(2)}.`,
+          code:  'INSUFFICIENT_BALANCE',
+        });
+
+      const renewalDate = getRenewalDate(cycle, PLAN_CONFIG[plan].trial_days);
+      let paymentId;
+
+      await withTransaction(async (client) => {
+        // FIX: use explicit $13 for amount (INR) instead of $4::numeric/100
+        // to avoid "inconsistent types deduced for parameter $4" pg error
+        const { rows: [pay] } = await client.query(
+          `INSERT INTO subscription_payments
+             (user_id,plan,cycle,amount_paise,gst_amount_paise,total_amount_paise,
+              pay_method,status,idempotency_key,gstin,pan,
+              gstin_validated,pan_validated,renewal_date,amount)
+           VALUES ($1,$2,$3,$4,$5,$6,'wallet','success',$7,$8,$9,$10,$11,$12,$13)
+           RETURNING id`,
+          [
+            userId, plan, cycle, amountPaise, gstPaise, totalPaise,
+            idempotency_key,
+            gstin || null, pan || null,
+            gstin ? GSTIN_RE.test(gstin) : false,
+            pan   ? PAN_RE.test(pan)     : false,
+            renewalDate,
+            amountPaise / 100,  // $13 — computed in JS, no type ambiguity
+          ]
+        );
+        paymentId = pay.id;
+
+        // FIX: pass all args with explicit casts to avoid pg type inference conflict
+        const { rows: [debit] } = await client.query(
+          `SELECT debit_wallet_paise(
+             $1::uuid,
+             $2::bigint,
+             $3::text,
+             'subscription_payment'::text,
+             NULL::uuid,
+             $4::text
+           ) AS new_balance`,
+          [
+            userId,
+            totalPaise,
+            `${plan} plan — ${cycle}`,
+            `wallet_debit_${idempotency_key}`,
+          ]
+        );
+        if (debit.new_balance === null) throw new Error('Wallet debit failed.');
+
+        const { rows: [cur] } = await client.query(
+          `SELECT subscription_plan, subscription_cycle FROM users WHERE id=$1`, [userId]
+        );
+        const ORDER   = ['free','starter','growth','corporate'];
+        const fromIdx = ORDER.indexOf(cur?.subscription_plan);
+        const toIdx   = ORDER.indexOf(plan);
+        const event   =
+          !cur?.subscription_plan || cur.subscription_plan === 'free' ? 'activated' :
+          toIdx > fromIdx ? 'upgraded' : toIdx < fromIdx ? 'downgraded' : 'renewed';
+
+        await client.query(
+          `UPDATE users SET
+             subscription_plan=$1, subscription_cycle=$2,
+             subscription_renewal_date=$3,
+             subscription_activated_at=COALESCE(subscription_activated_at,NOW()),
+             plan_selected=TRUE, updated_at=NOW()
+           WHERE id=$4`,
+          [plan, cycle, renewalDate, userId]
+        );
+
+        await client.query(
+          `INSERT INTO subscription_history
+             (user_id,event_type,from_plan,to_plan,from_cycle,to_cycle,
+              payment_id,amount_paise,gst_amount_paise,renewal_date,triggered_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'user')`,
+          [
+            userId, event,
+            cur?.subscription_plan || null, plan,
+            cur?.subscription_cycle || null, cycle,
+            paymentId, amountPaise, gstPaise, renewalDate,
+          ]
+        );
+      });
+
+      const invoiceUrl = await issueInvoice({ paymentId, plan, cycle, amountPaise, gstin, pan, user: req.user });
+
+      await createNotification(userId, 'WALLET',
+        `${PLAN_CONFIG[plan].label} Plan Activated`,
+        `₹${(totalPaise/100).toFixed(2)} debited from wallet. ${PLAN_CONFIG[plan].label} plan is now active.`,
+        '/billing', { plan, cycle }
+      ).catch(() => {});
+
+      return res.json({ ok: true, plan, cycle, renewalDate: renewalDate.toISOString(), invoiceUrl: invoiceUrl || null });
+    } catch (err) {
+      console.error('[POST /subscription/wallet-pay]', err.message);
+      const msg = err.message?.includes('Insufficient') ? err.message : 'Wallet payment failed.';
+      return res.status(400).json({ error: msg });
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// 5. POST /api/subscription/metamask-pay
+// ═══════════════════════════════════════════════════════════════════
+router.post('/metamask-pay',
+  authenticate, requireKYC, payLimiter,
+  [
+    body('plan').isIn(VALID_PLANS).withMessage('Invalid plan.'),
+    body('cycle').isIn(VALID_CYCLES).withMessage('Invalid cycle.'),
+    body('wallet_address').isEthereumAddress().withMessage('Invalid Ethereum address.'),
+    body('signature').isString().notEmpty(),
+    body('message').isString().notEmpty(),
+    body('gstin').optional().matches(GSTIN_RE).withMessage('Invalid GSTIN.'),
+    body('pan').optional().matches(PAN_RE).withMessage('Invalid PAN.'),
+  ],
+  async (req, res) => {
+    if (!validate(req, res)) return;
+    const { plan, cycle, wallet_address, signature, message, gstin, pan } = req.body;
+    const userId = req.user.id;
+    try {
+      if (!message.startsWith('EtherTrack:'))
+        return res.status(400).json({ error: 'Invalid message prefix.' });
+      const parts = message.split(':');
+      if (parts.length !== 5) return res.status(400).json({ error: 'Invalid message format.' });
+      const [, msgPlan, msgCycle, idempotencyKey, tsStr] = parts;
+      const ts  = parseInt(tsStr, 10);
+      const age = Date.now() - ts;
+
+      if (!VALID_PLANS.includes(msgPlan) || !VALID_CYCLES.includes(msgCycle))
+        return res.status(400).json({ error: 'Invalid plan/cycle in signed message.' });
+      if (msgPlan !== plan || msgCycle !== cycle)
+        return res.status(400).json({ error: 'Signed plan/cycle does not match request.' });
+      if (isNaN(ts) || age > MM_MAX_AGE || age < -30000)
+        return res.status(400).json({ error: `Signed message expired. Please retry.`, code: 'MESSAGE_EXPIRED' });
+
+      let recovered;
+      try { recovered = ethers.verifyMessage(message, signature); }
+      catch (e) { return res.status(400).json({ error: `Invalid signature: ${e.message}` }); }
+
+      if (recovered.toLowerCase() !== wallet_address.toLowerCase())
+        return res.status(400).json({ error: 'Signature address mismatch.', code: 'ADDRESS_MISMATCH' });
+
+      if (req.user.wallet_address &&
+          recovered.toLowerCase() !== req.user.wallet_address.toLowerCase())
+        return res.status(400).json({
+          error: `Signing address does not match your registered wallet. Switch wallets in MetaMask.`,
+          code:  'WALLET_MISMATCH',
+        });
+
+      const existing = await checkIdempotency(userId, idempotencyKey);
+      if (existing?.status === 'success') return res.json({ ok: true, duplicate: true });
+
+      const amountPaise = getPricePaise(plan, cycle);
+      if (amountPaise === null) return res.status(400).json({ error: 'Corporate plan requires contacting sales.' });
+
+      const gstPaise    = getGstPaise(amountPaise);
+      const totalPaise  = amountPaise + gstPaise;
+      const renewalDate = getRenewalDate(cycle, PLAN_CONFIG[plan].trial_days);
+
+      const paymentId = await insertPayment({
+        user_id: userId, plan, cycle,
+        amount_paise: amountPaise, gst_amount_paise: gstPaise, total_amount_paise: totalPaise,
+        pay_method: 'metamask', status: 'success',
+        idempotency_key: idempotencyKey,
+        wallet_address: recovered, signature,
+        metamask_address: recovered, metamask_message: message,
+        gstin: gstin || null, pan: pan || null, renewal_date: renewalDate,
+      });
+
+      await activatePlan({ userId, plan, cycle, paymentId, renewalDate });
+      const invoiceUrl = await issueInvoice({ paymentId, plan, cycle, amountPaise, gstin, pan, user: req.user });
+
+      await createNotification(userId, 'WALLET',
+        `${PLAN_CONFIG[plan].label} Plan Activated via MetaMask`,
+        `Signature verified. ${PLAN_CONFIG[plan].label} plan is now active.`,
+        '/billing', { plan, cycle }
+      ).catch(() => {});
+
+      return res.json({ ok: true, plan, cycle, renewalDate: renewalDate.toISOString(), invoiceUrl: invoiceUrl || null });
+    } catch (err) {
+      console.error('[POST /subscription/metamask-pay]', err.message);
+      return res.status(400).json({ error: err.message || 'MetaMask payment failed.' });
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// 6. POST /api/subscription/free
+// ═══════════════════════════════════════════════════════════════════
+router.post('/free', authenticate, async (req, res) => {
+  const userId = req.user.id;
+  try {
+    await withTransaction(async (client) => {
+      const paymentId = await insertPayment({
+        user_id: userId, plan: 'free', cycle: 'monthly',
+        amount_paise: 0, gst_amount_paise: 0, total_amount_paise: 0,
+        pay_method: 'free', status: 'success',
+        idempotency_key: `free_${userId}_${Date.now()}`,
+        renewal_date: null,
+      });
+
+      await client.query(
+        `UPDATE users SET
+           subscription_plan='free', subscription_cycle='monthly',
+           subscription_renewal_date=NULL,
+           subscription_activated_at=COALESCE(subscription_activated_at,NOW()),
+           plan_selected=TRUE, updated_at=NOW()
+         WHERE id=$1`,
+        [userId]
+      );
+
+      await client.query(
+        `INSERT INTO subscription_history
+           (user_id,event_type,from_plan,to_plan,from_cycle,to_cycle,
+            payment_id,amount_paise,gst_amount_paise,triggered_by)
+         VALUES ($1,'activated',$2,'free',$3,'monthly',$4,0,0,'user')`,
+        [userId, req.user.subscription_plan||null, req.user.subscription_cycle||null, paymentId]
+      );
+    });
+
+    return res.json({ ok: true, plan: 'free', renewalDate: null });
+  } catch (err) {
+    console.error('[POST /subscription/free]', err.message);
+    return res.status(500).json({ error: 'Free plan activation failed. Please retry.' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// 7. GET /api/subscription/history
+// ═══════════════════════════════════════════════════════════════════
+router.get('/history',
+  authenticate,
+  [
+    qv('limit').optional().isInt({ min: 1, max: 50 }).toInt(),
+    qv('cursor').optional().isISO8601(),
+  ],
+  async (req, res) => {
+    if (!validate(req, res)) return;
+    const userId = req.user.id;
+    const limit  = req.query.limit || 20;
+    const cursor = req.query.cursor || null;
+    try {
+      const { rows } = await query(
+        `SELECT id, created_at, plan, cycle,
+           amount_paise,
+           ROUND(amount_paise::numeric/100,2) AS amount_inr,
+           gst_amount_paise,
+           ROUND(gst_amount_paise::numeric/100,2) AS gst_inr,
+           total_amount_paise,
+           ROUND(total_amount_paise::numeric/100,2) AS total_inr,
+           pay_method, status, invoice_number, invoice_url,
+           renewal_date, refunded_at, refund_amount_paise
+         FROM subscription_payments
+         WHERE user_id=$1 AND status IN ('success','refunded')
+           ${cursor ? 'AND created_at < $3' : ''}
+         ORDER BY created_at DESC LIMIT $2`,
+        cursor ? [userId, limit+1, cursor] : [userId, limit+1]
+      );
+      const hasMore    = rows.length > limit;
+      const history    = hasMore ? rows.slice(0, limit) : rows;
+      const nextCursor = hasMore ? history[history.length-1].created_at : null;
+      return res.json({ history, nextCursor, hasMore });
+    } catch (err) {
+      console.error('[GET /subscription/history]', err.message);
+      return res.status(500).json({ error: 'Failed to load payment history.' });
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// 8. GET /api/subscription/invoice/:paymentId
+// ═══════════════════════════════════════════════════════════════════
+router.get('/invoice/:paymentId', authenticate, serveInvoice);
+
+// ═══════════════════════════════════════════════════════════════════
+// 9. POST /api/subscription/webhook/razorpay
+// ═══════════════════════════════════════════════════════════════════
+router.post('/webhook/razorpay',
+  express.raw({ type: 'application/json' }),
+  async (req, res) => {
+    const sig           = req.headers['x-razorpay-signature'];
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    if (!sig || !webhookSecret)
+      return res.status(400).json({ error: 'Missing signature.' });
+
+    const expected = crypto.createHmac('sha256', webhookSecret).update(req.body).digest('hex');
+    if (expected !== sig) return res.status(400).json({ error: 'Webhook signature verification failed.' });
+
+    let event;
+    try { event = JSON.parse(req.body.toString()); }
+    catch { return res.status(400).json({ error: 'Invalid JSON.' }); }
+
+    const eventId     = event.id;
+    const eventType   = event.event;
+    const paymentData = event.payload?.payment?.entity;
+
+    const { rows: [dup] } = await query(
+      `SELECT id FROM subscription_payments WHERE webhook_event_id=$1 LIMIT 1`, [eventId]
+    ).catch(() => ({ rows: [] }));
+    if (dup) return res.json({ received: true, duplicate: true });
+
+    try {
+      if (eventType === 'payment.captured') {
+        await query(
+          `UPDATE subscription_payments SET
+             status='success', razorpay_payment_id=$1,
+             webhook_verified_at=NOW(), webhook_event_id=$2
+           WHERE razorpay_order_id=$3 AND status='pending'`,
+          [paymentData.id, eventId, paymentData.order_id]
+        );
+      } else if (eventType === 'payment.failed') {
+        await query(
+          `UPDATE subscription_payments SET
+             status='failed', payment_failed_reason=$1,
+             failure_code=$2, webhook_event_id=$3
+           WHERE razorpay_order_id=$4 AND status='pending'`,
+          [paymentData.error_description||'Payment failed', paymentData.error_code||null, eventId, paymentData.order_id]
+        );
+      } else if (eventType === 'refund.processed') {
+        const refund = event.payload?.refund?.entity;
+        await query(
+          `UPDATE subscription_payments SET
+             status='refunded', refunded_at=NOW(),
+             refund_amount_paise=$1, refund_ref=$2, webhook_event_id=$3
+           WHERE razorpay_payment_id=$4`,
+          [refund.amount, refund.id, eventId, refund.payment_id]
+        );
+      }
+      return res.json({ received: true });
+    } catch (err) {
+      console.error('[webhook/razorpay]', err.message);
+      return res.status(500).json({ error: 'Webhook processing failed.' });
+    }
+  }
+);
+
+module.exports = router;

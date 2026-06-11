@@ -1,4 +1,6 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT 
+
+
 pragma solidity ^0.8.26;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -11,6 +13,15 @@ import "@openzeppelin/contracts/utils/Pausable.sol";
  *         Only personal data hash stored on-chain (not raw PII).
  *         Actual KYC documents stored off-chain (Firebase/Backend).
  *
+ * COMPLIANCE NOTE (FIU-IND / PMLA):
+ *   Self-verification has been intentionally removed. Under PMLA 2002 and
+ *   FIU-IND guidelines, the Reporting Entity (not the user) is responsible
+ *   for identity verification. All KYC approvals must flow through an
+ *   authorised KYC Operator via verifyKYC(). The correct flow is:
+ *
+ *     User submits docs → Backend/AdminDashboard reviews → Operator calls
+ *     verifyKYC(wallet, hash) → wallet whitelisted on-chain.
+ *
  * BLOCKCHAIN MIGRATION: Replaces AuthContext kycCompleted flag
  */
 contract KYCRegistry is Ownable, Pausable {
@@ -21,7 +32,7 @@ contract KYCRegistry is Ownable, Pausable {
         uint256   verifiedAt;    // timestamp
         uint256   expiresAt;     // KYC validity (2 years)
         bytes32   kycDataHash;   // keccak256 of off-chain KYC data
-        address   verifiedBy;    // operator or self
+        address   verifiedBy;    // authorised operator only
     }
 
     // ── State ─────────────────────────────────────────────
@@ -30,9 +41,6 @@ contract KYCRegistry is Ownable, Pausable {
     // Authorized KYC operators (backend verifiers)
     mapping(address => bool) public kycOperators;
 
-    // ── NEW: allow users to self-verify after Firebase KYC ──
-    bool public selfVerificationEnabled = true;
-
     uint256 public constant KYC_VALIDITY = 2 * 365 days;
 
     // ── Events ────────────────────────────────────────────
@@ -40,7 +48,6 @@ contract KYCRegistry is Ownable, Pausable {
     event KYCRevoked(address indexed wallet, address indexed operator, string reason);
     event KYCOperatorAdded(address indexed operator);
     event KYCOperatorRemoved(address indexed operator);
-    event SelfVerificationToggled(bool enabled);
 
     // ── Modifiers ─────────────────────────────────────────
     modifier onlyKYCOperator() {
@@ -55,6 +62,7 @@ contract KYCRegistry is Ownable, Pausable {
 
     // ── KYC Operator Management ───────────────────────────
     function addKYCOperator(address operator) external onlyOwner {
+        require(operator != address(0), "Invalid operator address");
         kycOperators[operator] = true;
         emit KYCOperatorAdded(operator);
     }
@@ -64,16 +72,23 @@ contract KYCRegistry is Ownable, Pausable {
         emit KYCOperatorRemoved(operator);
     }
 
-    // ── NEW: Toggle self-verification on/off ──────────────
-    function setSelfVerificationEnabled(bool enabled) external onlyOwner {
-        selfVerificationEnabled = enabled;
-        emit SelfVerificationToggled(enabled);
-    }
-
     // ── Core KYC Functions ────────────────────────────────
 
     /**
-     * @notice Operator-verify a user — called by backend/admin
+     * @notice Verify a user's KYC — must be called by an authorised
+     *         KYC Operator (backend/admin) after off-chain review.
+     *         This is the ONLY path to whitelist a wallet.
+     *
+     * @param wallet       Wallet address to whitelist
+     * @param kycDataHash  keccak256(idType:idNumber:phone:fullName)
+     *                     Computed off-chain; raw PII never touches chain.
+     *
+     * Compliant flow (PMLA / FIU-IND):
+     *   User submits KYC form → docs uploaded to Firebase
+     *   → AdminDashboard.jsx operator reviews & approves
+     *   → backend calls verifyKYC(wallet, hash) via onlyKYCOperator
+     *   → wallet whitelisted on-chain
+     *   → Portfolio button unlocks for user
      */
     function verifyKYC(
         address wallet,
@@ -84,31 +99,16 @@ contract KYCRegistry is Ownable, Pausable {
     }
 
     /**
-     * @notice NEW: Self-verify — user calls this after completing
-     *         Firebase KYC (OTP + document upload).
-     *         No operator needed. User pays their own gas.
+     * @notice Revoke KYC — fraud/compliance action.
+     *         Can only be called by an authorised KYC Operator.
      *
-     * @param kycDataHash  keccak256(idType:idNumber:phone:fullName)
-     *                     Same hash computed in KYCForm.js
-     *
-     * Flow:
-     *   KYCForm.js → OTP verified + docs uploaded to Firebase
-     *   → user clicks SUBMIT KYC
-     *   → KYCForm calls selfVerify(hash) via MetaMask
-     *   → wallet whitelisted on-chain instantly
-     *   → Portfolio button unlocks
+     * @param wallet  Wallet whose KYC is to be revoked
+     * @param reason  Human-readable reason (stored in event log)
      */
-    function selfVerify(bytes32 kycDataHash) external whenNotPaused {
-        require(selfVerificationEnabled, "Self-verification is disabled");
-        require(msg.sender != address(0), "Invalid wallet");
-        require(!isKYCVerified(msg.sender), "Already KYC verified");
-        _writeKYCRecord(msg.sender, kycDataHash, msg.sender);
-    }
-
-    /**
-     * @notice Revoke KYC — fraud/compliance
-     */
-    function revokeKYC(address wallet, string calldata reason) external onlyKYCOperator {
+    function revokeKYC(
+        address wallet,
+        string calldata reason
+    ) external onlyKYCOperator {
         require(_kycRecords[wallet].verified, "KYC not verified");
         _kycRecords[wallet].verified = false;
         emit KYCRevoked(wallet, msg.sender, reason);

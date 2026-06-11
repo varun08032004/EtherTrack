@@ -9,6 +9,12 @@ import { useContracts } from './useContracts';
  *   calcEmissions()  →  emissionRegistry.calculateEmissions() (pure, no gas)
  *   logEmission()    →  emissionRegistry.logEmission() (writes to chain)
  *   emissionHistory  →  emissionRegistry.getUserEmissionLogs()
+ *
+ * ── Fix log:
+ *    [FIX-CEA-KWH]  Fallback factor corrected from 0.82 to 0.000727 tCO₂e/kWh
+ *                   per CEA V20.0 Dec 2024 (FY 2023-24, 0.727 tCO₂/MWh ÷ 1000).
+ *                   Previous value (0.82) had no regulatory basis and was
+ *                   ~1128× too high relative to the correct tCO₂e/kWh unit.
  */
 export function useEmissions() {
   const { getContracts } = useContracts();
@@ -18,7 +24,7 @@ export function useEmissions() {
   const [txPending,    setTxPending]    = useState(false);
   const [error,        setError]        = useState('');
 
-  // ── Calculate emissions (no gas — pure function) ────────
+  // ── Calculate emissions (no gas — pure function) ────────────────────────────
   // Replaces: local calcEmissions() in EmissionTracking.js
   const calculateEmissions = useCallback(async (energyKWh, transportKm, wasteKg) => {
     try {
@@ -27,20 +33,23 @@ export function useEmissions() {
         energyKWh, transportKm, wasteKg
       );
       return {
-        totalCO2e:    Number(totalCO2e) / 1000,  // convert g → kg
+        totalCO2e:     Number(totalCO2e) / 1000, // convert g → kg
         creditsNeeded: Number(creditsNeeded),
       };
-    } catch (err) {
-      // Fallback to local calc if contract not yet deployed
-      const e = energyKWh   * 0.82;
-      const t = transportKm * 0.21;
-      const w = wasteKg     * 0.05;
-      const totalCO2e = +(e + t + w).toFixed(2);
+    } catch {
+      // ── [FIX-CEA-KWH] Fallback to local calc if contract not yet deployed ──
+      // Energy: CEA V20.0 Dec 2024 — 0.727 tCO₂/MWh = 0.000727 tCO₂e/kWh
+      // Transport: DEFRA 2024 — car 0.21 kgCO₂e/km = 0.00021 tCO₂e/km
+      // Waste: DEFRA 2024 — landfill 0.58 kgCO₂e/kg = 0.00058 tCO₂e/kg
+      const e = energyKWh   * 0.000727; // tCO₂e/kWh — CEA V20.0 Dec 2024  [FIX-CEA-KWH]
+      const t = transportKm * 0.00021;  // tCO₂e/km  — DEFRA 2024
+      const w = wasteKg     * 0.00058;  // tCO₂e/kg  — DEFRA 2024
+      const totalCO2e = +(e + t + w).toFixed(4);
       return { totalCO2e, creditsNeeded: Math.ceil(totalCO2e) };
     }
   }, [getContracts]);
 
-  // ── Log emission on-chain ────────────────────────────────
+  // ── Log emission on-chain ───────────────────────────────────────────────────
   // Replaces: local state update in EmissionTracking.js
   const logEmission = useCallback(async (walletAddress, emissionData) => {
     setTxPending(true);
@@ -48,7 +57,9 @@ export function useEmissions() {
     try {
       const { emissionRegistry } = await getContracts();
 
-      const periodTimestamp = Math.floor(new Date(emissionData.period || Date.now()).getTime() / 1000);
+      const periodTimestamp = Math.floor(
+        new Date(emissionData.period || Date.now()).getTime() / 1000
+      );
 
       const tx = await emissionRegistry.logEmission(
         periodTimestamp,
@@ -70,7 +81,7 @@ export function useEmissions() {
     }
   }, [getContracts]);
 
-  // ── Fetch emission history ──────────────────────────────
+  // ── Fetch emission history ──────────────────────────────────────────────────
   const fetchEmissionLogs = useCallback(async (walletAddress) => {
     if (!walletAddress) return;
     setLoading(true);
@@ -103,7 +114,7 @@ export function useEmissions() {
     }
   }, [getContracts]);
 
-  // ── Get net emissions (emitted - offset) ───────────────
+  // ── Get net emissions (emitted - offset) ────────────────────────────────────
   const getNetEmissions = useCallback(async (walletAddress) => {
     try {
       const { emissionRead } = await getContracts();

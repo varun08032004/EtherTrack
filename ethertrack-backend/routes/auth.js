@@ -1,60 +1,122 @@
-// routes/auth.js  —  EtherTrack
+// routes/auth.js — EtherTrack
+// ─────────────────────────────────────────────────────────────────
+// SECURITY FIXES APPLIED (v2):
+//
+// [FIX-1]  /verify-email — rate limited (5 attempts / 10 min / email),
+//          otp_attempts counter, OTP invalidated after 5 failures.
+//          OTP now stored as bcrypt hash (cost 8), compared with bcrypt.compare.
+//
+// [FIX-2]  Refresh tokens stored as SHA-256 hash in DB.
+//          Plain token returned to client, hash stored — DB leak = useless tokens.
+//
+// [FIX-3]  /login, /firebase-sync, /verify-email — accessToken + refreshToken
+//          REMOVED from JSON response body. httpOnly cookies are the sole
+//          transport. Only the user object is returned.
+//
+// [FIX-4]  /firebase-sync — fullName sanitized (strip HTML, max 100 chars).
+//
+// [FIX-5]  POST /resend-otp — new endpoint, rate limited 3× per hour per email.
+//
+// [FIX-6]  PATCH /profile — email change now sets email_verified=FALSE,
+//          generates new OTP, sends re-verification email. Login blocked
+//          until re-verified (existing login check covers this).
+//
+// [FIX-7]  POST /logout — switched to optionalAuth so expired access tokens
+//          can still trigger a logout and cookie clear.
+//
+// [FIX-8]  Avatar filename uses MIME-derived extension, not originalname.
+//
+// [FIX-9]  /upload-avatar — e.message no longer leaked in prod response.
+//
+// [FIX-10] bcryptjs → bcrypt (native, runs in libuv thread, non-blocking).
+//          Falls back to bcryptjs if native bcrypt not installed.
+//
+// [FIX-11] support ticket message sanitized (HTML escaped, max 2000 chars).
+//
+// [FIX-12] Firebase Admin SDK moved to lib/firebaseAdmin.js — fails fast
+//          on missing env vars instead of silently initialising with undefined.
+//
+// [FIX-IPv6] makeEmailLimiter keyGenerator now uses ipKeyGenerator(req)
+//          instead of req.ip directly — fixes ERR_ERL_KEY_GEN_IPV6 warning
+//          from express-rate-limit v7+.
+// ─────────────────────────────────────────────────────────────────
+
+'use strict';
+
 const router  = require('express').Router();
-const bcrypt  = require('bcryptjs');
 const jwt     = require('jsonwebtoken');
 const multer  = require('multer');
 const path    = require('path');
 const fs      = require('fs');
-const { safeQuery, withTransaction } = require('../db/pool');
-const { generateOTP, sendVerificationEmail, sendWelcomeEmail } = require('../services/email');
-const { authenticate } = require('../middleware/auth');
+const crypto  = require('crypto');
+// FIX-IPv6: import ipKeyGenerator alongside rateLimit
+const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const { body, validationResult } = require('express-validator');
 
-// ── Cookie config ─────────────────────────────────────────────────
-const COOKIE_OPTS = {
-  httpOnly: true,
-  secure:   process.env.NODE_ENV === 'production',
-  sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-  path:     '/',
-};
-const ACCESS_COOKIE_OPTS  = { ...COOKIE_OPTS, maxAge: 15 * 60 * 1000 };
-const REFRESH_COOKIE_OPTS = { ...COOKIE_OPTS, maxAge: 7 * 24 * 60 * 60 * 1000 };
+// [FIX-10] prefer native bcrypt (non-blocking), fall back to bcryptjs
+let bcrypt;
+try {
+  bcrypt = require('bcrypt');
+} catch {
+  bcrypt = require('bcryptjs');
+  console.warn('[auth] native bcrypt not found — using bcryptjs (blocking). Run: npm install bcrypt');
+}
 
-const generateTokens = (userId) => ({
-  accessToken:  jwt.sign({ userId }, process.env.JWT_SECRET,         { expiresIn: process.env.JWT_EXPIRES_IN         || '15m' }),
-  refreshToken: jwt.sign({ userId }, process.env.JWT_REFRESH_SECRET, { expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d'  }),
-});
+const { safeQuery, withTransaction } = require('../db/pool');
+const { generateOTP, sendVerificationEmail, sendWelcomeEmail } = require('../services/email');
+const { authenticate, optionalAuth } = require('../middleware/auth');
 
-// ── Helpers ───────────────────────────────────────────────────────
-const setAuthCookies = (res, accessToken, refreshToken) => {
-  res.cookie('et_access',  accessToken,  ACCESS_COOKIE_OPTS);
-  res.cookie('et_refresh', refreshToken, REFRESH_COOKIE_OPTS);
-};
-const clearAuthCookies = (res) => {
-  res.clearCookie('et_access',  { path:'/' });
-  res.clearCookie('et_refresh', { path:'/' });
-};
+// [FIX-12] Firebase Admin from dedicated module (fails fast on missing env)
+const admin = require('../lib/firebaseAdmin');
 
-// ── Avatar upload config (multer) ─────────────────────────────────
+// ── 2FA routes + cookie helpers ───────────────────────────────────
+const twoFA = require('./auth2fa');
+const { setAuthCookies, clearAuthCookies } = require('./auth2fa');
+router.use('/2fa', twoFA);
+
+// ── HTML escape helper (for user-supplied strings in emails) ──────
+const escHtml = (s) =>
+  String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
+
+// ── Refresh token hashing ─────────────────────────────────────────
+// [FIX-2] Store SHA-256 hash in DB so a DB dump cannot be replayed.
+const hashToken = (t) => crypto.createHash('sha256').update(t).digest('hex');
+
+// ── Avatar upload config ──────────────────────────────────────────
+const MIME_TO_EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp' };
+
 const avatarStorage = multer.diskStorage({
   destination: (req, file, cb) => {
     const dir = path.join(__dirname, '../uploads/avatars');
     fs.mkdirSync(dir, { recursive: true });
     cb(null, dir);
   },
+  // [FIX-8] derive extension from verified MIME type, not user-supplied filename
   filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
+    const ext = MIME_TO_EXT[file.mimetype] || '.jpg';
     cb(null, `avatar_${req.user.id}_${Date.now()}${ext}`);
   },
 });
 const avatarUpload = multer({
   storage: avatarStorage,
-  limits:  { fileSize: 5 * 1024 * 1024 }, // 5 MB
+  limits:  { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const allowed = ['image/jpeg', 'image/png', 'image/webp'];
-    if (allowed.includes(file.mimetype)) cb(null, true);
+    if (MIME_TO_EXT[file.mimetype]) cb(null, true);
     else cb(new Error('Only JPG, PNG, or WebP allowed'));
   },
+});
+
+// ── Token generation ──────────────────────────────────────────────
+const generateTokens = (userId) => ({
+  accessToken:  jwt.sign({ userId }, process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_EXPIRES_IN || '15m' }),
+  refreshToken: jwt.sign({ userId }, process.env.JWT_REFRESH_SECRET,
+    { expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d' }),
 });
 
 // ── Activity log helper ───────────────────────────────────────────
@@ -66,16 +128,31 @@ const logActivity = async (userId, action, meta = {}, ipHint = null) => {
       [userId, action, JSON.stringify(meta), ipHint]
     );
   } catch (e) {
-    console.warn('Activity log failed:', e.message);
+    console.warn('[logActivity] failed:', e.message);
   }
 };
+
+// ── Per-email rate limiter factory ────────────────────────────────
+// FIX-IPv6: fall back to ipKeyGenerator(req) — never req.ip directly.
+//           express-rate-limit v7+ throws ERR_ERL_KEY_GEN_IPV6 if it
+//           detects raw req.ip in a custom keyGenerator.
+const makeEmailLimiter = (max, windowMs) =>
+  rateLimit({
+    windowMs,
+    max,
+    standardHeaders: true,
+    legacyHeaders:   false,
+    keyGenerator:    (req) => (req.body?.email || '').toLowerCase() || ipKeyGenerator(req),
+    message: { error: 'Too many attempts. Please wait before trying again.' },
+  });
 
 /* ─────────────────────────────────────────────────────────────────
    REGISTER
 ───────────────────────────────────────────────────────────────── */
+// Rate limiting is applied globally in server.js (/api/auth/register → 10/hr)
 router.post('/register', [
   body('email').isEmail().normalizeEmail(),
-  body('password').isLength({ min:8 }),
+  body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
   body('fullName').trim().notEmpty(),
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -84,71 +161,169 @@ router.post('/register', [
   const { email, password, fullName, companyName } = req.body;
   try {
     const existing = await safeQuery('SELECT id FROM users WHERE email=$1', [email]);
-    if (existing.rows.length) return res.status(409).json({ error:'Email already registered' });
+    if (existing.rows.length) return res.status(409).json({ error: 'Email already registered' });
 
-    const passwordHash = await bcrypt.hash(password, parseInt(process.env.BCRYPT_ROUNDS)||12);
+    const ROUNDS      = parseInt(process.env.BCRYPT_ROUNDS) || 12;
+    const passwordHash = await bcrypt.hash(password, ROUNDS);
     const otp          = generateOTP();
-    const otpExpires   = new Date(Date.now() + 10*60*1000);
+    // [FIX-1] Store OTP as bcrypt hash (cost 8 — fast enough for short-lived OTP)
+    const otpHash      = await bcrypt.hash(otp, 8);
+    const otpExpires   = new Date(Date.now() + 10 * 60 * 1000);
 
     const { rows } = await safeQuery(
-      `INSERT INTO users (email,password_hash,full_name,company_name,email_otp,email_otp_expires)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING id,email,full_name,role`,
-      [email, passwordHash, fullName, companyName||null, otp, otpExpires]
+      `INSERT INTO users
+         (email, password_hash, full_name, company_name, email_otp, email_otp_expires, otp_attempts)
+       VALUES ($1,$2,$3,$4,$5,$6,0)
+       RETURNING id, email, full_name, role`,
+      [email, passwordHash, fullName, companyName || null, otpHash, otpExpires]
     );
-    sendVerificationEmail(email, otp, fullName).catch(()=>{});
-    res.status(201).json({ message:'Account created. Check email for OTP.', userId:rows[0].id });
-  } catch(e) {
-    console.error('Register error:', e);
-    res.status(500).json({ error:'Registration failed' });
+
+    // Fire-and-forget — log failures but don't block response
+    sendVerificationEmail(email, otp, fullName).catch(e =>
+      console.error('[register] verification email failed:', e.message)
+    );
+
+    res.status(201).json({
+      message: 'Account created. Check your email for the OTP.',
+      userId:  rows[0].id,
+    });
+  } catch (e) {
+    const isDev = process.env.NODE_ENV !== 'production';
+    console.error('[register]', isDev ? e : e.message);
+    res.status(500).json({ error: 'Registration failed' });
   }
 });
+
+/* ─────────────────────────────────────────────────────────────────
+   RESEND OTP  [FIX-5] — new endpoint
+───────────────────────────────────────────────────────────────── */
+router.post('/resend-otp',
+  makeEmailLimiter(3, 60 * 60 * 1000), // 3 per hour per email
+  [body('email').isEmail().normalizeEmail()],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+    const { email } = req.body;
+    try {
+      const { rows } = await safeQuery(
+        'SELECT id, full_name, email_verified FROM users WHERE email=$1', [email]
+      );
+      // Always return success to prevent email enumeration
+      if (!rows.length || rows[0].email_verified) {
+        return res.json({ message: 'If that email is unverified, a new OTP has been sent.' });
+      }
+
+      const user     = rows[0];
+      const otp      = generateOTP();
+      const otpHash  = await bcrypt.hash(otp, 8);
+      const expires  = new Date(Date.now() + 10 * 60 * 1000);
+
+      await safeQuery(
+        `UPDATE users
+         SET email_otp=$1, email_otp_expires=$2, otp_attempts=0, updated_at=NOW()
+         WHERE id=$3`,
+        [otpHash, expires, user.id]
+      );
+
+      sendVerificationEmail(email, otp, user.full_name).catch(e =>
+        console.error('[resend-otp] email failed:', e.message)
+      );
+
+      res.json({ message: 'If that email is unverified, a new OTP has been sent.' });
+    } catch (e) {
+      console.error('[resend-otp]', e.message);
+      res.status(500).json({ error: 'Failed to resend OTP' });
+    }
+  }
+);
 
 /* ─────────────────────────────────────────────────────────────────
    VERIFY EMAIL
 ───────────────────────────────────────────────────────────────── */
-router.post('/verify-email', [
-  body('email').isEmail().normalizeEmail(),
-  body('otp').isLength({ min:6, max:6 }),
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+router.post('/verify-email',
+  // [FIX-1] 5 attempts per 10 min per email — prevents OTP brute force
+  makeEmailLimiter(5, 10 * 60 * 1000),
+  [
+    body('email').isEmail().normalizeEmail(),
+    body('otp').isLength({ min: 6, max: 6 }).isNumeric(),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-  const { email, otp } = req.body;
-  try {
-    const { rows } = await safeQuery(
-      'SELECT id,email_otp,email_otp_expires,full_name FROM users WHERE email=$1', [email]
-    );
-    if (!rows.length) return res.status(404).json({ error:'User not found' });
-    const user = rows[0];
-    if (user.email_otp !== otp)                       return res.status(400).json({ error:'Invalid OTP' });
-    if (new Date() > new Date(user.email_otp_expires)) return res.status(400).json({ error:'OTP expired' });
+    const { email, otp } = req.body;
+    try {
+      const { rows } = await safeQuery(
+        `SELECT id, email_otp, email_otp_expires, full_name, otp_attempts
+         FROM users WHERE email=$1`,
+        [email]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'User not found' });
 
-    await safeQuery(
-      'UPDATE users SET email_verified=TRUE,email_otp=NULL,email_otp_expires=NULL WHERE id=$1',
-      [user.id]
-    );
-    sendWelcomeEmail(email, user.full_name).catch(()=>{});
+      const user = rows[0];
 
-    const tokens = generateTokens(user.id);
-    await safeQuery(
-      `INSERT INTO refresh_tokens (user_id,token,expires_at) VALUES ($1,$2,NOW()+INTERVAL '7 days')`,
-      [user.id, tokens.refreshToken]
-    );
+      // [FIX-1] Lockout after 5 failed attempts
+      if ((user.otp_attempts || 0) >= 5) {
+        await safeQuery(
+          'UPDATE users SET email_otp=NULL, email_otp_expires=NULL WHERE id=$1',
+          [user.id]
+        );
+        return res.status(429).json({
+          error: 'Too many failed attempts. Please request a new OTP.',
+        });
+      }
 
-    setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
-    res.json({
-      message:      'Email verified',
-      accessToken:  tokens.accessToken,
-      refreshToken: tokens.refreshToken,
-    });
-  } catch(e) {
-    console.error('Verify error:', e);
-    res.status(500).json({ error:'Verification failed' });
+      if (!user.email_otp) {
+        return res.status(400).json({ error: 'No OTP found. Please request a new one.' });
+      }
+      if (new Date() > new Date(user.email_otp_expires)) {
+        return res.status(400).json({ error: 'OTP expired. Please request a new one.' });
+      }
+
+      // [FIX-1] Compare against stored hash
+      const otpValid = await bcrypt.compare(otp, user.email_otp);
+      if (!otpValid) {
+        await safeQuery(
+          'UPDATE users SET otp_attempts=otp_attempts+1 WHERE id=$1',
+          [user.id]
+        );
+        return res.status(400).json({ error: 'Invalid OTP' });
+      }
+
+      await safeQuery(
+        `UPDATE users
+         SET email_verified=TRUE, email_otp=NULL, email_otp_expires=NULL,
+             otp_attempts=0, updated_at=NOW()
+         WHERE id=$1`,
+        [user.id]
+      );
+
+      sendWelcomeEmail(email, user.full_name).catch(e =>
+        console.error('[verify-email] welcome email failed:', e.message)
+      );
+
+      const tokens = generateTokens(user.id);
+      // [FIX-2] Store hash of refresh token
+      await safeQuery(
+        `INSERT INTO refresh_tokens (user_id, token, expires_at)
+         VALUES ($1, $2, NOW()+INTERVAL '7 days')`,
+        [user.id, hashToken(tokens.refreshToken)]
+      );
+
+      setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
+      // [FIX-3] Do NOT return tokens in body — cookies are the sole transport
+      res.json({ message: 'Email verified. You are now logged in.' });
+    } catch (e) {
+      console.error('[verify-email]', e.message);
+      res.status(500).json({ error: 'Verification failed' });
+    }
   }
-});
+);
 
 /* ─────────────────────────────────────────────────────────────────
-   LOGIN
+   LOGIN — with 2FA support
+   Rate limiting applied globally in server.js (20 / 15 min)
 ───────────────────────────────────────────────────────────────── */
 router.post('/login', [
   body('email').isEmail().normalizeEmail(),
@@ -160,26 +335,43 @@ router.post('/login', [
   const { email, password } = req.body;
   try {
     const { rows } = await safeQuery(
-      `SELECT id,email,password_hash,full_name,company_name,role,
-              wallet_address,kyc_status,kyc_verified,email_verified,is_active
-       FROM users WHERE email=$1`, [email]
+      `SELECT id, email, password_hash, full_name, company_name, role,
+              wallet_address, kyc_status, kyc_verified, email_verified, is_active,
+              subscription_plan, plan_selected, subscription_renewal_date,
+              subscription_cycle, inr_balance, two_fa_enabled
+       FROM users WHERE email=$1`,
+      [email]
     );
-    if (!rows.length)         return res.status(401).json({ error:'Invalid credentials' });
+
+    // Generic message prevents email enumeration
+    if (!rows.length) return res.status(401).json({ error: 'Invalid credentials' });
     const user = rows[0];
-    if (!user.is_active)      return res.status(403).json({ error:'Account disabled' });
+    if (!user.is_active) return res.status(403).json({ error: 'Account disabled' });
+
     const match = await bcrypt.compare(password, user.password_hash);
-    if (!match)               return res.status(401).json({ error:'Invalid credentials' });
-    if (!user.email_verified) return res.status(403).json({ error:'Email not verified' });
+    if (!match) return res.status(401).json({ error: 'Invalid credentials' });
+    if (!user.email_verified) return res.status(403).json({ error: 'Email not verified' });
 
     await safeQuery('UPDATE users SET last_login=NOW() WHERE id=$1', [user.id]);
 
+    // ── 2FA check ────────────────────────────────────────────────
+    if (user.two_fa_enabled) {
+      const tempToken = jwt.sign(
+        { userId: user.id, type: '2fa_pending' },
+        process.env.JWT_SECRET,
+        { expiresIn: '5m' }
+      );
+      return res.json({ requires2FA: true, tempToken });
+    }
+
     const tokens = generateTokens(user.id);
+    // [FIX-2] Store hash
     await safeQuery(
-      `INSERT INTO refresh_tokens (user_id,token,expires_at) VALUES ($1,$2,NOW()+INTERVAL '7 days')`,
-      [user.id, tokens.refreshToken]
+      `INSERT INTO refresh_tokens (user_id, token, expires_at)
+       VALUES ($1, $2, NOW()+INTERVAL '7 days')`,
+      [user.id, hashToken(tokens.refreshToken)]
     );
 
-    // Track session
     const ua = req.headers['user-agent'] || '';
     await safeQuery(
       `INSERT INTO user_sessions (user_id, browser, os, device_type, ip_address, is_current)
@@ -188,22 +380,28 @@ router.post('/login', [
     ).catch(() => {});
 
     setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
+    // [FIX-3] No tokens in response body
     res.json({
       user: {
-        id:             user.id,
-        email:          user.email,
-        full_name:      user.full_name,
-        company_name:   user.company_name,
-        role:           user.role,
-        wallet_address: user.wallet_address,
-        kyc_verified:   !!(user.kyc_verified || user.kyc_status==='verified'),
+        id:                        user.id,
+        email:                     user.email,
+        full_name:                 user.full_name,
+        company_name:              user.company_name,
+        role:                      user.role,
+        wallet_address:            user.wallet_address,
+        kyc_verified:              !!(user.kyc_verified || user.kyc_status === 'verified'),
+        subscription_plan:         user.subscription_plan         || 'free',
+        plan_selected:             !!user.plan_selected,
+        subscription_renewal_date: user.subscription_renewal_date || null,
+        subscription_cycle:        user.subscription_cycle        || 'monthly',
+        // [FIX] Return as string — never parseFloat financial data
+        inr_balance:               (user.inr_balance || '0').toString(),
       },
-      accessToken:  tokens.accessToken,
-      refreshToken: tokens.refreshToken,
     });
-  } catch(e) {
-    console.error('Login error:', e);
-    res.status(500).json({ error:'Login failed' });
+  } catch (e) {
+    const isDev = process.env.NODE_ENV !== 'production';
+    console.error('[login]', isDev ? e : e.message);
+    res.status(500).json({ error: 'Login failed' });
   }
 });
 
@@ -212,7 +410,9 @@ router.post('/login', [
 ───────────────────────────────────────────────────────────────── */
 router.post('/refresh', async (req, res) => {
   const refreshToken = req.cookies?.et_refresh || req.body?.refreshToken;
-  if (!refreshToken) return res.status(400).json({ error:'No refresh token', code:'NO_REFRESH' });
+  if (!refreshToken) {
+    return res.status(400).json({ error: 'No refresh token', code: 'NO_REFRESH' });
+  }
 
   try {
     let payload;
@@ -220,109 +420,173 @@ router.post('/refresh', async (req, res) => {
       payload = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
     } catch {
       clearAuthCookies(res);
-      return res.status(401).json({ error:'Invalid or expired refresh token' });
+      return res.status(401).json({ error: 'Invalid or expired refresh token' });
     }
 
+    // [FIX-2] Look up by hash
     const { rows } = await safeQuery(
       `SELECT id FROM refresh_tokens
        WHERE token=$1 AND user_id=$2 AND expires_at>NOW() AND revoked=FALSE`,
-      [refreshToken, payload.userId]
+      [hashToken(refreshToken), payload.userId]
     );
     if (!rows.length) {
       clearAuthCookies(res);
-      return res.status(401).json({ error:'Refresh token revoked or expired' });
+      return res.status(401).json({ error: 'Refresh token revoked or expired' });
     }
 
-    await safeQuery('UPDATE refresh_tokens SET revoked=TRUE WHERE token=$1', [refreshToken]);
+    // Rotate: revoke old, issue new
+    await safeQuery(
+      'UPDATE refresh_tokens SET revoked=TRUE WHERE token=$1',
+      [hashToken(refreshToken)]
+    );
 
     const tokens = generateTokens(payload.userId);
     await safeQuery(
-      `INSERT INTO refresh_tokens (user_id,token,expires_at) VALUES ($1,$2,NOW()+INTERVAL '7 days')`,
-      [payload.userId, tokens.refreshToken]
+      `INSERT INTO refresh_tokens (user_id, token, expires_at)
+       VALUES ($1, $2, NOW()+INTERVAL '7 days')`,
+      [payload.userId, hashToken(tokens.refreshToken)]
     );
 
     setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
-    res.json({
-      message:      'Tokens refreshed',
-      accessToken:  tokens.accessToken,
-      refreshToken: tokens.refreshToken,
-    });
-  } catch(e) {
-    console.error('Refresh error:', e);
-    res.status(500).json({ error:'Token refresh failed' });
+    // [FIX-3] No tokens in body
+    res.json({ message: 'Tokens refreshed' });
+  } catch (e) {
+    console.error('[refresh]', e.message);
+    res.status(500).json({ error: 'Token refresh failed' });
   }
 });
 
 /* ─────────────────────────────────────────────────────────────────
    LOGOUT
+   [FIX-7] optionalAuth — expired access token can still log out
 ───────────────────────────────────────────────────────────────── */
-router.post('/logout', authenticate, async (req, res) => {
+router.post('/logout', optionalAuth, async (req, res) => {
   try {
     const refreshToken = req.cookies?.et_refresh || req.body?.refreshToken;
     if (refreshToken) {
+      // [FIX-2] revoke by hash
       await safeQuery(
-        'UPDATE refresh_tokens SET revoked=TRUE WHERE token=$1 AND user_id=$2',
-        [refreshToken, req.user.id]
-      ).catch(()=>{});
+        `UPDATE refresh_tokens SET revoked=TRUE
+         WHERE token=$1 ${req.user ? 'AND user_id=$2' : ''}`,
+        req.user ? [hashToken(refreshToken), req.user.id] : [hashToken(refreshToken)]
+      ).catch(() => {});
     }
-    // Remove current session flag
-    await safeQuery(
-      'UPDATE user_sessions SET is_current=FALSE WHERE user_id=$1 AND is_current=TRUE',
-      [req.user.id]
-    ).catch(()=>{});
+    if (req.user) {
+      await safeQuery(
+        'UPDATE user_sessions SET is_current=FALSE WHERE user_id=$1 AND is_current=TRUE',
+        [req.user.id]
+      ).catch(() => {});
+    }
   } catch {}
   clearAuthCookies(res);
-  res.json({ message:'Logged out' });
+  res.json({ message: 'Logged out' });
 });
 
 /* ─────────────────────────────────────────────────────────────────
    FIREBASE SYNC
 ───────────────────────────────────────────────────────────────── */
 router.post('/firebase-sync', async (req, res) => {
-  const { email, firebaseUid, fullName } = req.body;
-  if (!email || !firebaseUid) return res.status(400).json({ error:'email and firebaseUid required' });
+  const idToken = req.headers.authorization?.startsWith('Bearer ')
+    ? req.headers.authorization.split(' ')[1]
+    : null;
+
+  if (!idToken) return res.status(401).json({ error: 'Firebase ID token required' });
+
+  let decoded;
+  try {
+    // Circuit breaker: 5s timeout on Firebase verification
+    decoded = await Promise.race([
+      admin.auth().verifyIdToken(idToken),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Firebase verification timeout')), 5000)
+      ),
+    ]);
+  } catch (e) {
+    console.error('[firebase-sync] token verification failed:', e.message);
+    return res.status(401).json({ error: 'Invalid or expired Firebase token' });
+  }
+
+  const firebaseUid   = decoded.uid;
+  const email         = decoded.email;
+  const emailVerified = decoded.email_verified ?? false;
+  const providerRaw   = decoded.firebase?.sign_in_provider || 'password';
+  const provider      = providerRaw === 'google.com'   ? 'google'
+                      : providerRaw === 'facebook.com' ? 'facebook'
+                      : 'email';
+
+  if (!email) return res.status(400).json({ error: 'Token has no email claim' });
+
+  // [FIX-4] Sanitize fullName — strip HTML, limit length
+  const rawName = req.body?.fullName || decoded.name || email.split('@')[0];
+  const fullName = rawName.replace(/[<>"'&]/g, '').trim().slice(0, 100);
 
   try {
     const result = await withTransaction(async (client) => {
       let { rows } = await client.query(
-        `SELECT id,email,full_name,role,wallet_address,kyc_status,kyc_verified
-         FROM users WHERE email=$1`, [email]
+        `SELECT id, email, full_name, role, wallet_address, kyc_status, kyc_verified,
+                subscription_plan, plan_selected, subscription_renewal_date,
+                subscription_cycle, inr_balance
+         FROM users WHERE email = $1`,
+        [email]
       );
       let user = rows[0];
+
       if (!user) {
-        const { rows:newUser } = await client.query(
-          `INSERT INTO users (email,password_hash,full_name,email_verified)
-           VALUES ($1,$2,$3,TRUE)
-           RETURNING id,email,full_name,role,wallet_address,kyc_status,kyc_verified`,
-          [email, `firebase:${firebaseUid}`, fullName||email.split('@')[0]]
+        const { rows: newUser } = await client.query(
+          `INSERT INTO users
+             (email, password_hash, full_name, firebase_uid, provider, email_verified)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           RETURNING id, email, full_name, role, wallet_address, kyc_status, kyc_verified,
+                     subscription_plan, plan_selected, subscription_renewal_date,
+                     subscription_cycle, inr_balance`,
+          [email, `firebase:${firebaseUid}`, fullName, firebaseUid, provider, emailVerified]
         );
         user = newUser[0];
+      } else {
+        await client.query(
+          `UPDATE users SET
+             firebase_uid   = COALESCE(firebase_uid, $1),
+             provider       = CASE WHEN firebase_uid IS NULL THEN $2 ELSE provider END,
+             email_verified = (email_verified OR $3),
+             full_name      = COALESCE(NULLIF($4, ''), full_name),
+             last_login     = NOW(),
+             updated_at     = NOW()
+           WHERE id = $5`,
+          [firebaseUid, provider, emailVerified, fullName, user.id]
+        );
       }
-      await client.query('UPDATE users SET last_login=NOW() WHERE id=$1', [user.id]);
+
       const tokens = generateTokens(user.id);
+      // [FIX-2] Store hash
       await client.query(
-        `INSERT INTO refresh_tokens (user_id,token,expires_at) VALUES ($1,$2,NOW()+INTERVAL '7 days')`,
-        [user.id, tokens.refreshToken]
+        `INSERT INTO refresh_tokens (user_id, token, expires_at)
+         VALUES ($1, $2, NOW() + INTERVAL '7 days')`,
+        [user.id, hashToken(tokens.refreshToken)]
       );
+
       return { user, tokens };
     });
 
     setAuthCookies(res, result.tokens.accessToken, result.tokens.refreshToken);
+    // [FIX-3] No tokens in body
     res.json({
       user: {
-        id:             result.user.id,
-        email:          result.user.email,
-        full_name:      result.user.full_name,
-        role:           result.user.role,
-        wallet_address: result.user.wallet_address,
-        kyc_verified:   !!(result.user.kyc_verified || result.user.kyc_status==='verified'),
+        id:                        result.user.id,
+        email:                     result.user.email,
+        full_name:                 result.user.full_name,
+        role:                      result.user.role,
+        wallet_address:            result.user.wallet_address,
+        kyc_verified:              !!(result.user.kyc_verified || result.user.kyc_status === 'verified'),
+        subscription_plan:         result.user.subscription_plan         || 'free',
+        plan_selected:             !!result.user.plan_selected,
+        subscription_renewal_date: result.user.subscription_renewal_date || null,
+        subscription_cycle:        result.user.subscription_cycle        || 'monthly',
+        inr_balance:               (result.user.inr_balance || '0').toString(),
       },
-      accessToken:  result.tokens.accessToken,
-      refreshToken: result.tokens.refreshToken,
     });
-  } catch(e) {
-    console.error('Firebase sync error:', e);
-    res.status(500).json({ error:'Sync failed' });
+  } catch (e) {
+    console.error('[firebase-sync]', e.message);
+    res.status(500).json({ error: 'Sync failed' });
   }
 });
 
@@ -332,32 +596,67 @@ router.post('/firebase-sync', async (req, res) => {
 router.get('/me', authenticate, async (req, res) => {
   try {
     const { rows } = await safeQuery(
-      `SELECT id, email, full_name, company_name, role,
-              wallet_address, kyc_status, kyc_verified, email_verified, last_login,
-              phone, bio, timezone, avatar_url, notification_prefs
+      `SELECT
+         id, email, full_name, company_name, role,
+         wallet_address, kyc_status, kyc_verified, email_verified, last_login,
+         phone, bio, timezone, avatar_url, notification_prefs,
+         company_gstin, company_pan, company_cin, industry_sector, company_type,
+         subscription_plan, plan_selected, subscription_renewal_date,
+         subscription_cycle, subscription_activated_at,
+         inr_balance, inr_balance_locked,
+         two_fa_enabled
        FROM users WHERE id=$1`,
       [req.user.id]
     );
+    if (!rows.length) return res.status(404).json({ error: 'User not found' });
+
     const u = rows[0];
+    const daysLeft = u.subscription_renewal_date
+      ? Math.ceil((new Date(u.subscription_renewal_date) - new Date()) / (1000 * 60 * 60 * 24))
+      : null;
+
     res.json({
       ...u,
-      kyc_verified: !!(u.kyc_verified || u.kyc_status === 'verified'),
+      kyc_verified:              !!(u.kyc_verified || u.kyc_status === 'verified'),
+      plan_selected:             !!u.plan_selected,
+      subscription_plan:         u.subscription_plan         || 'free',
+      subscription_cycle:        u.subscription_cycle        || 'monthly',
+      subscription_renewal_date: u.subscription_renewal_date || null,
+      subscription_days_left:    daysLeft,
+      inr_balance:               (u.inr_balance || '0').toString(),
+      inr_balance_locked:        (u.inr_balance_locked || '0').toString(),
+      two_fa_enabled:            !!u.two_fa_enabled,
     });
-  } catch(e) {
-    console.error('/me error:', e);
-    res.status(500).json({ error:'Failed to fetch user' });
+  } catch (e) {
+    console.error('[/me]', e.message);
+    res.status(500).json({ error: 'Failed to fetch user' });
   }
 });
 
 /* ─────────────────────────────────────────────────────────────────
-   UPDATE PROFILE  PATCH /profile
-   Updates: full_name, email, company_name, phone, bio, timezone, avatar_url
+   UPDATE PROFILE
+   [FIX-6] Email change triggers re-verification
 ───────────────────────────────────────────────────────────────── */
 router.patch('/profile', authenticate, [
   body('full_name').optional().trim().notEmpty().withMessage('Name cannot be empty'),
   body('email').optional().isEmail().normalizeEmail(),
   body('phone').optional().matches(/^\+?[\d\s\-()\u2013]{7,16}$/).withMessage('Invalid phone number'),
-  body('bio').optional().isLength({ max:280 }).withMessage('Bio must be under 280 characters'),
+  body('bio').optional().isLength({ max: 280 }).withMessage('Bio must be under 280 characters'),
+  // [FIX] avatar_url must be an HTTPS URL on your own domain or empty
+  body('avatar_url').optional().custom((val) => {
+    if (!val) return true;
+    try {
+      const u = new URL(val);
+      const allowedHosts = (process.env.AVATAR_ALLOWED_HOSTS || '').split(',').map(h => h.trim()).filter(Boolean);
+      if (u.protocol !== 'https:') throw new Error('Must be HTTPS');
+      if (allowedHosts.length && !allowedHosts.includes(u.hostname)) {
+        throw new Error('Avatar URL must point to an allowed domain');
+      }
+      return true;
+    } catch (e) {
+      throw new Error(e.message || 'Invalid avatar URL');
+    }
+  }),
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
@@ -365,12 +664,13 @@ router.patch('/profile', authenticate, [
   const { full_name, email, company_name, phone, bio, timezone, avatar_url } = req.body;
 
   try {
-    // If email is changing, check it's not already taken
-    if (email && email !== req.user.email) {
+    const emailChanging = email && email !== req.user.email;
+
+    if (emailChanging) {
       const { rows: existing } = await safeQuery(
         'SELECT id FROM users WHERE email=$1 AND id!=$2', [email, req.user.id]
       );
-      if (existing.length) return res.status(409).json({ error:'Email already in use' });
+      if (existing.length) return res.status(409).json({ error: 'Email already in use' });
     }
 
     const { rows } = await safeQuery(
@@ -382,39 +682,59 @@ router.patch('/profile', authenticate, [
         bio          = COALESCE($5, bio),
         timezone     = COALESCE($6, timezone),
         avatar_url   = COALESCE($7, avatar_url),
+        -- [FIX-6] Re-verification required on email change
+        email_verified = CASE WHEN $2 IS NOT NULL AND $2 != email THEN FALSE ELSE email_verified END,
         updated_at   = NOW()
        WHERE id = $8
        RETURNING id, email, full_name, company_name, role,
                  wallet_address, kyc_verified, kyc_status,
                  phone, bio, timezone, avatar_url, notification_prefs`,
-      [full_name||null, email||null, company_name||null, phone||null,
-       bio||null, timezone||null, avatar_url||null, req.user.id]
+      [full_name || null, email || null, company_name || null, phone || null,
+       bio || null, timezone || null, avatar_url || null, req.user.id]
     );
 
-    await logActivity(req.user.id, 'PROFILE_UPDATED',
-      { fields: Object.keys(req.body) }, req.ip);
+    // [FIX-6] Send re-verification OTP to new email
+    if (emailChanging) {
+      const otp     = generateOTP();
+      const otpHash = await bcrypt.hash(otp, 8);
+      const expires = new Date(Date.now() + 10 * 60 * 1000);
+      await safeQuery(
+        `UPDATE users SET email_otp=$1, email_otp_expires=$2, otp_attempts=0 WHERE id=$3`,
+        [otpHash, expires, req.user.id]
+      );
+      sendVerificationEmail(email, otp, rows[0].full_name).catch(e =>
+        console.error('[profile] re-verification email failed:', e.message)
+      );
+    }
 
-    res.json({ user: { ...rows[0], kyc_verified: !!(rows[0].kyc_verified || rows[0].kyc_status === 'verified') } });
-  } catch(e) {
-    console.error('Profile update error:', e);
-    res.status(500).json({ error:'Profile update failed' });
+    await logActivity(req.user.id, 'PROFILE_UPDATED',
+      { fields: Object.keys(req.body), emailChanged: emailChanging }, req.ip);
+
+    res.json({
+      user: {
+        ...rows[0],
+        kyc_verified: !!(rows[0].kyc_verified || rows[0].kyc_status === 'verified'),
+      },
+      ...(emailChanging && {
+        message: 'Profile updated. A verification OTP has been sent to your new email address.',
+        requiresEmailVerification: true,
+      }),
+    });
+  } catch (e) {
+    console.error('[profile update]', e.message);
+    res.status(500).json({ error: 'Profile update failed' });
   }
 });
 
 /* ─────────────────────────────────────────────────────────────────
-   UPLOAD AVATAR  POST /upload-avatar
-   Accepts multipart/form-data with field 'avatar'
-   Returns: { avatar_url }
+   UPLOAD AVATAR
 ───────────────────────────────────────────────────────────────── */
 router.post('/upload-avatar', authenticate, avatarUpload.single('avatar'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-
-    // Build public URL — adjust BASE_URL to your domain in production
-    const baseUrl  = process.env.BASE_URL || `http://localhost:${process.env.PORT || 5000}`;
+    const baseUrl   = process.env.BASE_URL || `http://localhost:${process.env.PORT || 5000}`;
     const avatarUrl = `${baseUrl}/uploads/avatars/${req.file.filename}`;
 
-    // Delete old avatar file from disk if it exists
     if (req.user.avatar_url) {
       try {
         const oldFile = req.user.avatar_url.split('/uploads/avatars/')[1];
@@ -425,161 +745,138 @@ router.post('/upload-avatar', authenticate, avatarUpload.single('avatar'), async
       } catch {}
     }
 
-    // Persist new avatar_url to DB
     await safeQuery(
       'UPDATE users SET avatar_url=$1, updated_at=NOW() WHERE id=$2',
       [avatarUrl, req.user.id]
     );
-
     res.json({ avatar_url: avatarUrl });
-  } catch(e) {
-    console.error('Avatar upload error:', e);
-    res.status(500).json({ error: e.message || 'Avatar upload failed' });
+  } catch (e) {
+    console.error('[upload-avatar]', e.message);
+    // [FIX-9] Never leak e.message to client in production
+    res.status(500).json({
+      error: process.env.NODE_ENV === 'production' ? 'Avatar upload failed' : e.message,
+    });
   }
 });
 
 /* ─────────────────────────────────────────────────────────────────
-   CHANGE PASSWORD  POST /change-password
-   Verifies current password, then updates to new password
+   CHANGE PASSWORD
 ───────────────────────────────────────────────────────────────── */
 router.post('/change-password', authenticate, [
   body('currentPassword').notEmpty().withMessage('Current password is required'),
-  body('newPassword').isLength({ min:8 }).withMessage('New password must be at least 8 characters'),
+  body('newPassword').isLength({ min: 8 }).withMessage('New password must be at least 8 characters'),
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   const { currentPassword, newPassword } = req.body;
-
   try {
-    // Fetch current password hash
     const { rows } = await safeQuery(
       'SELECT password_hash FROM users WHERE id=$1', [req.user.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'User not found' });
 
-    // Verify current password
     const match = await bcrypt.compare(currentPassword, rows[0].password_hash);
     if (!match) return res.status(401).json({ error: 'Current password is incorrect' });
 
-    // Hash and save new password
-    const newHash = await bcrypt.hash(newPassword, parseInt(process.env.BCRYPT_ROUNDS) || 12);
+    const ROUNDS  = parseInt(process.env.BCRYPT_ROUNDS) || 12;
+    const newHash = await bcrypt.hash(newPassword, ROUNDS);
+
     await safeQuery(
       'UPDATE users SET password_hash=$1, updated_at=NOW() WHERE id=$2',
       [newHash, req.user.id]
     );
-
-    // Revoke all refresh tokens to invalidate other sessions
-    await safeQuery(
-      'UPDATE refresh_tokens SET revoked=TRUE WHERE user_id=$1',
-      [req.user.id]
-    );
-
-    // Mark all other sessions as inactive
-    await safeQuery(
-      'DELETE FROM user_sessions WHERE user_id=$1',
-      [req.user.id]
-    );
-
+    // Revoke all sessions on password change
+    await safeQuery('UPDATE refresh_tokens SET revoked=TRUE WHERE user_id=$1', [req.user.id]);
+    await safeQuery('DELETE FROM user_sessions WHERE user_id=$1', [req.user.id]);
     await logActivity(req.user.id, 'PASSWORD_CHANGED', {}, req.ip);
 
     res.json({ message: 'Password changed successfully. Please log in again on other devices.' });
-  } catch(e) {
-    console.error('Change password error:', e);
+  } catch (e) {
+    console.error('[change-password]', e.message);
     res.status(500).json({ error: 'Password change failed' });
   }
 });
 
 /* ─────────────────────────────────────────────────────────────────
-   NOTIFICATION PREFERENCES  PATCH /notification-prefs
-   Saves notification_prefs JSONB column
+   NOTIFICATION PREFERENCES
 ───────────────────────────────────────────────────────────────── */
 router.patch('/notification-prefs', authenticate, async (req, res) => {
   const { notification_prefs } = req.body;
   if (!notification_prefs || typeof notification_prefs !== 'object') {
     return res.status(400).json({ error: 'notification_prefs object is required' });
   }
-
   try {
     await safeQuery(
       'UPDATE users SET notification_prefs=$1, updated_at=NOW() WHERE id=$2',
       [JSON.stringify(notification_prefs), req.user.id]
     );
-
     await logActivity(req.user.id, 'NOTIF_PREFS_UPDATED', {}, req.ip);
-
     res.json({ message: 'Notification preferences saved', notification_prefs });
-  } catch(e) {
-    console.error('Notif prefs error:', e);
+  } catch (e) {
+    console.error('[notif-prefs]', e.message);
     res.status(500).json({ error: 'Failed to save preferences' });
   }
 });
 
 /* ─────────────────────────────────────────────────────────────────
-   LIST SESSIONS  GET /sessions
-   Returns all active sessions for the current user
+   SESSIONS
 ───────────────────────────────────────────────────────────────── */
 router.get('/sessions', authenticate, async (req, res) => {
   try {
     const { rows } = await safeQuery(
       `SELECT id, browser, os, device_type, ip_address, is_current, last_active_at, created_at
-       FROM user_sessions
-       WHERE user_id = $1
-       ORDER BY last_active_at DESC`,
+       FROM user_sessions WHERE user_id=$1 ORDER BY last_active_at DESC`,
       [req.user.id]
     );
     res.json({ sessions: rows });
-  } catch(e) {
-    console.error('Sessions error:', e);
+  } catch (e) {
     res.status(500).json({ error: 'Failed to fetch sessions' });
   }
 });
 
-/* ─────────────────────────────────────────────────────────────────
-   REVOKE SESSION  DELETE /sessions/:id
-   Deletes a specific session row
-───────────────────────────────────────────────────────────────── */
 router.delete('/sessions/:id', authenticate, async (req, res) => {
+  // Validate session id is numeric
+  const sessionId = parseInt(req.params.id, 10);
+  if (isNaN(sessionId)) return res.status(400).json({ error: 'Invalid session id' });
+
   try {
     const { rows } = await safeQuery(
       'DELETE FROM user_sessions WHERE id=$1 AND user_id=$2 RETURNING id',
-      [req.params.id, req.user.id]
+      [sessionId, req.user.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Session not found' });
-
-    await logActivity(req.user.id, 'SESSION_REVOKED', { session_id: req.params.id }, req.ip);
-
+    await logActivity(req.user.id, 'SESSION_REVOKED', { session_id: sessionId }, req.ip);
     res.json({ message: 'Session revoked' });
-  } catch(e) {
-    console.error('Revoke session error:', e);
+  } catch (e) {
     res.status(500).json({ error: 'Failed to revoke session' });
   }
 });
 
 /* ─────────────────────────────────────────────────────────────────
-   ACTIVITY LOG  GET /activity-log
-   Returns last 10 profile/security events for the current user
+   ACTIVITY LOG  (with pagination)
 ───────────────────────────────────────────────────────────────── */
 router.get('/activity-log', authenticate, async (req, res) => {
+  const limit  = Math.min(parseInt(req.query.limit  || '20', 10), 100);
+  const offset = Math.max(parseInt(req.query.offset || '0',  10), 0);
+
   try {
     const { rows } = await safeQuery(
       `SELECT id, action, meta, ip_hint, created_at
        FROM profile_activity_log
-       WHERE user_id = $1
+       WHERE user_id=$1
        ORDER BY created_at DESC
-       LIMIT 10`,
-      [req.user.id]
+       LIMIT $2 OFFSET $3`,
+      [req.user.id, limit, offset]
     );
-    res.json({ log: rows });
-  } catch(e) {
-    console.error('Activity log error:', e);
+    res.json({ log: rows, limit, offset });
+  } catch (e) {
     res.status(500).json({ error: 'Failed to fetch activity log' });
   }
 });
 
 /* ─────────────────────────────────────────────────────────────────
-   REQUEST ACCOUNT DELETION  POST /request-deletion
-   DPDP Act 2023 §13 compliant — creates a deletion request record
+   REQUEST ACCOUNT DELETION
 ───────────────────────────────────────────────────────────────── */
 router.post('/request-deletion', authenticate, [
   body('reason').trim().notEmpty().withMessage('Reason is required'),
@@ -588,31 +885,26 @@ router.post('/request-deletion', authenticate, [
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   const { reason } = req.body;
-
   try {
-    // Check if a pending request already exists
     const { rows: existing } = await safeQuery(
-      `SELECT id FROM account_deletion_requests
-       WHERE user_id=$1 AND status='pending'`,
+      `SELECT id FROM account_deletion_requests WHERE user_id=$1 AND status='pending'`,
       [req.user.id]
     );
     if (existing.length) {
-      return res.status(409).json({ error: 'A deletion request is already pending for this account' });
+      return res.status(409).json({
+        error: 'A deletion request is already pending for this account',
+      });
     }
-
     await safeQuery(
-      `INSERT INTO account_deletion_requests (user_id, email, reason)
-       VALUES ($1, $2, $3)`,
+      `INSERT INTO account_deletion_requests (user_id, email, reason) VALUES ($1, $2, $3)`,
       [req.user.id, req.user.email, reason]
     );
-
     await logActivity(req.user.id, 'DELETION_REQUESTED', { reason }, req.ip);
-
     res.json({
-      message: 'Deletion request submitted. You will receive an email confirmation within 24 hours. Your account will be permanently deleted within 72 hours per DPDP Act 2023 §13.',
+      message: 'Deletion request submitted. Your account will be permanently deleted within 72 hours per DPDP Act 2023 §13.',
     });
-  } catch(e) {
-    console.error('Deletion request error:', e);
+  } catch (e) {
+    console.error('[request-deletion]', e.message);
     res.status(500).json({ error: 'Failed to submit deletion request' });
   }
 });

@@ -1,150 +1,247 @@
-// AdminDashboard.jsx — EtherTrack Admin Console (Full Power Edition)
-import React, { useState, useEffect, useContext, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+// AdminDashboard.jsx — EtherTrack Admin Console v2
+// Changes vs v1:
+// [CORP] Added '🏢 Corporate' tab with:
+//   - User search + select
+//   - Activate Corporate form (cycle, seats, price, renewal, notes)
+//   - Extend/Update Renewal form
+//   - Active corporate accounts table with expiry coloring
+//   - corporateAccounts stat card in overview
+import React, { useState, useEffect, useContext, useCallback, useRef } from 'react';
 import { AuthContext } from '../App';
-import { apiFetch as globalApiFetch } from '../services/api';
+import { apiFetch as globalApiFetch, kycAPI } from '../services/api';
 
-const PINATA_GW = process.env.REACT_APP_PINATA_GATEWAY || 'https://gateway.pinata.cloud/ipfs';
-const apiFetch = (path, opts = {}) => globalApiFetch(path, opts);
+const PG = process.env.REACT_APP_PINATA_GATEWAY || 'https://gateway.pinata.cloud/ipfs';
+
+const api = async (path, opts = {}) => {
+  try {
+    return await globalApiFetch(path, opts);
+  } catch (err) {
+    if (err?.status === 429) throw new Error('Rate limited — please wait a moment');
+    if (err?.status === 401) throw new Error('SESSION_EXPIRED');
+    if (err?.status === 403) throw new Error('Not authorised for this action');
+    throw err;
+  }
+};
 
 const TABS = [
-  { id: 'overview',      label: '⚡ Overview'      },
-  { id: 'kyc',           label: '🔍 KYC Queue'     },
-  { id: 'credits',       label: '🌿 Credits'       },
-  { id: 'retirements',   label: '🔥 Retirements'   },
-  { id: 'listings',      label: '📋 Listings'      },
-  { id: 'accounts',      label: '👤 Accounts'      },
-  { id: 'projects',      label: '🗂 Projects'      },
-  { id: 'revenue',       label: '💰 Revenue'       },
-  { id: 'health',        label: '🩺 Chain Health'  },
-  { id: 'blacklist',     label: '🚫 Blacklist'      },
-  { id: 'announcements', label: '📢 Announce'       },
-  { id: 'disputes',      label: '⚖️ Disputes'      },
-  { id: 'audit',         label: '📋 Audit Log'     },
-  { id: 'compliance',    label: '🛡 Compliance'    },
+  { id: 'overview',      label: '⚡ Overview' },
+  { id: 'kyc',           label: '🔍 KYC Queue' },
+  { id: 'credits',       label: '🌿 Credits' },
+  { id: 'retirements',   label: '🔥 Retirements' },
+  { id: 'listings',      label: '📋 Listings' },
+  { id: 'buyorders',     label: '🛒 Buy Orders' },
+  { id: 'trades',        label: '🔁 Trades' },
+  { id: 'accounts',      label: '👤 Accounts' },
+  { id: 'projects',      label: '🗂 Projects' },
+  { id: 'revenue',       label: '💰 Revenue' },
+  { id: 'health',        label: '🩺 Chain Health' },
+  { id: 'blacklist',     label: '🚫 Blacklist' },
+  { id: 'announcements', label: '📢 Announce' },
+  { id: 'disputes',      label: '⚖️ Disputes' },
+  { id: 'audit',         label: '📋 Audit Log' },
+  { id: 'compliance',    label: '🛡 Compliance' },
+  { id: 'corporate',     label: '🏢 Corporate' }, // [CORP]
 ];
 
-const Modal = ({ title, children, onClose, wide }) => (
-  <div style={M.overlay}>
-    <div style={{ ...M.box, ...(wide ? { maxWidth: 760 } : {}) }}>
-      <div style={M.mTitle}>{title}</div>
-      <div style={{ overflowY: 'auto', maxHeight: 'calc(80vh - 120px)' }}>{children}</div>
-      <button style={M.closeBtn} onClick={onClose}>✕ CLOSE</button>
+const Dlg = ({ title, children, onClose, wide }) => {
+  useEffect(() => {
+    const h = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', h);
+    return () => document.removeEventListener('keydown', h);
+  }, [onClose]);
+  return (
+    <div style={M.ov} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={{ ...M.bx, ...(wide ? { maxWidth: 760 } : {}) }}>
+        <div style={M.tt}>{title}</div>
+        <div style={{ overflowY: 'auto', maxHeight: 'calc(80vh - 120px)' }}>{children}</div>
+        <button style={M.cl} onClick={onClose}>✕ CLOSE</button>
+      </div>
+    </div>
+  );
+};
+
+const ConfirmBar = ({ message, onConfirm, onCancel }) => (
+  <div style={{ padding: '10px 14px', background: '#1a0707', border: '1px solid #f8717133', borderRadius: 7, marginBottom: 10, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+    <span style={{ fontSize: 11, color: '#f87171' }}>{message}</span>
+    <div style={{ display: 'flex', gap: 7, flexShrink: 0 }}>
+      <button style={{ ...S.approveBtn, fontSize: 9 }} onClick={onConfirm}>YES, CONFIRM</button>
+      <button style={{ ...S.viewBtn, fontSize: 9 }} onClick={onCancel}>CANCEL</button>
     </div>
   </div>
 );
 
 export default function AdminDashboard() {
   const { dbUser, handleLogout } = useContext(AuthContext);
-  const navigate = useNavigate();
 
-  const [tab,           setTab]           = useState('overview');
-  const [stats,         setStats]         = useState(null);
-  const [kyc,           setKyc]           = useState([]);
-  const [credits,       setCredits]       = useState([]);
-  const [retirements,   setRetirements]   = useState([]);
-  const [users,         setUsers]         = useState([]);
-  const [disputes,      setDisputes]      = useState([]);
-  const [audit,         setAudit]         = useState([]);
-  const [blacklist,     setBlacklist]     = useState([]);
-  const [announcements, setAnnouncements] = useState([]);
-  const [listings,      setListings]      = useState([]);
-  const [revenue,       setRevenue]       = useState(null);
-  const [health,        setHealth]        = useState(null);
-  const [projects,      setProjects]      = useState([]);
-  const [retirementSearch, setRetirementSearch] = useState('');
-  const [retirementResults, setRetirementResults] = useState(null);
-  const [mintDiag,      setMintDiag]      = useState(null);
-  const [revPeriod,     setRevPeriod]     = useState('30');
-  const [healthLoading, setHealthLoading] = useState(false);
-  const [loading,       setLoading]       = useState(false);
-  const [modal,         setModal]         = useState(null);
-  const [reason,        setReason]        = useState('');
-  const [search,        setSearch]        = useState('');
-  const [userFilter,    setUserFilter]    = useState('');
-  const [kycFilter,     setKycFilter]     = useState('pending');
-  const [creditFilter,  setCreditFilter]  = useState('pending');
-  const [toast,         setToast]         = useState('');
-  const [retryingId,    setRetryingId]    = useState(null);
-  const [retryingAll,   setRetryingAll]   = useState(false);
-  const [failedMints,   setFailedMints]   = useState([]);
-  const [kycExpiring,   setKycExpiring]   = useState([]);
+  const [tab, setTab]                         = useState('overview');
+  const [stats, setStats]                     = useState(null);
+  const [kyc, setKyc]                         = useState([]);
+  const [credits, setCredits]                 = useState([]);
+  const [retirements, setRetirements]         = useState([]);
+  const [listings, setListings]               = useState([]);
+  const [buyOrders, setBuyOrders]             = useState([]);
+  const [trades, setTrades]                   = useState([]);
+  const [users, setUsers]                     = useState([]);
+  const [disputes, setDisputes]               = useState([]);
+  const [audit, setAudit]                     = useState([]);
+  const [blacklist, setBlacklist]             = useState([]);
+  const [announcements, setAnnouncements]     = useState([]);
+  const [revenue, setRevenue]                 = useState(null);
+  const [health, setHealth]                   = useState(null);
+  const [projects, setProjects]               = useState([]);
+  const [loading, setLoading]                 = useState(false);
+  const [healthLoading, setHealthLoading]     = useState(false);
+  const [modal, setModal]                     = useState(null);
+  const [reason, setReason]                   = useState('');
+  const [toast, setToast]                     = useState('');
+  const [toastType, setToastType]             = useState('info');
+  const [kycFilter, setKycFilter]             = useState('pending');
+  const [creditFilter, setCreditFilter]       = useState('pending');
+  const [tradeFilter, setTradeFilter]         = useState('completed');
+  const [buyOrderFilter, setBuyOrderFilter]   = useState('open');
+  const [userSearch, setUserSearch]           = useState('');
+  const [userFilter, setUserFilter]           = useState('');
+  const [revPeriod, setRevPeriod]             = useState('30');
+  const [retSearch, setRetSearch]             = useState('');
+  const [retResults, setRetResults]           = useState(null);
+  const [retryingId, setRetryingId]           = useState(null);
+  const [retryingAll, setRetryingAll]         = useState(false);
+  const [failedMints, setFailedMints]         = useState([]);
+  const [syncingId, setSyncingId]             = useState(null);
+  const [manualTokenId, setManualTokenId]     = useState('');
+  const [newQty, setNewQty]                   = useState('');
+  const [assignWallet, setAssignWallet]       = useState('');
+  const [newWallet, setNewWallet]             = useState('');
+  const [msgSubject, setMsgSubject]           = useState('');
+  const [msgBody, setMsgBody]                 = useState('');
+  const [deletingUserId, setDeletingUserId]   = useState(null);
+  const [userCredits, setUserCredits]         = useState([]);
+  const [userTrades, setUserTrades]           = useState([]);
+  const [userOrders, setUserOrders]           = useState([]);
+  const [userDataLoading, setUserDataLoading] = useState(false);
+  const [kycExpiring, setKycExpiring]         = useState([]);
+  const [selectedKycIds, setSelectedKycIds]   = useState([]);
+  const [kycTier, setKycTier]                 = useState('full');
+  const [kycDetailData, setKycDetailData]     = useState(null);
+  const [annTitle, setAnnTitle]               = useState('');
+  const [annMsg, setAnnMsg]                   = useState('');
+  const [annType, setAnnType]                 = useState('info');
+  const [annEmail, setAnnEmail]               = useState(false);
+  const [broadcasting, setBroadcasting]       = useState(false);
+  const [newSerial, setNewSerial]             = useState('');
+  const [priceOverride, setPriceOverride]     = useState('');
+  const [retCorrect, setRetCorrect]           = useState({});
+  const [compTab, setCompTab]                 = useState('flags');
+  const [compFlags, setCompFlags]             = useState([]);
+  const [compTDS, setCompTDS]                 = useState([]);
+  const [compFEMA, setCompFEMA]               = useState([]);
+  const [compConfig, setCompConfig]           = useState([]);
+  const [compLoading, setCompLoading]         = useState(false);
+  const [flagFilter, setFlagFilter]           = useState('open');
+  const [flagSeverity, setFlagSeverity]       = useState('');
+  const [fyFilter, setFyFilter]               = useState('');
+  const [editingConfig, setEditingConfig]     = useState({});
+  const [compStats, setCompStats]             = useState({ openFlags: 0, criticalFlags: 0, totalTds: 0, totalConversions: 0 });
+  const [actionLoading, setActionLoading]     = useState(false);
 
-  // modal-specific state
-  const [manualTokenId,    setManualTokenId]    = useState('');
-  const [newWallet,        setNewWallet]        = useState('');
-  const [newQty,           setNewQty]           = useState('');
-  const [userCredits,      setUserCredits]      = useState([]);
-  const [userTrades,       setUserTrades]       = useState([]);
-  const [userDataLoading,  setUserDataLoading]  = useState(false);
-  const [deletingUserId,   setDeletingUserId]   = useState(null);
-  const [syncingId,        setSyncingId]        = useState(null);
-  const [msgSubject,       setMsgSubject]       = useState('');
-  const [msgBody,          setMsgBody]          = useState('');
-  const [annTitle,         setAnnTitle]         = useState('');
-  const [annMsg,           setAnnMsg]           = useState('');
-  const [annType,          setAnnType]          = useState('info');
-  const [annEmail,         setAnnEmail]         = useState(false);
-  const [newSerial,        setNewSerial]        = useState('');
-  const [priceOverride,    setPriceOverride]    = useState('');
-  const [assignWallet,     setAssignWallet]     = useState('');
-  const [selectedKycIds,   setSelectedKycIds]   = useState([]);
-  const [broadcasting,     setBroadcasting]     = useState(false);
+  // ── [CORP] Corporate state ────────────────────────────────────────
+  const [corpActivations, setCorpActivations]         = useState([]);
+  const [corpSearch, setCorpSearch]                   = useState('');
+  const [corpSearchResults, setCorpSearchResults]     = useState(null);
+  const [corpSearching, setCorpSearching]             = useState(false);
+  const [corpActivating, setCorpActivating]           = useState(false);
+  const [corpForm, setCorpForm]                       = useState({
+    userId: '', email: '', cycle: 'annual',
+    seats: '', customPriceINR: '', renewalMonths: '', notes: '',
+  });
+  const [corpRenewalForm, setCorpRenewalForm]         = useState({
+    userId: '', renewalDate: '', seats: '', notes: '',
+  });
+  const [corpRenewing, setCorpRenewing]               = useState(false);
 
-  // compliance
-  const [compTab,       setCompTab]       = useState('flags');
-  const [compFlags,     setCompFlags]     = useState([]);
-  const [compTDS,       setCompTDS]       = useState([]);
-  const [compFEMA,      setCompFEMA]      = useState([]);
-  const [compConfig,    setCompConfig]    = useState([]);
-  const [compLoading,   setCompLoading]   = useState(false);
-  const [flagFilter,    setFlagFilter]    = useState('open');
-  const [flagSeverity,  setFlagSeverity]  = useState('');
-  const [fyFilter,      setFyFilter]      = useState('');
-  const [editingConfig, setEditingConfig] = useState({});
-  const [compStats,     setCompStats]     = useState({ openFlags:0, criticalFlags:0, totalTds:0, totalConversions:0 });
-
-  const showToast = (msg, duration = 3500) => { setToast(msg); setTimeout(() => setToast(''), duration); };
-
-  // ── Loaders ───────────────────────────────────────────────────
-  const loadStats      = useCallback(async () => { try { setStats(await apiFetch('/api/admin/stats')); } catch {} }, []);
-  const loadKYC        = useCallback(async () => { setLoading(true); try { const d = await apiFetch(`/api/admin/kyc?status=${kycFilter}`); setKyc(d.submissions); } catch {} finally { setLoading(false); } }, [kycFilter]);
-  const loadCredits    = useCallback(async () => { setLoading(true); try { const d = await apiFetch(`/api/admin/credits?status=${creditFilter}`); setCredits(d.credits); setFailedMints(d.credits.filter(c => c.admin_status === 'approved' && !c.token_id)); } catch {} finally { setLoading(false); } }, [creditFilter]);
-  const loadRetirements = useCallback(async () => { setLoading(true); try { const d = await apiFetch('/api/admin/retirements'); setRetirements(d.retirements || []); } catch {} finally { setLoading(false); } }, []);
-  const loadUsers      = useCallback(async () => { setLoading(true); try { const params = new URLSearchParams(); if (search) params.set('search', search); if (userFilter) params.set('status', userFilter); const d = await apiFetch(`/api/admin/users?${params}`); setUsers(d.users); } catch {} finally { setLoading(false); } }, [search, userFilter]);
-  const loadDisputes   = useCallback(async () => { setLoading(true); try { const d = await apiFetch('/api/admin/disputes'); setDisputes(d.disputes); } catch {} finally { setLoading(false); } }, []);
-  const loadAudit      = useCallback(async () => { setLoading(true); try { const d = await apiFetch('/api/admin/audit'); setAudit(d.logs); } catch {} finally { setLoading(false); } }, []);
-  const loadBlacklist  = useCallback(async () => { setLoading(true); try { const d = await apiFetch('/api/admin/serials/blacklist'); setBlacklist(d.blacklist || []); } catch {} finally { setLoading(false); } }, []);
-  const loadAnnouncements = useCallback(async () => { try { const d = await apiFetch('/api/admin/announcements'); setAnnouncements(d.announcements || []); } catch {} }, []);
-  const loadListings   = useCallback(async () => { setLoading(true); try { const d = await apiFetch('/api/admin/listings'); setListings(d.listings || []); } catch {} finally { setLoading(false); } }, []);
-  const loadRevenue    = useCallback(async (period='30') => { setLoading(true); try { const d = await apiFetch(`/api/admin/revenue?period=${period}`); setRevenue(d); } catch {} finally { setLoading(false); } }, []);
-  const loadHealth     = useCallback(async () => { setHealthLoading(true); try { const d = await apiFetch('/api/admin/health/onchain'); setHealth(d); } catch {} finally { setHealthLoading(false); } }, []);
-  const loadProjects   = useCallback(async () => { setLoading(true); try { const d = await apiFetch('/api/admin/projects'); setProjects(d.projects || []); } catch {} finally { setLoading(false); } }, []);
-  const loadKycExpiry  = useCallback(async () => { try { const d = await apiFetch('/api/admin/kyc-expiring'); setKycExpiring(d.users || []); } catch {} }, []);
-  const loadCompFlags  = useCallback(async () => { setCompLoading(true); try { const params = new URLSearchParams(); if (flagFilter && flagFilter !== 'all') params.set('status', flagFilter); if (flagSeverity) params.set('severity', flagSeverity); params.set('limit', '100'); const d = await apiFetch(`/api/compliance/flags?${params}`); setCompFlags(d.flags || []); setCompStats(p => ({ ...p, openFlags: (d.flags||[]).filter(f=>f.status==='open').length, criticalFlags: (d.flags||[]).filter(f=>f.severity==='critical'&&f.status==='open').length })); } catch {} finally { setCompLoading(false); } }, [flagFilter, flagSeverity]);
-  const loadCompTDS    = useCallback(async () => { setCompLoading(true); try { const params = new URLSearchParams(); if (fyFilter) params.set('fy', fyFilter); const d = await apiFetch(`/api/compliance/tds?${params}`); setCompTDS(d.records||[]); setCompStats(p=>({...p,totalTds:d.totalTds||0})); } catch {} finally { setCompLoading(false); } }, [fyFilter]);
-  const loadCompFEMA   = useCallback(async () => { setCompLoading(true); try { const d = await apiFetch('/api/compliance/fema'); setCompFEMA(d.conversions||[]); setCompStats(p=>({...p,totalConversions:d.totalTx||0})); } catch {} finally { setCompLoading(false); } }, []);
-  const loadCompConfig = useCallback(async () => { setCompLoading(true); try { const d = await apiFetch('/api/compliance/config'); setCompConfig(d.config||[]); } catch {} finally { setCompLoading(false); } }, []);
-
-  const loadUserData = useCallback(async (userId) => {
-    setUserDataLoading(true);
-    try {
-      const [cr, tr] = await Promise.all([
-        apiFetch(`/api/admin/users/${userId}/credits`),
-        apiFetch(`/api/admin/users/${userId}/trades`),
-      ]);
-      setUserCredits(cr.credits || []);
-      setUserTrades(tr.trades || []);
-    } catch { setUserCredits([]); setUserTrades([]); }
-    finally { setUserDataLoading(false); }
+  const toastTimer = useRef(null);
+  const toast_ = useCallback((msg, ms = 3500, type = 'info') => {
+    setToast(msg); setToastType(type);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(''), ms);
   }, []);
 
+  const handleSessionExpiry = useCallback(() => {
+    toast_('⚠ Session expired — logging out', 3000, 'error');
+    setTimeout(handleLogout, 2500);
+  }, [handleLogout, toast_]);
+
+  const safeAction = useCallback(async (fn) => {
+    setActionLoading(true);
+    try { await fn(); }
+    catch (e) {
+      if (e.message === 'SESSION_EXPIRED') handleSessionExpiry();
+      else toast_(`❌ ${e.message}`, 4500, 'error');
+    }
+    finally { setActionLoading(false); }
+  }, [handleSessionExpiry, toast_]);
+
+  const fmt    = (d) => d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
+  const fmtT   = (d) => d ? new Date(d).toLocaleString('en-IN') : '—';
+  const fmtINR = (n) => `₹${parseFloat(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+  const sanitize      = (s) => String(s || '').trim();
+  const isValidWallet = (w) => /^0x[0-9a-fA-F]{40}$/.test(w);
+
+  const Badge = ({ status }) => {
+    const c = { pending: '#f59e0b', approved: '#22c55e', verified: '#22c55e', rejected: '#f87171', frozen: '#f87171', open: '#f59e0b', resolved: '#22c55e', cleared: '#22c55e', reviewed: '#60a5fa', escalated: '#f87171', low: '#22c55e', medium: '#f59e0b', high: '#f97316', critical: '#f87171', active: '#22c55e', cancelled: '#f87171', filled: '#22c55e', completed: '#22c55e', corporate: '#f59e0b' }[status] || '#86efac44';
+    return <span style={{ fontSize: 9, padding: '3px 8px', borderRadius: 20, border: `1px solid ${c}33`, color: c }}>{status?.toUpperCase().replace(/_/g, ' ')}</span>;
+  };
+  const MintBadge = ({ c }) => {
+    if (c.token_id != null) return <span style={{ fontSize: 9, color: '#22c55e' }}>✓#{c.token_id}</span>;
+    if (c.admin_status === 'approved') return <span style={{ fontSize: 9, color: '#f87171', animation: 'pulse 2s infinite' }}>⚠FAILED</span>;
+    return <span style={{ fontSize: 9, color: '#86efac33' }}>—</span>;
+  };
+
+  // ── Loaders ───────────────────────────────────────────────────────
+  const loadStats         = useCallback(async () => { try { setStats(await api('/api/admin/stats')); } catch (e) { if (e.message === 'SESSION_EXPIRED') handleSessionExpiry(); } }, [handleSessionExpiry]);
+  const loadKYC           = useCallback(async () => { setLoading(true); try { if (kycFilter === 'pending') { const d = await kycAPI.pending(0, 100); setKyc(d?.submissions ?? []); } else { try { const d = await api(`/api/admin/kyc?status=${kycFilter}`); setKyc(d?.submissions ?? []); } catch { setKyc([]); } } } catch (e) { if (e.message === 'SESSION_EXPIRED') handleSessionExpiry(); setKyc([]); } finally { setLoading(false); } }, [kycFilter, handleSessionExpiry]);
+  const loadCredits       = useCallback(async () => { setLoading(true); try { const d = await api(`/api/admin/credits?status=${creditFilter}`); const list = d?.credits ?? []; setCredits(list); setFailedMints(list.filter(c => c.admin_status === 'approved' && !c.token_id)); } catch {} finally { setLoading(false); } }, [creditFilter]);
+  const loadRetirements   = useCallback(async () => { setLoading(true); try { const d = await api('/api/admin/retirements'); setRetirements(d?.retirements ?? []); } catch {} finally { setLoading(false); } }, []);
+  const loadListings      = useCallback(async () => { setLoading(true); try { const d = await api('/api/admin/listings'); setListings(d?.listings ?? []); } catch {} finally { setLoading(false); } }, []);
+  const loadBuyOrders     = useCallback(async (status = 'open') => { setLoading(true); try { const d = await api(`/api/admin/buy-orders?status=${status}`); setBuyOrders(d?.orders ?? []); } catch {} finally { setLoading(false); } }, []);
+  const loadTrades        = useCallback(async (status = 'completed') => { setLoading(true); try { const d = await api(`/api/admin/trades?status=${status}&limit=100`); setTrades(d?.trades ?? []); } catch {} finally { setLoading(false); } }, []);
+  const loadUsers         = useCallback(async () => { setLoading(true); try { const p = new URLSearchParams(); if (userSearch) p.set('search', userSearch); if (userFilter) p.set('status', userFilter); const d = await api(`/api/admin/users?${p}`); setUsers(d?.users ?? []); } catch {} finally { setLoading(false); } }, [userSearch, userFilter]);
+  const loadDisputes      = useCallback(async () => { setLoading(true); try { const d = await api('/api/admin/disputes'); setDisputes(d?.disputes ?? []); } catch {} finally { setLoading(false); } }, []);
+  const loadAudit         = useCallback(async () => { setLoading(true); try { const d = await api('/api/admin/audit'); setAudit(d?.logs ?? []); } catch {} finally { setLoading(false); } }, []);
+  const loadBlacklist     = useCallback(async () => { setLoading(true); try { const d = await api('/api/admin/serials/blacklist'); setBlacklist(d?.blacklist ?? []); } catch {} finally { setLoading(false); } }, []);
+  const loadAnnouncements = useCallback(async () => { try { const d = await api('/api/admin/announcements'); setAnnouncements(d?.announcements ?? []); } catch {} }, []);
+  const loadRevenue       = useCallback(async (p = '30') => { setLoading(true); try { const d = await api(`/api/admin/revenue?period=${p}`); setRevenue(d); } catch {} finally { setLoading(false); } }, []);
+  const loadHealth        = useCallback(async () => { setHealthLoading(true); try { const d = await api('/api/admin/health/onchain'); setHealth(d); } catch {} finally { setHealthLoading(false); } }, []);
+  const loadProjects      = useCallback(async () => { setLoading(true); try { const d = await api('/api/admin/projects'); setProjects(d?.projects ?? []); } catch {} finally { setLoading(false); } }, []);
+  const loadKycExpiry     = useCallback(async () => { try { const d = await api('/api/admin/kyc-expiring'); setKycExpiring(d?.users ?? []); } catch {} }, []);
+  const loadCompFlags     = useCallback(async () => { setCompLoading(true); try { const p = new URLSearchParams(); if (flagFilter && flagFilter !== 'all') p.set('status', flagFilter); if (flagSeverity) p.set('severity', flagSeverity); p.set('limit', '100'); const d = await api(`/api/compliance/flags?${p}`); const flags = d?.flags ?? []; setCompFlags(flags); setCompStats(s => ({ ...s, openFlags: flags.filter(f => f.status === 'open').length, criticalFlags: flags.filter(f => f.severity === 'critical' && f.status === 'open').length })); } catch {} finally { setCompLoading(false); } }, [flagFilter, flagSeverity]);
+  const loadCompTDS       = useCallback(async () => { setCompLoading(true); try { const p = new URLSearchParams(); if (fyFilter) p.set('fy', fyFilter); const d = await api(`/api/compliance/tds?${p}`); setCompTDS(d?.records ?? []); setCompStats(s => ({ ...s, totalTds: d?.totalTds ?? 0 })); } catch {} finally { setCompLoading(false); } }, [fyFilter]);
+  const loadCompFEMA      = useCallback(async () => { setCompLoading(true); try { const d = await api('/api/compliance/fema'); setCompFEMA(d?.conversions ?? []); setCompStats(s => ({ ...s, totalConversions: d?.totalTx ?? 0 })); } catch {} finally { setCompLoading(false); } }, []);
+  const loadCompConfig    = useCallback(async () => { setCompLoading(true); try { const d = await api('/api/compliance/config'); setCompConfig(d?.config ?? []); } catch {} finally { setCompLoading(false); } }, []);
+  const loadUserData      = useCallback(async (uid) => { setUserDataLoading(true); try { const [cr, tr, or_] = await Promise.all([api(`/api/admin/users/${uid}/credits`), api(`/api/admin/users/${uid}/trades`), api(`/api/admin/users/${uid}/buy-orders`).catch(() => ({ orders: [] }))]); setUserCredits(cr?.credits ?? []); setUserTrades(tr?.trades ?? []); setUserOrders(or_?.orders ?? []); } catch { setUserCredits([]); setUserTrades([]); setUserOrders([]); } finally { setUserDataLoading(false); } }, []);
+
+  // ── [CORP] Corporate loader ───────────────────────────────────────
+  const loadCorpActivations = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await api('/api/admin/corporate/activations');
+      setCorpActivations(d?.activations ?? []);
+    } catch (e) {
+      toast_(`❌ ${e.message}`, 4000, 'error');
+    } finally {
+      setLoading(false);
+    }
+  }, [toast_]);
+
+  // ── Tab effects ───────────────────────────────────────────────────
   useEffect(() => { loadStats(); loadKycExpiry(); loadAnnouncements(); }, [loadStats, loadKycExpiry, loadAnnouncements]);
   useEffect(() => {
     if (tab === 'kyc')           loadKYC();
     if (tab === 'credits')       loadCredits();
     if (tab === 'retirements')   loadRetirements();
     if (tab === 'listings')      loadListings();
+    if (tab === 'buyorders')     loadBuyOrders(buyOrderFilter);
+    if (tab === 'trades')        loadTrades(tradeFilter);
     if (tab === 'accounts')      { loadUsers(); loadKycExpiry(); }
     if (tab === 'projects')      loadProjects();
     if (tab === 'revenue')       loadRevenue(revPeriod);
@@ -154,897 +251,1286 @@ export default function AdminDashboard() {
     if (tab === 'disputes')      loadDisputes();
     if (tab === 'audit')         loadAudit();
     if (tab === 'compliance')    { loadCompFlags(); loadCompTDS(); loadCompFEMA(); loadCompConfig(); }
-  }, [tab, loadKYC, loadCredits, loadRetirements, loadUsers, loadDisputes, loadAudit, loadBlacklist, loadAnnouncements, loadCompFlags, loadCompTDS, loadCompFEMA, loadCompConfig, loadKycExpiry]);
+    if (tab === 'corporate')     loadCorpActivations(); // [CORP]
+  }, [tab]); // eslint-disable-line
 
-  useEffect(() => { if (tab === 'compliance' && compTab === 'flags') loadCompFlags(); }, [flagFilter, flagSeverity]);
-  useEffect(() => { if (tab === 'compliance' && compTab === 'tds') loadCompTDS(); }, [fyFilter]);
+  useEffect(() => { if (tab === 'compliance' && compTab === 'flags') loadCompFlags(); }, [flagFilter, flagSeverity]); // eslint-disable-line
+  useEffect(() => { if (tab === 'compliance' && compTab === 'tds') loadCompTDS(); }, [fyFilter]); // eslint-disable-line
+  useEffect(() => { const id = setInterval(loadStats, 60000); return () => clearInterval(id); }, [loadStats]);
 
-  // ── Actions ───────────────────────────────────────────────────
-  const kycAction = async (id, action) => { try { await apiFetch(`/api/admin/kyc/${id}/${action}`, { method:'POST', body:JSON.stringify({ reason }) }); showToast(`KYC ${action}d`); setModal(null); setReason(''); loadKYC(); loadStats(); } catch (e) { showToast(`❌ ${e.message}`); } };
-  const creditAction = async (id, action) => { try { await apiFetch(`/api/admin/credits/${id}/${action}`, { method:'POST', body:JSON.stringify(action==='approve'?{notes:reason}:{reason}) }); showToast(`Credit ${action}d`); setModal(null); setReason(''); loadCredits(); loadStats(); } catch (e) { showToast(`❌ ${e.message}`); } };
-  const freezeAction = async (id, action) => { try { await apiFetch(`/api/admin/users/${id}/${action}`, { method:'POST', body:JSON.stringify({ reason }) }); showToast(`Account ${action}d`); setModal(null); setReason(''); loadUsers(); loadStats(); } catch (e) { showToast(`❌ ${e.message}`); } };
-  const resolveDispute = async (id) => { try { await apiFetch(`/api/admin/disputes/${id}/resolve`, { method:'POST', body:JSON.stringify({ resolution:reason }) }); showToast('Dispute resolved'); setModal(null); setReason(''); loadDisputes(); loadStats(); } catch (e) { showToast(`❌ ${e.message}`); } };
+  // ── Actions ───────────────────────────────────────────────────────
+  const kycAction = (id, action) => safeAction(async () => {
+    await api(`/api/admin/kyc/${id}/${action}`, { method: 'POST', body: JSON.stringify({ reason: sanitize(reason) }) });
+    toast_(`✅ KYC ${action}d`, 3000, 'success'); setModal(null); setReason(''); loadKYC(); loadStats();
+  });
+  const creditAction = (id, action) => safeAction(async () => {
+    await api(`/api/admin/credits/${id}/${action}`, { method: 'POST', body: JSON.stringify(action === 'approve' ? { notes: sanitize(reason) } : { reason: sanitize(reason) }) });
+    toast_(`✅ Credit ${action}d`, 3000, 'success'); setModal(null); setReason(''); loadCredits(); loadStats();
+  });
+  const freezeAction = (id, action) => safeAction(async () => {
+    await api(`/api/admin/users/${id}/${action}`, { method: 'POST', body: JSON.stringify({ reason: sanitize(reason) }) });
+    toast_(`✅ Account ${action}d`, 3000, 'success'); setModal(null); setReason(''); loadUsers(); loadStats();
+  });
+  const resolveDispute = (id) => safeAction(async () => {
+    await api(`/api/admin/disputes/${id}/resolve`, { method: 'POST', body: JSON.stringify({ resolution: sanitize(reason) }) });
+    toast_('✅ Resolved', 3000, 'success'); setModal(null); setReason(''); loadDisputes(); loadStats();
+  });
+  const reviewFlag = (flagId, status, notes) => safeAction(async () => {
+    await api(`/api/compliance/flags/${flagId}`, { method: 'PUT', body: JSON.stringify({ status, reviewNotes: sanitize(notes) }) });
+    toast_(`✅ Flag ${status}`, 3000, 'success'); setModal(null); setReason(''); loadCompFlags();
+  });
+  const saveConfig = (key, value) => safeAction(async () => {
+    await api(`/api/compliance/config/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify({ value }) });
+    toast_(`✅ ${key} updated`, 3000, 'success');
+    setEditingConfig(p => { const n = { ...p }; delete n[key]; return n; }); loadCompConfig();
+  });
+  const retryMint = async (id) => {
+    setRetryingId(id);
+    try { const r = await api(`/api/admin/credits/${id}/retry-mint`, { method: 'POST' }); r?.success ? toast_(`✅ Token #${r.tokenId}`, 3500, 'success') : toast_(`❌ ${r?.error || 'Unknown error'}`, 4000, 'error'); loadCredits(); loadStats(); }
+    catch (e) { toast_(`❌ ${e.message}`, 4000, 'error'); } finally { setRetryingId(null); }
+  };
+  const retryAllMints = async () => {
+    if (!window.confirm(`Retry all ${failedMints.length} failed mints? This submits on-chain transactions.`)) return;
+    setRetryingAll(true); let ok = 0, fail = 0;
+    for (const b of failedMints) { try { const r = await api(`/api/admin/credits/${b.id}/retry-mint`, { method: 'POST' }); r?.success ? ok++ : fail++; } catch { fail++; } }
+    toast_(`✅ ${ok} minted · ❌ ${fail} failed`, 5000, ok > 0 ? 'success' : 'error');
+    setRetryingAll(false); loadCredits(); loadStats();
+  };
+  const handleManualSync = (id) => safeAction(async () => {
+    const tid = parseInt(manualTokenId); if (isNaN(tid) || tid < 0) throw new Error('Invalid token ID');
+    setSyncingId(id); await api(`/api/admin/credits/${id}/set-token-id`, { method: 'POST', body: JSON.stringify({ tokenId: tid }) });
+    toast_(`✅ Token #${tid} synced`, 3500, 'success'); setModal(null); setManualTokenId(''); loadCredits(); setSyncingId(null);
+  });
+  const handleQtyFix = (id) => safeAction(async () => {
+    const qty = parseInt(newQty); if (!qty || qty <= 0) throw new Error('Invalid quantity');
+    await api(`/api/admin/credits/${id}/correct-quantity`, { method: 'POST', body: JSON.stringify({ quantity: qty, reason: sanitize(reason) }) });
+    toast_(`✅ Qty→${qty}`, 3000, 'success'); setModal(null); setNewQty(''); setReason(''); loadCredits();
+  });
+  const handleAssignAndMint = (id) => safeAction(async () => {
+    if (!isValidWallet(assignWallet)) throw new Error('Invalid wallet address (must be 0x + 40 hex chars)');
+    setSyncingId(id); const r = await api(`/api/admin/credits/${id}/assign-wallet-and-mint`, { method: 'POST', body: JSON.stringify({ walletAddress: assignWallet }) });
+    toast_(`✅ Token #${r?.tokenId}`, 3500, 'success'); setModal(null); setAssignWallet(''); loadCredits(); setSyncingId(null);
+  });
+  const handleLoadMintDiag = async (id) => { try { const d = await api(`/api/admin/credits/${id}/mint-errors`); setModal({ type: 'mint_diag', data: d }); } catch (e) { toast_(`❌ ${e.message}`, 4000, 'error'); } };
+  const handleWalletReassign = (id) => safeAction(async () => {
+    if (!isValidWallet(newWallet)) throw new Error('Invalid wallet address');
+    if (!sanitize(reason)) throw new Error('Reason is required');
+    await api(`/api/admin/users/${id}/reassign-wallet`, { method: 'POST', body: JSON.stringify({ walletAddress: newWallet, reason: sanitize(reason) }) });
+    toast_('✅ Wallet reassigned', 3000, 'success'); setModal(null); setNewWallet(''); setReason(''); loadUsers();
+  });
+  const handleDeleteUser = (id) => safeAction(async () => {
+    if (!sanitize(reason)) throw new Error('Deletion reason is required');
+    setDeletingUserId(id); await api(`/api/admin/users/${id}/delete`, { method: 'POST', body: JSON.stringify({ reason: sanitize(reason) }) });
+    toast_('✅ User deleted', 3000, 'success'); setModal(null); setReason(''); loadUsers(); loadStats(); setDeletingUserId(null);
+  });
+  const handleSendMsg = (id) => safeAction(async () => {
+    if (!sanitize(msgSubject) || !sanitize(msgBody)) throw new Error('Subject and message are required');
+    await api(`/api/admin/users/${id}/send-message`, { method: 'POST', body: JSON.stringify({ subject: sanitize(msgSubject), message: sanitize(msgBody) }) });
+    toast_('✅ Message sent', 3000, 'success'); setModal(null); setMsgSubject(''); setMsgBody('');
+  });
+  const handleRekyc = (id) => safeAction(async () => {
+    if (!sanitize(reason)) throw new Error('Reason is required');
+    await api(`/api/admin/users/${id}/require-rekyc`, { method: 'POST', body: JSON.stringify({ reason: sanitize(reason) }) });
+    toast_('✅ Re-KYC required', 3000, 'success'); setModal(null); setReason(''); loadUsers();
+  });
+  const handleResync = (id) => safeAction(async () => { await api(`/api/admin/users/${id}/resync-portfolio`, { method: 'POST' }); toast_('✅ Resync triggered', 3000, 'success'); });
+  const handleKycReminder = (id, email) => safeAction(async () => { await api(`/api/admin/users/${id}/kyc-reminder`, { method: 'POST' }); toast_(`✅ Reminder sent to ${email}`, 3000, 'success'); });
+  const handleBulkKycApprove = () => safeAction(async () => {
+    if (!selectedKycIds.length) throw new Error('Select at least one submission');
+    if (!window.confirm(`Bulk-approve ${selectedKycIds.length} KYC submissions?`)) return;
+    const r = await api('/api/admin/kyc/bulk-approve', { method: 'POST', body: JSON.stringify({ ids: selectedKycIds }) });
+    toast_(`✅ ${r?.approved} approved`, 3000, 'success'); setSelectedKycIds([]); loadKYC(); loadStats();
+  });
+  const loadKycDetail = useCallback(async (id) => {
+    setKycDetailData(null);
+    try { const d = await kycAPI.detail(id); setKycDetailData(d); }
+    catch { setKycDetailData({ error: 'Failed to load detail' }); }
+  }, []);
+  const handleForceDelist = (id) => safeAction(async () => {
+    if (!sanitize(reason)) throw new Error('Reason is required');
+    await api(`/api/admin/listings/${id}/force-delist`, { method: 'POST', body: JSON.stringify({ reason: sanitize(reason) }) });
+    toast_('✅ Delisted', 3000, 'success'); setModal(null); setReason(''); loadListings();
+  });
+  const handlePriceOverride = (id) => safeAction(async () => {
+    const price = parseFloat(priceOverride); if (isNaN(price) || price <= 0) throw new Error('Invalid price');
+    if (!sanitize(reason)) throw new Error('Reason is required');
+    await api(`/api/admin/listings/${id}/override-price`, { method: 'POST', body: JSON.stringify({ priceInr: price, reason: sanitize(reason) }) });
+    toast_(`✅ Price→₹${price}`, 3000, 'success'); setModal(null); setPriceOverride(''); setReason('');
+  });
+  const handleForceCancelOrder = (id) => safeAction(async () => {
+    if (!sanitize(reason)) throw new Error('Reason is required');
+    const r = await api(`/api/admin/buy-orders/${id}/force-cancel`, { method: 'POST', body: JSON.stringify({ reason: sanitize(reason) }) });
+    toast_(`✅ Cancelled · ${r?.ethEscrowed} ETH to refund`, 3500, 'success'); setModal(null); setReason(''); loadBuyOrders(buyOrderFilter); loadStats();
+  });
+  const handleReconcile = (id) => safeAction(async () => {
+    if (!sanitize(reason)) throw new Error('Reason is required');
+    const r = await api(`/api/admin/trades/${id}/reconcile`, { method: 'POST', body: JSON.stringify({ reason: sanitize(reason) }) });
+    toast_(`✅ ${r?.creditsAssigned} credits assigned`, 3500, 'success'); setModal(null); setReason('');
+  });
+  const handleRetirementCorrect = (id) => safeAction(async () => {
+    if (!sanitize(reason)) throw new Error('Audit reason is required');
+    const r = await api(`/api/admin/retirements/${id}/correct`, { method: 'POST', body: JSON.stringify({ reason: sanitize(reason), ...retCorrect }) });
+    toast_(`✅ ${r?.changes?.join(', ') || 'Saved'}`, 3500, 'success'); setModal(null); setReason(''); setRetCorrect({}); loadRetirements();
+  });
+  const handleFlagRetirement = (id) => safeAction(async () => {
+    if (!sanitize(reason)) throw new Error('Reason is required');
+    await api(`/api/admin/retirements/${id}/flag`, { method: 'POST', body: JSON.stringify({ reason: sanitize(reason) }) });
+    toast_('✅ Flagged', 3000, 'success'); setModal(null); setReason(''); loadRetirements();
+  });
+  const handleUnflagRetirement = (id) => safeAction(async () => { await api(`/api/admin/retirements/${id}/unflag`, { method: 'POST' }); toast_('✅ Cleared', 3000, 'success'); loadRetirements(); });
+  const handleSearchRetirements = async () => {
+    if (!retSearch.trim()) return;
+    try { const d = await api(`/api/admin/retirements/search?q=${encodeURIComponent(retSearch.trim())}`); setRetResults(d?.retirements ?? []); }
+    catch (e) { toast_(`❌ ${e.message}`, 4000, 'error'); }
+  };
+  const handleBlacklistSerial = () => safeAction(async () => {
+    if (!sanitize(newSerial) || !sanitize(reason)) throw new Error('Serial and reason are required');
+    const r = await api('/api/admin/serials/blacklist', { method: 'POST', body: JSON.stringify({ serial: sanitize(newSerial), reason: sanitize(reason) }) });
+    toast_(`✅ Blacklisted · ${r?.affectedBatches} auto-rejected`, 3500, 'success'); setNewSerial(''); setReason(''); loadBlacklist();
+  });
+  const handleUnblacklist = (serial) => safeAction(async () => {
+    if (!window.confirm(`Remove "${serial}" from blacklist?`)) return;
+    await api(`/api/admin/serials/blacklist/${encodeURIComponent(serial)}`, { method: 'DELETE' });
+    toast_('✅ Removed', 3000, 'success'); loadBlacklist();
+  });
+  const handleBroadcast = () => safeAction(async () => {
+    if (!sanitize(annTitle) || !sanitize(annMsg)) throw new Error('Title and message are required');
+    if (!window.confirm(`Broadcast to ALL users${annEmail ? ' + email' : ' (in-app only)'}?`)) return;
+    setBroadcasting(true);
+    const r = await api('/api/admin/announcements/broadcast', { method: 'POST', body: JSON.stringify({ subject: sanitize(annTitle), message: sanitize(annMsg), sendEmail: annEmail }) });
+    toast_(`✅ Sent to ${r?.sent}`, 5000, 'success'); setAnnTitle(''); setAnnMsg(''); setAnnEmail(false); setBroadcasting(false);
+  });
+  const handleSaveBanner = () => safeAction(async () => {
+    if (!sanitize(annTitle) || !sanitize(annMsg)) throw new Error('Title and message are required');
+    await api('/api/admin/announcements', { method: 'POST', body: JSON.stringify({ title: sanitize(annTitle), message: sanitize(annMsg), type: annType }) });
+    toast_('✅ Banner saved', 3000, 'success'); loadAnnouncements(); setAnnTitle(''); setAnnMsg('');
+  });
+  const handleDeleteAnn = (id) => safeAction(async () => {
+    if (!window.confirm('Remove this banner?')) return;
+    await api(`/api/admin/announcements/${id}`, { method: 'DELETE' });
+    toast_('✅ Removed', 3000, 'success'); loadAnnouncements();
+  });
+  const handleExportAudit = () => {
+    const token = localStorage.getItem('token') || sessionStorage.getItem('token') || '';
+    window.open(`${process.env.REACT_APP_API_URL || 'http://localhost:5000'}/api/admin/audit/export?token=${encodeURIComponent(token)}`, '_blank');
+  };
 
-  const retryMint = async (batchId) => { setRetryingId(batchId); try { const r = await apiFetch(`/api/admin/credits/${batchId}/retry-mint`, { method:'POST' }); if (r.success) showToast(`✅ Token #${r.tokenId} minted`); else showToast(`❌ ${r.error}`); loadCredits(); loadStats(); } catch (e) { showToast(`❌ ${e.message}`); } finally { setRetryingId(null); } };
-  const retryAllMints = async () => { if (!failedMints.length) return; setRetryingAll(true); let ok=0,fail=0; for (const b of failedMints) { try { const r = await apiFetch(`/api/admin/credits/${b.id}/retry-mint`,{method:'POST'}); if(r.success) ok++; else fail++; } catch { fail++; } } showToast(`✅ ${ok} minted · ❌ ${fail} failed`,5000); setRetryingAll(false); loadCredits(); loadStats(); };
-
-  const handleManualTokenSync = async (batchId) => { const tid=parseInt(manualTokenId); if(isNaN(tid)||tid<0){showToast('❌ Invalid token ID');return;} setSyncingId(batchId); try { await apiFetch(`/api/admin/credits/${batchId}/set-token-id`,{method:'POST',body:JSON.stringify({tokenId:tid})}); showToast(`✅ Token #${tid} synced`); setModal(null); setManualTokenId(''); loadCredits(); } catch(e){showToast(`❌ ${e.message}`);} finally{setSyncingId(null);} };
-  const handleQtyCorrection = async (batchId) => { const qty=parseInt(newQty); if(!qty||qty<=0){showToast('❌ Invalid quantity');return;} try { await apiFetch(`/api/admin/credits/${batchId}/correct-quantity`,{method:'POST',body:JSON.stringify({quantity:qty,reason})}); showToast(`✅ Quantity corrected to ${qty}`); setModal(null); setNewQty(''); setReason(''); loadCredits(); } catch(e){showToast(`❌ ${e.message}`);} };
-  const handleWalletReassign = async (userId) => { if(!newWallet||!newWallet.startsWith('0x')||newWallet.length!==42){showToast('❌ Invalid wallet address');return;} try { await apiFetch(`/api/admin/users/${userId}/reassign-wallet`,{method:'POST',body:JSON.stringify({walletAddress:newWallet,reason})}); showToast('✅ Wallet reassigned'); setModal(null); setNewWallet(''); setReason(''); loadUsers(); } catch(e){showToast(`❌ ${e.message}`);} };
-  const handleDeleteUser = async (userId) => { setDeletingUserId(userId); try { await apiFetch(`/api/admin/users/${userId}/delete`,{method:'POST',body:JSON.stringify({reason})}); showToast('✅ User deleted'); setModal(null); setReason(''); loadUsers(); loadStats(); } catch(e){showToast(`❌ ${e.message}`);} finally{setDeletingUserId(null);} };
-  const handleKycReminder = async (userId,email) => { try { await apiFetch(`/api/admin/users/${userId}/kyc-reminder`,{method:'POST'}); showToast(`✅ Reminder sent to ${email}`); } catch(e){showToast(`❌ ${e.message}`);} };
-  const handleResyncPortfolio = async (userId) => { try { await apiFetch(`/api/admin/users/${userId}/resync-portfolio`,{method:'POST'}); showToast('✅ Portfolio resync triggered'); setModal(null); } catch(e){showToast(`❌ ${e.message}`);} };
-  const handleSendMessage = async (userId) => { if(!msgSubject||!msgBody){showToast('❌ Subject and message required');return;} try { await apiFetch(`/api/admin/users/${userId}/send-message`,{method:'POST',body:JSON.stringify({subject:msgSubject,message:msgBody})}); showToast('✅ Message sent'); setModal(null); setMsgSubject(''); setMsgBody(''); } catch(e){showToast(`❌ ${e.message}`);} };
-  const handleBroadcast = async () => { if(!annTitle||!annMsg){showToast('❌ Title and message required');return;} setBroadcasting(true); try { const r = await apiFetch('/api/admin/announcements/broadcast',{method:'POST',body:JSON.stringify({subject:annTitle,message:annMsg,sendEmail:annEmail})}); showToast(`✅ Sent to ${r.sent} users · ❌ ${r.failed} failed`,5000); setModal(null); setAnnTitle(''); setAnnMsg(''); setAnnEmail(false); } catch(e){showToast(`❌ ${e.message}`);} finally{setBroadcasting(false);} };
-  const handleSaveAnnouncement = async () => { if(!annTitle||!annMsg){showToast('❌ Title and message required');return;} try { await apiFetch('/api/admin/announcements',{method:'POST',body:JSON.stringify({title:annTitle,message:annMsg,type:annType})}); showToast('✅ Announcement saved'); loadAnnouncements(); setAnnTitle(''); setAnnMsg(''); } catch(e){showToast(`❌ ${e.message}`);} };
-  const handleDeleteAnnouncement = async (id) => { try { await apiFetch(`/api/admin/announcements/${id}`,{method:'DELETE'}); showToast('✅ Announcement removed'); loadAnnouncements(); } catch(e){showToast(`❌ ${e.message}`);} };
-  const handleBlacklistSerial = async () => { if(!newSerial||!reason){showToast('❌ Serial and reason required');return;} try { const r = await apiFetch('/api/admin/serials/blacklist',{method:'POST',body:JSON.stringify({serial:newSerial,reason})}); showToast(`✅ Blacklisted · ${r.affectedBatches} batch(es) auto-rejected`); setNewSerial(''); setReason(''); loadBlacklist(); } catch(e){showToast(`❌ ${e.message}`);} };
-  const handleUnblacklist = async (serial) => { try { await apiFetch(`/api/admin/serials/blacklist/${encodeURIComponent(serial)}`,{method:'DELETE'}); showToast('✅ Serial removed from blacklist'); loadBlacklist(); } catch(e){showToast(`❌ ${e.message}`);} };
-  const handleForceDelist = async (listingId) => { if(!reason){showToast('❌ Reason required');return;} try { await apiFetch(`/api/admin/listings/${listingId}/force-delist`,{method:'POST',body:JSON.stringify({reason})}); showToast('✅ Listing force-delisted'); setModal(null); setReason(''); loadListings(); } catch(e){showToast(`❌ ${e.message}`);} };
-  const handleRequireRekyc = async (userId) => { if(!reason){showToast('❌ Reason required');return;} try { await apiFetch(`/api/admin/users/${userId}/require-rekyc`,{method:'POST',body:JSON.stringify({reason})}); showToast('✅ Re-KYC required — user notified'); setModal(null); setReason(''); loadUsers(); } catch(e){showToast(`❌ ${e.message}`);} };
-  const handleSearchRetirements = async () => { if(!retirementSearch.trim()){return;} try { const d = await apiFetch(`/api/admin/retirements/search?q=${encodeURIComponent(retirementSearch)}`); setRetirementResults(d.retirements||[]); } catch(e){showToast(`❌ ${e.message}`);} };
-  const handleLoadMintDiag = async (batchId) => { try { const d = await apiFetch(`/api/admin/credits/${batchId}/mint-errors`); setMintDiag(d); setModal({type:'mint_diag',data:d}); } catch(e){showToast(`❌ ${e.message}`);} };
-  const handleUnflagRetirement = async (id) => { try { await apiFetch(`/api/admin/retirements/${id}/unflag`,{method:'POST'}); showToast('✅ Retirement dispute cleared'); loadRetirements(); } catch(e){showToast(`❌ ${e.message}`);} };
-
-  // ✅ FIX: handleFlagRetirement was missing — now defined
-  const handleFlagRetirement = async (id) => {
+  // ── [CORP] Corporate action handlers ─────────────────────────────
+  const handleCorpUserSearch = async () => {
+    const q = corpSearch.trim();
+    if (!q) return;
+    setCorpSearching(true);
+    setCorpSearchResults(null);
     try {
-      await apiFetch(`/api/admin/retirements/${id}/flag`, { method:'POST', body:JSON.stringify({ reason }) });
-      showToast('✅ Retirement flagged as disputed');
-      setModal(null);
-      setReason('');
-      loadRetirements();
-    } catch(e) {
-      showToast(`❌ ${e.message}`);
+      const d = await api(`/api/admin/users?search=${encodeURIComponent(q)}`);
+      setCorpSearchResults(d?.users ?? []);
+    } catch (e) {
+      toast_(`❌ ${e.message}`, 4000, 'error');
+    } finally {
+      setCorpSearching(false);
     }
   };
 
-  const handlePriceOverride = async (listingId) => { if(!priceOverride||!reason){showToast('❌ Price and reason required');return;} try { await apiFetch(`/api/admin/listings/${listingId}/override-price`,{method:'POST',body:JSON.stringify({priceInr:priceOverride,reason})}); showToast(`✅ Price updated to ₹${priceOverride}`); setModal(null); setPriceOverride(''); setReason(''); } catch(e){showToast(`❌ ${e.message}`);} };
-  const handleAssignWalletAndMint = async (batchId) => { if(!assignWallet||!assignWallet.startsWith('0x')||assignWallet.length!==42){showToast('❌ Invalid wallet address');return;} setSyncingId(batchId); try { const r = await apiFetch(`/api/admin/credits/${batchId}/assign-wallet-and-mint`,{method:'POST',body:JSON.stringify({walletAddress:assignWallet})}); showToast(`✅ Wallet assigned + Token #${r.tokenId} minted`); setModal(null); setAssignWallet(''); loadCredits(); } catch(e){showToast(`❌ ${e.message}`);} finally{setSyncingId(null);} };
-  const handleBulkKycApprove = async () => { if(!selectedKycIds.length){showToast('❌ Select at least one submission');return;} try { const r = await apiFetch('/api/admin/kyc/bulk-approve',{method:'POST',body:JSON.stringify({ids:selectedKycIds})}); showToast(`✅ ${r.approved} approved · ❌ ${r.failed} failed`); setSelectedKycIds([]); loadKYC(); loadStats(); } catch(e){showToast(`❌ ${e.message}`);} };
-  const handleExportAudit = () => { window.open(`${process.env.REACT_APP_API_URL || 'http://localhost:5000'}/api/admin/audit/export`, '_blank'); };
+  const handleCorpActivate = () => safeAction(async () => {
+    if (!corpForm.userId) throw new Error('Select a user first');
+    setCorpActivating(true);
+    try {
+      const seats = corpForm.seats ? parseInt(corpForm.seats) : null;
+      if (seats !== null && (isNaN(seats) || seats < 1)) throw new Error('Seats must be a positive number');
+      const body = {
+        cycle:          corpForm.cycle,
+        seats,
+        customPriceINR: parseFloat(corpForm.customPriceINR) || 0,
+        renewalMonths:  corpForm.renewalMonths ? parseInt(corpForm.renewalMonths) : null,
+        notes:          corpForm.notes.trim(),
+      };
+      const r = await api(`/api/admin/users/${corpForm.userId}/activate-corporate`, {
+        method: 'POST', body: JSON.stringify(body),
+      });
+      toast_(
+        `✅ Corporate activated for ${corpForm.email} · Renews ${new Date(r.renewalDate).toLocaleDateString('en-IN')}`,
+        5000, 'success'
+      );
+      setCorpForm({ userId: '', email: '', cycle: 'annual', seats: '', customPriceINR: '', renewalMonths: '', notes: '' });
+      setCorpSearchResults(null);
+      setCorpSearch('');
+      loadCorpActivations();
+      loadStats();
+    } finally {
+      setCorpActivating(false);
+    }
+  });
 
-  const reviewFlag = async (flagId, status, notes) => { try { await apiFetch(`/api/compliance/flags/${flagId}`,{method:'PUT',body:JSON.stringify({status,reviewNotes:notes})}); showToast(`Flag marked ${status}`); setModal(null); setReason(''); loadCompFlags(); } catch(e){showToast(`❌ ${e.message}`);} };
-  const saveConfig = async (key, value) => { try { await apiFetch(`/api/compliance/config/${key}`,{method:'PUT',body:JSON.stringify({value})}); showToast(`✅ ${key} updated`); setEditingConfig(p=>{const n={...p};delete n[key];return n;}); loadCompConfig(); } catch(e){showToast(`❌ ${e.message}`);} };
+  const handleCorpRenewal = () => safeAction(async () => {
+    if (!corpRenewalForm.userId) throw new Error('User ID is required');
+    if (!corpRenewalForm.renewalDate) throw new Error('Renewal date is required');
+    setCorpRenewing(true);
+    try {
+      await api(`/api/admin/users/${corpRenewalForm.userId}/corporate-renewal`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          renewalDate: corpRenewalForm.renewalDate,
+          seats:       corpRenewalForm.seats || null,
+          notes:       corpRenewalForm.notes,
+        }),
+      });
+      toast_('✅ Renewal date updated', 4000, 'success');
+      setCorpRenewalForm({ userId: '', renewalDate: '', seats: '', notes: '' });
+      loadCorpActivations();
+    } finally {
+      setCorpRenewing(false);
+    }
+  });
 
-  const fmt     = (d) => d ? new Date(d).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}) : '—';
-  const fmtTime = (d) => d ? new Date(d).toLocaleString('en-IN') : '—';
-  const fmtINR  = (n) => `₹${parseFloat(n||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
-
-  const Badge = ({ status }) => {
-    const color = {pending:'#f59e0b',approved:'#22c55e',verified:'#22c55e',rejected:'#f87171',frozen:'#f87171',open:'#f59e0b',resolved:'#22c55e',cleared:'#22c55e',reviewed:'#60a5fa',escalated:'#f87171',low:'#22c55e',medium:'#f59e0b',high:'#f97316',critical:'#f87171',active:'#22c55e'}[status]||'#86efac44';
-    return <span style={{fontSize:9,padding:'3px 8px',borderRadius:20,border:`1px solid ${color}33`,color,letterSpacing:'.08em'}}>{status?.toUpperCase().replace(/_/g,' ')}</span>;
-  };
-  const MintBadge = ({ credit }) => {
-    if (credit.token_id!=null) return <span style={{fontSize:9,padding:'3px 8px',borderRadius:20,border:'1px solid #22c55e33',color:'#22c55e'}}>✓ #{credit.token_id}</span>;
-    if (credit.admin_status==='approved') return <span style={{fontSize:9,padding:'3px 8px',borderRadius:20,border:'1px solid #f8717133',color:'#f87171',animation:'pulse 2s infinite'}}>⚠ FAILED</span>;
-    return <span style={{fontSize:9,color:'#86efac33'}}>—</span>;
-  };
-  const sevColor = {low:'#22c55e',medium:'#f59e0b',high:'#f97316',critical:'#f87171'};
-  const flagTypeLabel = {ctr:'🚨 CTR',daily_limit:'📅 DAILY',monthly_limit:'📆 MONTHLY',velocity:'⚡ VELOCITY',structuring:'⚠ STRUCT',inr_crypto_conv:'🔄 FEMA'};
+  // ── Render guard ──────────────────────────────────────────────────
+  if (dbUser && dbUser.role !== 'admin' && dbUser.role !== 'superadmin') {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', background: '#0a0800', color: '#f87171', fontFamily: "'DM Mono',monospace", flexDirection: 'column', gap: 10 }}>
+        <div style={{ fontSize: 32 }}>⛔</div>
+        <div style={{ fontSize: 14 }}>Access Denied — Admin only</div>
+        <button style={S.logoutBtn} onClick={handleLogout}>LOGOUT</button>
+      </div>
+    );
+  }
 
   return (
     <div style={S.page}>
-      <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}@keyframes spin{to{transform:rotate(360deg)}}`}</style>
-      {toast && <div style={S.toast}>{toast}</div>}
+      <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}@keyframes spin{to{transform:rotate(360deg)}}button:disabled{opacity:.45;cursor:not-allowed!important}`}</style>
 
-      {/* Sidebar */}
+      {toast && <div style={{ ...S.toast, borderColor: toastType === 'error' ? '#f8717144' : toastType === 'success' ? '#22c55e44' : '#f59e0b44', color: toastType === 'error' ? '#f87171' : toastType === 'success' ? '#22c55e' : '#f59e0b' }}>{toast}</div>}
+      {actionLoading && <div style={{ position: 'fixed', inset: 0, zIndex: 2000, cursor: 'wait' }} />}
+
+      {/* ── Sidebar ── */}
       <div style={S.sidebar}>
-        <div style={S.sideTop}><div style={S.logo}>⚡ ETHERTRACK</div><div style={S.logoSub}>ADMIN CONSOLE</div></div>
+        <div style={S.sideTop}>
+          <div style={S.logo}>⚡ ETHERTRACK</div>
+          <div style={S.logoSub}>ADMIN CONSOLE</div>
+          {dbUser?.role === 'superadmin' && <div style={{ fontSize: 7, color: '#f87171aa', marginTop: 3, letterSpacing: '.12em' }}>SUPERADMIN</div>}
+        </div>
         {TABS.map(t => (
-          <button key={t.id} style={{...S.navBtn,...(tab===t.id?S.navBtnActive:{})}} onClick={() => setTab(t.id)}>
+          <button key={t.id} style={{ ...S.navBtn, ...(tab === t.id ? S.navActive : {}) }} onClick={() => setTab(t.id)}>
             {t.label}
-            {t.id==='kyc'           && stats?.pendingKYC     > 0 && <span style={S.badge}>{stats.pendingKYC}</span>}
-            {t.id==='credits'       && stats?.pendingCredits > 0 && <span style={S.badge}>{stats.pendingCredits}</span>}
-            {t.id==='credits'       && stats?.failedMints    > 0 && <span style={{...S.badge,background:'#f87171'}}>{stats.failedMints}</span>}
-            {t.id==='disputes'      && stats?.openDisputes   > 0 && <span style={S.badge}>{stats.openDisputes}</span>}
-            {t.id==='accounts'      && kycExpiring.length    > 0 && <span style={{...S.badge,background:'#f59e0b'}}>{kycExpiring.length}</span>}
-            {t.id==='compliance'    && compStats.criticalFlags>0 && <span style={{...S.badge,background:'#f87171'}}>{compStats.criticalFlags}</span>}
+            {t.id === 'kyc'        && (stats?.pendingKYC     ?? 0) > 0 && <span style={S.badge}>{stats.pendingKYC}</span>}
+            {t.id === 'credits'    && (stats?.pendingCredits  ?? 0) > 0 && <span style={S.badge}>{stats.pendingCredits}</span>}
+            {t.id === 'credits'    && (stats?.failedMints     ?? 0) > 0 && <span style={{ ...S.badge, background: '#f87171' }}>{stats.failedMints}</span>}
+            {t.id === 'buyorders'  && (stats?.openBuyOrders   ?? 0) > 0 && <span style={{ ...S.badge, background: '#f59e0b' }}>{stats.openBuyOrders}</span>}
+            {t.id === 'disputes'   && (stats?.openDisputes    ?? 0) > 0 && <span style={S.badge}>{stats.openDisputes}</span>}
+            {t.id === 'accounts'   && kycExpiring.length > 0            && <span style={{ ...S.badge, background: '#f59e0b' }}>{kycExpiring.length}</span>}
+            {t.id === 'compliance' && compStats.criticalFlags > 0        && <span style={{ ...S.badge, background: '#f87171' }}>{compStats.criticalFlags}</span>}
+            {t.id === 'corporate'  && (stats?.corporateAccounts ?? 0) > 0 && <span style={{ ...S.badge, background: '#f59e0b' }}>{stats.corporateAccounts}</span>}
           </button>
         ))}
-        <div style={{marginTop:'auto',padding:'16px'}}>
-          <div style={{fontSize:10,color:'#f59e0bbb',marginBottom:6}}>{dbUser?.email}</div>
+        <div style={{ marginTop: 'auto', padding: '14px' }}>
+          <div style={{ fontSize: 9, color: '#f59e0bbb', marginBottom: 5, wordBreak: 'break-all' }}>{dbUser?.email}</div>
           <button style={S.logoutBtn} onClick={handleLogout}>LOGOUT</button>
         </div>
       </div>
 
-      {/* Main */}
+      {/* ── Main ── */}
       <div style={S.main}>
 
-        {/* ── OVERVIEW ── */}
-        {tab === 'overview' && (
-          <>
-            <div style={S.pageTitle}>Platform Overview</div>
-            <div style={S.statsGrid}>
-              {[
-                {label:'PENDING KYC',     value:stats?.pendingKYC??'—',     color:'#f59e0b',icon:'🔍'},
-                {label:'PENDING CREDITS', value:stats?.pendingCredits??'—', color:'#60a5fa',icon:'🌿'},
-                {label:'FAILED MINTS',    value:stats?.failedMints??'—',    color:'#f87171',icon:'⚠'},
-                {label:'TOTAL USERS',     value:stats?.totalUsers??'—',     color:'#22c55e',icon:'👤'},
-                {label:'FROZEN ACCOUNTS', value:stats?.frozenAccounts??'—', color:'#f87171',icon:'🔒'},
-                {label:'OPEN DISPUTES',   value:stats?.openDisputes??'—',   color:'#a78bfa',icon:'⚖️'},
-              ].map(({label,value,color,icon}) => (
-                <div key={label} style={S.statCard}>
-                  <div style={{fontSize:26,marginBottom:8}}>{icon}</div>
-                  <div style={{fontSize:28,fontWeight:700,color,marginBottom:4}}>{value}</div>
-                  <div style={{fontSize:9,color:'#f59e0bcc',letterSpacing:'.12em'}}>{label}</div>
-                </div>
-              ))}
-            </div>
-            {kycExpiring.length > 0 && (
-              <div style={{...S.section,marginTop:20,border:'1px solid #f59e0b44',background:'#110a00'}}>
-                <div style={{fontSize:9,color:'#f59e0b',letterSpacing:'.16em',marginBottom:12}}>⚠ KYC EXPIRING SOON — {kycExpiring.length} USER{kycExpiring.length>1?'S':''}</div>
-                {kycExpiring.slice(0,4).map(u => (
-                  <div key={u.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'8px 0',borderBottom:'1px solid #f59e0b11'}}>
-                    <div><div style={{fontSize:11,color:'#f0fdf4'}}>{u.full_name} <span style={{color:'#f59e0b88',fontSize:9}}>({u.email})</span></div><div style={{fontSize:9,color:'#f59e0b66',marginTop:2}}>Expires {fmt(u.kyc_expires_at)} · {u.days_left} days left</div></div>
-                    <button style={{...S.viewBtn,borderColor:'#f59e0b44',color:'#f59e0b'}} onClick={() => handleKycReminder(u.id,u.email)}>📧 REMIND</button>
-                  </div>
-                ))}
-              </div>
-            )}
-            <div style={{...S.section,marginTop:16}}>
-              <div style={S.sectionTitle}>QUICK ACTIONS</div>
-              <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
-                {[
-                  {label:'Review KYC',        action:()=>setTab('kyc')},
-                  {label:'Review Credits',    action:()=>setTab('credits')},
-                  {label:'Manage Accounts',   action:()=>setTab('accounts')},
-                  {label:'Retirements',        action:()=>setTab('retirements')},
-                  {label:'Announcements',     action:()=>setTab('announcements')},
-                  {label:'Audit Log',         action:()=>setTab('audit')},
-                  {label:'Compliance →',      action:()=>setTab('compliance')},
-                ].map(({label,action}) => (
-                  <button key={label} style={S.quickBtn} onClick={action}>{label} →</button>
-                ))}
-              </div>
-            </div>
-          </>
-        )}
-
-        {/* ── KYC QUEUE ── */}
-        {tab === 'kyc' && (
-          <div>
-            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:24,flexWrap:'wrap',gap:12}}>
-              <div style={S.pageTitle}>KYC Queue</div>
-              {selectedKycIds.length > 0 && (
-                <button style={{...S.approveBtn,padding:'8px 16px',fontSize:10}} onClick={handleBulkKycApprove}>
-                  ✓ BULK APPROVE {selectedKycIds.length} SELECTED
-                </button>
-              )}
-            </div>
-            <div style={{display:'flex',gap:8,marginBottom:20}}>
-              {['pending','approved','rejected'].map(s => (
-                <button key={s} style={{...S.filterBtn,...(kycFilter===s?S.filterBtnActive:{})}} onClick={() => setKycFilter(s)}>{s.toUpperCase()}</button>
-              ))}
-            </div>
-            {loading ? <div style={S.loading}>Loading...</div> : (
-              <div style={S.table}>
-                <div style={{...S.tableHead,gridTemplateColumns:'32px 2fr 1fr 1fr 1fr 1fr 1.5fr'}}>
-                  <div style={S.th}><input type="checkbox" onChange={e => setSelectedKycIds(e.target.checked?kyc.filter(k=>k.status==='pending').map(k=>k.id):[])}/></div>
-                  {['USER','ID TYPE','SUBMITTED','STATUS','DOC','ACTIONS'].map(h=><div key={h} style={S.th}>{h}</div>)}
-                </div>
-                {kyc.length===0&&<div style={S.empty}>No {kycFilter} KYC submissions</div>}
-                {kyc.map(k => (
-                  <div key={k.id} style={{...S.tableRow,gridTemplateColumns:'32px 2fr 1fr 1fr 1fr 1fr 1.5fr'}}>
-                    <div style={S.td}>{k.status==='pending'&&<input type="checkbox" checked={selectedKycIds.includes(k.id)} onChange={e=>setSelectedKycIds(p=>e.target.checked?[...p,k.id]:p.filter(i=>i!==k.id))}/>}</div>
-                    <div style={S.td}><div style={{color:'#f0fdf4',fontSize:11}}>{k.full_name}</div><div style={{color:'#f59e0bcc',fontSize:9}}>{k.email}</div></div>
-                    <div style={S.td}><Badge status={k.id_type}/></div>
-                    <div style={{...S.td,fontSize:10,color:'#f59e0bbb'}}>{fmt(k.submitted_at)}</div>
-                    <div style={S.td}><Badge status={k.status}/></div>
-                    <div style={S.td}>{k.doc_ipfs_hash?<a href={`${PINATA_GW}/${k.doc_ipfs_hash}`} target="_blank" rel="noreferrer" style={{fontSize:10,color:'#60a5fa',textDecoration:'none'}}>VIEW ↗</a>:'—'}</div>
-                    <div style={{...S.td,display:'flex',gap:4}}>
-                      <button style={S.viewBtn} onClick={() => setModal({type:'kyc_detail',data:k})}>DETAILS</button>
-                      {k.status==='pending'&&<><button style={S.approveBtn} onClick={() => setModal({type:'kyc_approve',data:k})}>✓</button><button style={S.rejectBtn} onClick={() => setModal({type:'kyc_reject',data:k})}>✕</button></>}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ── CREDITS ── */}
-        {tab === 'credits' && (
-          <div>
-            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:24,flexWrap:'wrap',gap:12}}>
-              <div style={S.pageTitle}>Carbon Credit Listings</div>
-              {failedMints.length>0&&<button style={{padding:'10px 18px',borderRadius:6,border:'1px solid #f8717166',background:retryingAll?'#1a0707':'#f8717111',color:'#f87171',cursor:'pointer',fontFamily:"'DM Mono',monospace",fontSize:11,display:'flex',alignItems:'center',gap:8}} onClick={retryAllMints} disabled={retryingAll}>{retryingAll?<><span style={S.spinner}/>RETRYING...</>:`⚠ RETRY ${failedMints.length} FAILED`}</button>}
-            </div>
-            <div style={{display:'flex',gap:8,marginBottom:20}}>
-              {['pending','approved','rejected'].map(s => (
-                <button key={s} style={{...S.filterBtn,...(creditFilter===s?S.filterBtnActive:{})}} onClick={() => setCreditFilter(s)}>{s.toUpperCase()}{s==='approved'&&failedMints.length>0&&<span style={{marginLeft:6,background:'#f87171',color:'#fff',fontSize:8,padding:'1px 5px',borderRadius:8}}>{failedMints.length}</span>}</button>
-              ))}
-            </div>
-            {loading?<div style={S.loading}>Loading...</div>:(
-              <div style={S.table}>
-                <div style={{...S.tableHead,gridTemplateColumns:'2fr 1fr 1.5fr 1fr 1fr 1fr 1.5fr 2fr'}}>
-                  {['USER','REGISTRY','SERIAL','QTY','VINTAGE','PROOF','MINT','ACTIONS'].map(h=><div key={h} style={S.th}>{h}</div>)}
-                </div>
-                {credits.length===0&&<div style={S.empty}>No {creditFilter} credits</div>}
-                {credits.map(c => (
-                  <div key={c.id} style={{...S.tableRow,gridTemplateColumns:'2fr 1fr 1.5fr 1fr 1fr 1fr 1.5fr 2fr',...(c.admin_status==='approved'&&!c.token_id?{background:'#1a070711',borderLeft:'2px solid #f8717133'}:{})}}>
-                    <div style={S.td}><div style={{color:'#f0fdf4',fontSize:11}}>{c.full_name}</div><div style={{color:'#f59e0bcc',fontSize:9}}>{c.email}</div></div>
-                    <div style={{...S.td,fontSize:10}}>{c.standard||'—'}</div>
-                    <div style={{...S.td,fontSize:9,color:'#60a5fadd',fontFamily:'monospace'}}>{(c.registry_serial||'—').slice(0,18)}</div>
-                    <div style={{...S.td,fontSize:11,color:'#22c55e'}}>{c.quantity}</div>
-                    <div style={{...S.td,fontSize:10,color:'#f59e0bbb'}}>{c.vintage_year}</div>
-                    <div style={S.td}>{c.doc_ipfs_hash?<a href={`${PINATA_GW}/${c.doc_ipfs_hash}`} target="_blank" rel="noreferrer" style={{fontSize:10,color:'#60a5fa',textDecoration:'none'}}>↗</a>:'—'}</div>
-                    <div style={S.td}><MintBadge credit={c}/></div>
-                    <div style={{...S.td,display:'flex',gap:4,flexWrap:'wrap'}}>
-                      <button style={S.viewBtn} onClick={() => setModal({type:'credit_detail',data:c})}>DETAILS</button>
-                      {c.admin_status==='pending'&&<><button style={S.approveBtn} onClick={() => setModal({type:'credit_approve',data:c})}>✓</button><button style={S.rejectBtn} onClick={() => setModal({type:'credit_reject',data:c})}>✕</button><button style={{...S.viewBtn,borderColor:'#a78bfa33',color:'#a78bfaaa'}} onClick={() => {setNewQty(String(c.quantity));setReason('');setModal({type:'qty_correction',data:c});}}>✎ QTY</button></>}
-                      {c.admin_status==='approved'&&!c.token_id&&<>
-                        <button style={{padding:'4px 8px',borderRadius:4,border:'1px solid #f8717144',background:'#f8717111',color:'#f87171',cursor:'pointer',fontFamily:"'DM Mono',monospace",fontSize:9,display:'flex',alignItems:'center',gap:4}} onClick={() => retryMint(c.id)} disabled={retryingId===c.id}>{retryingId===c.id?<><span style={{...S.spinner,width:8,height:8}}/>...</>:'⟳ RETRY'}</button>
-                        <button style={{padding:'4px 8px',borderRadius:4,border:'1px solid #60a5fa44',background:'#60a5fa11',color:'#60a5fa',cursor:'pointer',fontFamily:"'DM Mono',monospace",fontSize:9}} onClick={() => {setManualTokenId('');setModal({type:'manual_token_sync',data:c});}}>✎ SET ID</button>
-                        <button style={{padding:'4px 8px',borderRadius:4,border:'1px solid #a78bfa44',background:'#a78bfa11',color:'#a78bfa',cursor:'pointer',fontFamily:"'DM Mono',monospace",fontSize:9}} onClick={() => handleLoadMintDiag(c.id)}>🔍 WHY</button>
-                        {!c.user_wallet&&<button style={{padding:'4px 8px',borderRadius:4,border:'1px solid #a78bfa44',background:'#a78bfa11',color:'#a78bfa',cursor:'pointer',fontFamily:"'DM Mono',monospace",fontSize:9}} onClick={() => {setAssignWallet('');setModal({type:'assign_wallet_mint',data:c});}}>🔑+⛓</button>}
-                      </>}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ── RETIREMENTS ── */}
-        {tab === 'retirements' && (
-          <div>
-            <div style={S.pageTitle}>Retirement Records</div>
-            {/* Search bar */}
-            <div style={{display:'flex',gap:10,marginBottom:20}}>
-              <input style={{...S.searchInput,flex:1}} placeholder="Search by certificate ID, serial, email, or name..." value={retirementSearch} onChange={e=>setRetirementSearch(e.target.value)} onKeyDown={e=>e.key==='Enter'&&handleSearchRetirements()}/>
-              <button style={{...S.quickBtn,borderColor:'#22c55e44',color:'#22c55e'}} onClick={handleSearchRetirements}>🔍 SEARCH</button>
-              {retirementResults!==null&&<button style={{...S.filterBtn,borderColor:'#f59e0b33',color:'#f59e0baa'}} onClick={()=>{setRetirementResults(null);setRetirementSearch('');}}>✕ CLEAR</button>}
-            </div>
-            {loading?<div style={S.loading}>Loading...</div>:(
-              <div style={S.table}>
-                <div style={{...S.tableHead,gridTemplateColumns:'2fr 1.5fr 1fr 1fr 1fr 1fr 1.5fr'}}>
-                  {['USER','CERTIFICATE ID','CREDITS','STANDARD','SCOPE','DISPUTED','ACTIONS'].map(h=><div key={h} style={S.th}>{h}</div>)}
-                </div>
-                {(retirementResults??retirements).length===0&&<div style={S.empty}>{retirementResults!==null?'No results found':'No retirements'}</div>}
-                {(retirementResults??retirements).map(r => (
-                  <div key={r.id} style={{...S.tableRow,gridTemplateColumns:'2fr 1.5fr 1fr 1fr 1fr 1fr 1.5fr',...(r.disputed?{background:'#1a070711',borderLeft:'2px solid #f8717133'}:{})}}>
-                    <div style={S.td}><div style={{color:'#f0fdf4',fontSize:11}}>{r.full_name||'—'}</div><div style={{color:'#f59e0bcc',fontSize:9}}>{r.email}</div></div>
-                    <div style={{...S.td,fontSize:9,color:'#22c55ecc',fontFamily:'monospace'}}>{(r.certificate_id||'—').slice(0,20)}</div>
-                    <div style={{...S.td,fontSize:11,color:'#f87171'}}>{r.amount} tCO₂</div>
-                    <div style={{...S.td,fontSize:10}}>{r.standard||'—'}</div>
-                    <div style={{...S.td,fontSize:10}}>S{r.retire_scope||'—'}</div>
-                    <div style={S.td}>{r.disputed?<span style={{fontSize:9,color:'#f87171'}}>⚠ DISPUTED</span>:<span style={{fontSize:9,color:'#22c55e44'}}>—</span>}</div>
-                    <div style={{...S.td,display:'flex',gap:4}}>
-                      {r.tx_hash&&<a href={`https://sepolia.etherscan.io/tx/${r.tx_hash}`} target="_blank" rel="noreferrer" style={{...S.viewBtn,textDecoration:'none',display:'flex',alignItems:'center'}}>⛓</a>}
-                      {!r.disputed?<button style={S.rejectBtn} onClick={() => {setReason('');setModal({type:'flag_retirement',data:r});}}>FLAG</button>:<button style={S.approveBtn} onClick={() => handleUnflagRetirement(r.id)}>CLEAR</button>}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ── ACCOUNTS ── */}
-        {tab === 'accounts' && (
-          <div>
-            <div style={S.pageTitle}>Account Management</div>
-            {kycExpiring.length>0&&(
-              <div style={{...S.section,marginBottom:20,border:'1px solid #f59e0b33',background:'#0d0800'}}>
-                <div style={{fontSize:9,color:'#f59e0b',letterSpacing:'.14em',marginBottom:10}}>⚠ KYC EXPIRING WITHIN 90 DAYS</div>
-                <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(260px,1fr))',gap:8}}>
-                  {kycExpiring.map(u=>(
-                    <div key={u.id} style={{padding:'10px 14px',background:'#0a0800',border:'1px solid #f59e0b22',borderRadius:8,display:'flex',justifyContent:'space-between',alignItems:'center',gap:8}}>
-                      <div><div style={{fontSize:11,color:'#f0fdf4'}}>{u.full_name}</div><div style={{fontSize:9,color:'#f59e0b88',marginTop:2}}>{u.days_left}d · {fmt(u.kyc_expires_at)}</div></div>
-                      <button style={{...S.viewBtn,borderColor:'#f59e0b33',color:'#f59e0b',flexShrink:0}} onClick={() => handleKycReminder(u.id,u.email)}>📧</button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-            <div style={{display:'flex',gap:8,marginBottom:20,flexWrap:'wrap'}}>
-              <input style={S.searchInput} placeholder="Search by name or email..." value={search} onChange={e=>setSearch(e.target.value)} onKeyDown={e=>e.key==='Enter'&&loadUsers()}/>
-              {['','frozen','verified','pending'].map(s=><button key={s} style={{...S.filterBtn,...(userFilter===s?S.filterBtnActive:{})}} onClick={()=>setUserFilter(s)}>{s||'ALL'}</button>)}
-            </div>
-            {loading?<div style={S.loading}>Loading...</div>:(
-              <div style={S.table}>
-                <div style={{...S.tableHead,gridTemplateColumns:'2fr 1.5fr 1fr 1fr 1fr 2.5fr'}}>{['USER','WALLET','KYC','STATUS','JOINED','ACTIONS'].map(h=><div key={h} style={S.th}>{h}</div>)}</div>
-                {users.length===0&&<div style={S.empty}>No users found</div>}
-                {users.map(u=>(
-                  <div key={u.id} style={{...S.tableRow,gridTemplateColumns:'2fr 1.5fr 1fr 1fr 1fr 2.5fr'}}>
-                    <div style={S.td}><div style={{color:u.frozen?'#f87171':'#f0fdf4',fontSize:11}}>{u.full_name||'—'}{u.frozen&&' 🔒'}</div><div style={{color:'#f59e0bcc',fontSize:9}}>{u.email}</div></div>
-                    <div style={{...S.td,fontSize:9,color:'#60a5facc',fontFamily:'monospace'}}>{u.wallet_address?`${u.wallet_address.slice(0,6)}...${u.wallet_address.slice(-4)}`:'—'}</div>
-                    <div style={S.td}><Badge status={u.kyc_status||'pending'}/></div>
-                    <div style={S.td}><Badge status={u.frozen?'frozen':'active'}/></div>
-                    <div style={{...S.td,fontSize:10,color:'#f59e0bbb'}}>{fmt(u.created_at)}</div>
-                    <div style={{...S.td,display:'flex',gap:4,flexWrap:'wrap'}}>
-                      <button style={S.viewBtn} onClick={() => { loadUserData(u.id); setModal({type:'user_detail',data:u}); }}>VIEW</button>
-                      <button style={{...S.viewBtn,borderColor:'#22c55e33',color:'#22c55eaa'}} onClick={() => { loadUserData(u.id); setModal({type:'user_history',data:u}); }}>HISTORY</button>
-                      <button style={{...S.viewBtn,borderColor:'#f59e0b33',color:'#f59e0baa'}} onClick={() => { setMsgSubject(''); setMsgBody(''); setModal({type:'send_message',data:u}); }}>📧 MSG</button>
-                      {!u.frozen?<button style={S.rejectBtn} onClick={() => setModal({type:'freeze',data:u})}>FREEZE</button>:<button style={S.approveBtn} onClick={() => setModal({type:'unfreeze',data:u})}>UNFREEZE</button>}
-                      <button style={{...S.viewBtn,borderColor:'#60a5fa33',color:'#60a5faaa'}} onClick={() => { setNewWallet(''); setReason(''); setModal({type:'reassign_wallet',data:u}); }}>🔑</button>
-                      <button style={{...S.viewBtn,borderColor:'#a78bfa33',color:'#a78bfaaa'}} onClick={() => handleResyncPortfolio(u.id)}>🔄</button>
-                      <button style={{...S.viewBtn,borderColor:'#f59e0b33',color:'#f59e0baa'}} onClick={() => { setReason(''); setModal({type:'require_rekyc',data:u}); }}>↻ KYC</button>
-                      <button style={{...S.rejectBtn,fontSize:8,padding:'3px 6px',opacity:.7}} onClick={() => { setReason(''); setModal({type:'delete_user',data:u}); }}>DEL</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ── BLACKLIST ── */}
-        {tab === 'blacklist' && (
-          <div>
-            <div style={S.pageTitle}>Serial Number Blacklist</div>
-            <div style={{...S.section,marginBottom:20}}>
-              <div style={S.sectionTitle}>BLACKLIST NEW SERIAL</div>
-              <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
-                <input style={{...S.searchInput,minWidth:240}} placeholder="Serial number e.g. VCS-2023-IN-00412" value={newSerial} onChange={e=>setNewSerial(e.target.value)}/>
-                <input style={{...S.searchInput,flex:1}} placeholder="Reason for blacklisting..." value={reason} onChange={e=>setReason(e.target.value)}/>
-                <button style={{...S.quickBtn,borderColor:'#f87171',color:'#f87171'}} onClick={handleBlacklistSerial}>🚫 BLACKLIST</button>
-              </div>
-            </div>
-            {loading?<div style={S.loading}>Loading...</div>:(
-              <div style={S.table}>
-                <div style={{...S.tableHead,gridTemplateColumns:'2fr 3fr 1.5fr 1fr'}}>{['SERIAL NUMBER','REASON','BLACKLISTED BY','ACTION'].map(h=><div key={h} style={S.th}>{h}</div>)}</div>
-                {blacklist.length===0&&<div style={S.empty}>No blacklisted serials</div>}
-                {blacklist.map(b=>(
-                  <div key={b.serial_number} style={{...S.tableRow,gridTemplateColumns:'2fr 3fr 1.5fr 1fr'}}>
-                    <div style={{...S.td,fontSize:10,color:'#f87171',fontFamily:'monospace'}}>{b.serial_number}</div>
-                    <div style={{...S.td,fontSize:10,color:'#f59e0bbb'}}>{b.reason}</div>
-                    <div style={{...S.td,fontSize:9,color:'#f59e0b88'}}>{b.blacklisted_by_email||'—'}</div>
-                    <div style={S.td}><button style={S.approveBtn} onClick={() => handleUnblacklist(b.serial_number)}>REMOVE</button></div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ── ANNOUNCEMENTS ── */}
-        {tab === 'announcements' && (
-          <div>
-            <div style={S.pageTitle}>Announcements & Messaging</div>
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16,marginBottom:24}}>
-              {/* Broadcast */}
-              <div style={S.section}>
-                <div style={S.sectionTitle}>📢 BROADCAST TO ALL USERS</div>
-                <input style={{...S.searchInput,width:'100%',marginBottom:10}} placeholder="Subject / Title" value={annTitle} onChange={e=>setAnnTitle(e.target.value)}/>
-                <textarea style={{...M.textarea,marginBottom:10}} placeholder="Message body..." value={annMsg} onChange={e=>setAnnMsg(e.target.value)}/>
-                <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:12}}>
-                  <input type="checkbox" id="annEmail" checked={annEmail} onChange={e=>setAnnEmail(e.target.checked)}/>
-                  <label htmlFor="annEmail" style={{fontSize:10,color:'#f59e0bcc'}}>Also send email (slower — sends to every user)</label>
-                </div>
-                <button style={{...S.quickBtn,borderColor:'#f59e0b66',color:'#f59e0b',width:'100%',textAlign:'center',opacity:broadcasting?.5:1}} onClick={handleBroadcast} disabled={broadcasting}>
-                  {broadcasting?'⟳ BROADCASTING...':`📢 BROADCAST${annEmail?' + EMAIL':' (IN-APP ONLY)'}`}
-                </button>
-              </div>
-              {/* Banner */}
-              <div style={S.section}>
-                <div style={S.sectionTitle}>🪧 PLATFORM BANNER (shown in-app)</div>
-                <input style={{...S.searchInput,width:'100%',marginBottom:10}} placeholder="Banner title" value={annTitle} onChange={e=>setAnnTitle(e.target.value)}/>
-                <textarea style={{...M.textarea,marginBottom:10,minHeight:60}} placeholder="Banner message..." value={annMsg} onChange={e=>setAnnMsg(e.target.value)}/>
-                <select style={{...S.searchInput,width:'100%',marginBottom:12}} value={annType} onChange={e=>setAnnType(e.target.value)}>
-                  <option value="info">ℹ Info (blue)</option>
-                  <option value="warning">⚠ Warning (yellow)</option>
-                  <option value="critical">🚨 Critical (red)</option>
-                  <option value="success">✅ Success (green)</option>
-                </select>
-                <button style={{...S.quickBtn,borderColor:'#60a5fa44',color:'#60a5fa',width:'100%',textAlign:'center'}} onClick={handleSaveAnnouncement}>
-                  🪧 SAVE BANNER
-                </button>
-              </div>
-            </div>
-            {/* Active banners */}
-            <div style={S.sectionTitle}>ACTIVE BANNERS</div>
-            {announcements.length===0?<div style={S.empty}>No active banners</div>:announcements.map(a=>(
-              <div key={a.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'12px 16px',marginBottom:8,background:'#0d0a00',border:'1px solid #f59e0b22',borderRadius:8}}>
-                <div>
-                  <div style={{fontSize:11,color:'#f0fdf4',fontWeight:600}}>{a.title}</div>
-                  <div style={{fontSize:10,color:'#f59e0baa',marginTop:3}}>{a.message?.slice(0,80)}...</div>
-                  <div style={{fontSize:9,color:'#f59e0b44',marginTop:4}}>{fmt(a.created_at)} · {a.type?.toUpperCase()}</div>
-                </div>
-                <button style={S.rejectBtn} onClick={() => handleDeleteAnnouncement(a.id)}>REMOVE</button>
+        {/* ══ OVERVIEW ══ */}
+        {tab === 'overview' && <>
+          <div style={S.title}>Platform Overview</div>
+          <div style={S.statsGrid}>
+            {[
+              { l: 'PENDING KYC',     v: stats?.pendingKYC      ?? '—', c: '#f59e0b', i: '🔍' },
+              { l: 'PENDING CREDITS', v: stats?.pendingCredits   ?? '—', c: '#60a5fa', i: '🌿' },
+              { l: 'FAILED MINTS',    v: stats?.failedMints      ?? '—', c: '#f87171', i: '⚠' },
+              { l: 'OPEN BUY ORDERS', v: stats?.openBuyOrders    ?? '—', c: '#f59e0b', i: '🛒' },
+              { l: 'TOTAL USERS',     v: stats?.totalUsers       ?? '—', c: '#22c55e', i: '👤' },
+              { l: 'FROZEN',          v: stats?.frozenAccounts   ?? '—', c: '#f87171', i: '🔒' },
+              { l: 'DISPUTES',        v: stats?.openDisputes     ?? '—', c: '#a78bfa', i: '⚖️' },
+              { l: 'VERIFIED',        v: stats?.verifiedUsers    ?? '—', c: '#34d399', i: '✅' },
+              { l: 'CORPORATE',       v: stats?.corporateAccounts ?? '—', c: '#f59e0b', i: '🏢' }, // [CORP]
+            ].map(({ l, v, c, i }) => (
+              <div key={l} style={S.statCard}>
+                <div style={{ fontSize: 22, marginBottom: 5 }}>{i}</div>
+                <div style={{ fontSize: 22, fontWeight: 700, color: c, marginBottom: 3 }}>{v}</div>
+                <div style={{ fontSize: 8, color: '#f59e0bcc', letterSpacing: '.12em' }}>{l}</div>
               </div>
             ))}
           </div>
-        )}
-
-        {/* ── LISTINGS ── */}
-        {tab === 'listings' && (
-          <div>
-            <div style={S.pageTitle}>Active Marketplace Listings</div>
-            {loading?<div style={S.loading}>Loading...</div>:(
-              <div style={S.table}>
-                <div style={{...S.tableHead,gridTemplateColumns:'2fr 1.5fr 1fr 1fr 1fr 1fr 1fr 1.5fr'}}>
-                  {['SELLER','PROJECT','SERIAL','QTY','PRICE ₹','STANDARD','LISTED','ACTIONS'].map(h=><div key={h} style={S.th}>{h}</div>)}
-                </div>
-                {listings.length===0&&<div style={S.empty}>No active listings</div>}
-                {listings.map(l => (
-                  <div key={l.id} style={{...S.tableRow,gridTemplateColumns:'2fr 1.5fr 1fr 1fr 1fr 1fr 1fr 1.5fr'}}>
-                    <div style={S.td}><div style={{color:'#f0fdf4',fontSize:11}}>{l.seller_name||'—'}</div><div style={{color:'#f59e0bcc',fontSize:9}}>{l.seller_email}</div></div>
-                    <div style={{...S.td,fontSize:10,color:'#f0fdf4'}}>{l.project_name||'—'}</div>
-                    <div style={{...S.td,fontSize:9,color:'#60a5facc',fontFamily:'monospace'}}>{(l.registry_serial||'—').slice(0,16)}</div>
-                    <div style={{...S.td,fontSize:11,color:'#22c55e'}}>{l.amount_remaining??l.amount??'—'}</div>
-                    <div style={{...S.td,fontSize:11,color:'#f0fdf4'}}>₹{parseFloat(l.price_per_credit_inr||0).toLocaleString('en-IN')}</div>
-                    <div style={S.td}><Badge status={l.standard||'VCS'}/></div>
-                    <div style={{...S.td,fontSize:9,color:'#f59e0baa'}}>{fmt(l.created_at)}</div>
-                    <div style={{...S.td,display:'flex',gap:4,flexWrap:'wrap'}}>
-                      <button style={{...S.viewBtn,borderColor:'#f59e0b33',color:'#f59e0b'}} onClick={()=>{setPriceOverride('');setReason('');setModal({type:'price_override',data:{listingId:l.id,project_name:l.project_name}});}}>₹ PRICE</button>
-                      <button style={S.rejectBtn} onClick={()=>{setReason('');setModal({type:'force_delist',data:l});}}>DELIST</button>
-                    </div>
+          {kycExpiring.length > 0 && (
+            <div style={{ ...S.section, marginTop: 14, border: '1px solid #f59e0b44', background: '#110a00' }}>
+              <div style={{ fontSize: 9, color: '#f59e0b', letterSpacing: '.16em', marginBottom: 10 }}>⚠ KYC EXPIRING SOON</div>
+              {kycExpiring.slice(0, 4).map(u => (
+                <div key={u.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 0', borderBottom: '1px solid #f59e0b11' }}>
+                  <div>
+                    <div style={{ fontSize: 11, color: '#f0fdf4' }}>{u.full_name} <span style={{ fontSize: 9, color: '#f59e0b88' }}>({u.email})</span></div>
+                    <div style={{ fontSize: 9, color: '#f59e0b66', marginTop: 2 }}>{u.days_left}d · {fmt(u.kyc_expires_at)}</div>
                   </div>
-                ))}
+                  <button style={{ ...S.viewBtn, borderColor: '#f59e0b44', color: '#f59e0b' }} onClick={() => handleKycReminder(u.id, u.email)}>📧 REMIND</button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ ...S.section, marginTop: 14 }}>
+            <div style={S.secTitle}>QUICK ACTIONS</div>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              {[['KYC','kyc'],['Credits','credits'],['Buy Orders','buyorders'],['Trades','trades'],['Retirements','retirements'],['Accounts','accounts'],['Revenue','revenue'],['Health','health'],['Compliance','compliance'],['Corporate','corporate']].map(([l,t]) => (
+                <button key={t} style={S.quickBtn} onClick={() => setTab(t)}>{l} →</button>
+              ))}
+            </div>
+          </div>
+        </>}
+
+          {/* ══ KYC ══ */}
+        {tab === 'kyc' && <div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
+            <div style={S.title}>KYC Queue</div>
+            {selectedKycIds.length > 0 && (
+              <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+                <select style={{ ...S.searchInput, width:90, padding:'5px 8px', fontSize:10 }} value={kycTier} onChange={e => setKycTier(e.target.value)}>
+                  <option value="phone">Phone</option>
+                  <option value="basic">Basic</option>
+                  <option value="full">Full</option>
+                </select>
+                <button style={{ ...S.approveBtn, padding:'7px 14px', fontSize:10 }} onClick={handleBulkKycApprove}>✓ BULK APPROVE {selectedKycIds.length}</button>
               </div>
             )}
           </div>
-        )}
-
-        {/* ── PROJECTS ── */}
-        {tab === 'projects' && (
-          <div>
-            <div style={S.pageTitle}>Project Registry</div>
-            {loading?<div style={S.loading}>Loading...</div>:(
-              <div style={S.table}>
-                <div style={{...S.tableHead,gridTemplateColumns:'2fr 1fr 1fr 1fr 1fr 1fr 1fr'}}>
-                  {['PROJECT','STANDARD','BATCHES','TOTAL tCO₂','AVAILABLE','RETIRED','MINTED'].map(h=><div key={h} style={S.th}>{h}</div>)}
-                </div>
-                {projects.length===0&&<div style={S.empty}>No projects</div>}
-                {projects.map(p=>(
-                  <div key={p.id} style={{...S.tableRow,gridTemplateColumns:'2fr 1fr 1fr 1fr 1fr 1fr 1fr'}}>
-                    <div style={S.td}><div style={{color:'#f0fdf4',fontSize:11}}>{p.project_name}</div><div style={{color:'#f59e0bcc',fontSize:9}}>{p.project_code} · {p.developer_name||'—'}</div><div style={{color:'#86efac44',fontSize:9}}>{p.country||'—'}</div></div>
-                    <div style={S.td}><Badge status={p.standard}/></div>
-                    <div style={{...S.td,fontSize:11}}>{p.batch_count}</div>
-                    <div style={{...S.td,fontSize:11,color:'#f0fdf4'}}>{parseInt(p.total_credits).toLocaleString()}</div>
-                    <div style={{...S.td,fontSize:11,color:'#22c55e'}}>{parseInt(p.available_credits).toLocaleString()}</div>
-                    <div style={{...S.td,fontSize:11,color:'#f87171'}}>{parseInt(p.retired_credits).toLocaleString()}</div>
-                    <div style={{...S.td,fontSize:11,color:p.minted_batches>0?'#22c55e':'#f59e0baa'}}>{p.minted_batches}/{p.batch_count}</div>
-                  </div>
-                ))}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>{['pending', 'approved', 'rejected'].map(s => <button key={s} style={{ ...S.filterBtn, ...(kycFilter === s ? S.filterActive : {}) }} onClick={() => setKycFilter(s)}>{s.toUpperCase()}</button>)}</div>
+          {loading ? <div style={S.loading}>Loading...</div> : <div style={S.table}>
+            <div style={{ ...S.thead, gridTemplateColumns: '32px 2fr 1fr 1fr 1fr 1fr 1.5fr' }}>
+              <div style={S.th}><input type="checkbox" onChange={e => setSelectedKycIds(e.target.checked ? kyc.filter(k => k.status === 'pending').map(k => k.id) : [])} /></div>
+              {['USER', 'ID TYPE', 'SUBMITTED', 'STATUS', 'DOC', 'ACTIONS'].map(h => <div key={h} style={S.th}>{h}</div>)}
+            </div>
+            {kyc.length === 0 && <div style={S.empty}>No {kycFilter} submissions</div>}
+            {kyc.map(k => <div key={k.id} style={{ ...S.trow, gridTemplateColumns: '32px 2fr 1fr 1fr 1fr 1fr 1.5fr' }}>
+              <div style={S.td}>{k.status === 'pending' && <input type="checkbox" checked={selectedKycIds.includes(k.id)} onChange={e => setSelectedKycIds(p => e.target.checked ? [...p, k.id] : p.filter(i => i !== k.id))} />}</div>
+              <div style={S.td}><div style={{ color: '#f0fdf4', fontSize: 11 }}>{k.full_name}</div><div style={{ color: '#f59e0bcc', fontSize: 9 }}>{k.email}</div></div>
+              <div style={S.td}><Badge status={k.id_type} /></div>
+              <div style={{ ...S.td, fontSize: 9, color: '#f59e0bbb' }}>{fmt(k.submitted_at)}</div>
+              <div style={S.td}><Badge status={k.status} /></div>
+              <div style={S.td}>{k.doc_ipfs_hash ? <a href={`${PG}/${k.doc_ipfs_hash}`} target="_blank" rel="noreferrer" style={{ fontSize: 10, color: '#60a5fa', textDecoration: 'none' }}>VIEW↗</a> : '—'}</div>
+              <div style={{ ...S.td, display: 'flex', gap: 4 }}>
+                <button style={S.viewBtn} onClick={() => { setKycDetailData(null); setModal({ type: 'kyc_detail', data: k }); }}>DETAILS</button>
+                {k.status === 'pending' && <><button style={S.approveBtn} onClick={() => setModal({ type: 'kyc_approve', data: k })}>✓</button><button style={S.rejectBtn} onClick={() => setModal({ type: 'kyc_reject', data: k })}>✕</button></>}
               </div>
-            )}
-          </div>
-        )}
+            </div>)}
+          </div>}
+        </div>}
 
-        {/* ── REVENUE ── */}
-        {tab === 'revenue' && (
-          <div>
-            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20,flexWrap:'wrap',gap:12}}>
-              <div style={S.pageTitle}>Revenue & Fee Dashboard</div>
-              <div style={{display:'flex',gap:8,alignItems:'center'}}>
-                <span style={{fontSize:10,color:'#f59e0baa'}}>PERIOD:</span>
-                {['7','30','90','365'].map(p=>(
-                  <button key={p} style={{...S.filterBtn,...(revPeriod===p?S.filterBtnActive:{})}} onClick={()=>{setRevPeriod(p);loadRevenue(p);}}>
-                    {p==='365'?'1Y':`${p}D`}
-                  </button>
-                ))}
+        {/* ══ CREDITS ══ */}
+        {tab === 'credits' && <div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
+            <div style={S.title}>Carbon Credits</div>
+            {failedMints.length > 0 && <button style={{ padding: '8px 14px', borderRadius: 6, border: '1px solid #f8717166', background: '#f8717111', color: '#f87171', cursor: 'pointer', fontFamily: "'DM Mono',monospace", fontSize: 10 }} onClick={retryAllMints} disabled={retryingAll}>{retryingAll ? 'RETRYING...' : `⚠ RETRY ${failedMints.length} FAILED`}</button>}
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>{['pending', 'approved', 'rejected'].map(s => <button key={s} style={{ ...S.filterBtn, ...(creditFilter === s ? S.filterActive : {}) }} onClick={() => setCreditFilter(s)}>{s.toUpperCase()}</button>)}</div>
+          {loading ? <div style={S.loading}>Loading...</div> : <div style={S.table}>
+            <div style={{ ...S.thead, gridTemplateColumns: '2fr 1fr 1.5fr 1fr 1fr 1fr 1.5fr 2fr' }}>{['USER', 'STD', 'SERIAL', 'QTY', 'VTG', 'DOC', 'MINT', 'ACTIONS'].map(h => <div key={h} style={S.th}>{h}</div>)}</div>
+            {credits.length === 0 && <div style={S.empty}>No {creditFilter} credits</div>}
+            {credits.map(c => <div key={c.id} style={{ ...S.trow, gridTemplateColumns: '2fr 1fr 1.5fr 1fr 1fr 1fr 1.5fr 2fr', ...(c.admin_status === 'approved' && !c.token_id ? { borderLeft: '2px solid #f8717133' } : {}) }}>
+              <div style={S.td}><div style={{ color: '#f0fdf4', fontSize: 11 }}>{c.full_name}</div><div style={{ color: '#f59e0bcc', fontSize: 9 }}>{c.email}</div></div>
+              <div style={{ ...S.td, fontSize: 9 }}>{c.standard}</div>
+              <div style={{ ...S.td, fontSize: 8, color: '#60a5fadd', fontFamily: 'monospace' }}>{(c.registry_serial || '—').slice(0, 14)}</div>
+              <div style={{ ...S.td, fontSize: 11, color: '#22c55e' }}>{c.quantity}</div>
+              <div style={{ ...S.td, fontSize: 9, color: '#f59e0bbb' }}>{c.vintage_year}</div>
+              <div style={S.td}>{c.doc_ipfs_hash ? <a href={`${PG}/${c.doc_ipfs_hash}`} target="_blank" rel="noreferrer" style={{ fontSize: 9, color: '#60a5fa', textDecoration: 'none' }}>↗</a> : '—'}</div>
+              <div style={S.td}><MintBadge c={c} /></div>
+              <div style={{ ...S.td, display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+                <button style={S.viewBtn} onClick={() => setModal({ type: 'credit_detail', data: c })}>DETAILS</button>
+                {c.admin_status === 'pending' && <><button style={S.approveBtn} onClick={() => setModal({ type: 'credit_approve', data: c })}>✓</button><button style={S.rejectBtn} onClick={() => setModal({ type: 'credit_reject', data: c })}>✕</button><button style={{ ...S.viewBtn, color: '#a78bfaaa' }} onClick={() => { setNewQty(String(c.quantity)); setReason(''); setModal({ type: 'qty_fix', data: c }); }}>✎QTY</button></>}
+                {c.admin_status === 'approved' && !c.token_id && <>
+                  <button style={{ padding: '3px 6px', borderRadius: 4, border: '1px solid #f8717144', background: '#f8717111', color: '#f87171', cursor: 'pointer', fontFamily: "'DM Mono',monospace", fontSize: 8 }} onClick={() => retryMint(c.id)} disabled={retryingId === c.id}>{retryingId === c.id ? '...' : '⟳'}</button>
+                  <button style={{ padding: '3px 6px', borderRadius: 4, border: '1px solid #60a5fa44', background: '#60a5fa11', color: '#60a5fa', cursor: 'pointer', fontFamily: "'DM Mono',monospace", fontSize: 8 }} onClick={() => { setManualTokenId(''); setModal({ type: 'manual_sync', data: c }); }}>✎ID</button>
+                  <button style={{ padding: '3px 6px', borderRadius: 4, border: '1px solid #a78bfa44', background: '#a78bfa11', color: '#a78bfa', cursor: 'pointer', fontFamily: "'DM Mono',monospace", fontSize: 8 }} onClick={() => handleLoadMintDiag(c.id)}>🔍WHY</button>
+                  {!c.user_wallet && <button style={{ padding: '3px 6px', borderRadius: 4, border: '1px solid #22c55e44', background: '#22c55e11', color: '#22c55e', cursor: 'pointer', fontFamily: "'DM Mono',monospace", fontSize: 8 }} onClick={() => { setAssignWallet(''); setModal({ type: 'assign_mint', data: c }); }}>🔑+⛓</button>}
+                </>}
+              </div>
+            </div>)}
+          </div>}
+        </div>}
+
+        {/* ══ RETIREMENTS ══ */}
+        {tab === 'retirements' && <div>
+          <div style={S.title}>Retirement Records</div>
+          <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
+            <input style={{ ...S.searchInput, flex: 1 }} placeholder="Search cert ID, serial, email, name..." value={retSearch} onChange={e => setRetSearch(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSearchRetirements()} />
+            <button style={{ ...S.quickBtn, borderColor: '#22c55e44', color: '#22c55e' }} onClick={handleSearchRetirements}>🔍</button>
+            {retResults !== null && <button style={S.filterBtn} onClick={() => { setRetResults(null); setRetSearch(''); }}>✕</button>}
+          </div>
+          {loading ? <div style={S.loading}>Loading...</div> : <div style={S.table}>
+            <div style={{ ...S.thead, gridTemplateColumns: '2fr 1.5fr 1fr 1fr 1fr 1fr 2fr' }}>{['USER', 'CERT ID', 'tCO₂', 'STD', 'SCOPE', 'STATUS', 'ACTIONS'].map(h => <div key={h} style={S.th}>{h}</div>)}</div>
+            {(retResults ?? retirements).length === 0 && <div style={S.empty}>{retResults !== null ? 'No results' : 'No retirements'}</div>}
+            {(retResults ?? retirements).map(r => <div key={r.id} style={{ ...S.trow, gridTemplateColumns: '2fr 1.5fr 1fr 1fr 1fr 1fr 2fr', ...(r.disputed ? { borderLeft: '2px solid #f8717133' } : {}) }}>
+              <div style={S.td}><div style={{ color: '#f0fdf4', fontSize: 11 }}>{r.full_name || '—'}</div><div style={{ color: '#f59e0bcc', fontSize: 9 }}>{r.email}</div></div>
+              <div style={{ ...S.td, fontSize: 8, color: '#22c55ecc', fontFamily: 'monospace' }}>{(r.certificate_id || '—').slice(0, 18)}</div>
+              <div style={{ ...S.td, fontSize: 11, color: '#f87171' }}>{r.amount}</div>
+              <div style={{ ...S.td, fontSize: 9 }}>{r.standard || '—'}</div>
+              <div style={{ ...S.td, fontSize: 9 }}>S{r.retire_scope || '—'}</div>
+              <div style={S.td}>{r.disputed ? <span style={{ fontSize: 9, color: '#f87171' }}>⚠ DISP</span> : <span style={{ fontSize: 9, color: '#22c55e44' }}>OK</span>}</div>
+              <div style={{ ...S.td, display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                <button style={{ ...S.viewBtn, borderColor: '#60a5fa33', color: '#60a5fa' }} onClick={() => { setRetCorrect({ retire_scope: r.retire_scope, beneficiary_name: r.beneficiary_name, beneficiary_entity: r.beneficiary_entity, beneficiary_gstin: r.beneficiary_gstin, reporting_standard: r.reporting_standard, purpose: r.purpose }); setReason(''); setModal({ type: 'correct_retirement', data: r }); }}>✎ CORRECT</button>
+                <button style={{ ...S.viewBtn, borderColor: '#22c55e33', color: '#22c55e' }} onClick={() => { setReason(''); setModal({ type: 'regen_cert', data: r }); }}>📄 REGEN</button>
+                {r.tx_hash && <a href={`https://sepolia.etherscan.io/tx/${r.tx_hash}`} target="_blank" rel="noreferrer" style={{ ...S.viewBtn, textDecoration: 'none', display: 'flex', alignItems: 'center' }}>⛓</a>}
+                {!r.disputed ? <button style={S.rejectBtn} onClick={() => { setReason(''); setModal({ type: 'flag_retirement', data: r }); }}>FLAG</button> : <button style={S.approveBtn} onClick={() => handleUnflagRetirement(r.id)}>CLEAR</button>}
+              </div>
+            </div>)}
+          </div>}
+        </div>}
+
+        {/* ══ LISTINGS ══ */}
+        {tab === 'listings' && <div>
+          <div style={S.title}>Active Listings</div>
+          {loading ? <div style={S.loading}>Loading...</div> : <div style={S.table}>
+            <div style={{ ...S.thead, gridTemplateColumns: '2fr 1.5fr 1fr 1fr 1fr 1fr 1.5fr' }}>{['SELLER', 'PROJECT', 'SERIAL', 'QTY', '₹/CR', 'STD', 'ACTIONS'].map(h => <div key={h} style={S.th}>{h}</div>)}</div>
+            {listings.length === 0 && <div style={S.empty}>No active listings</div>}
+            {listings.map(l => <div key={l.listing_id || l.batch_id} style={{ ...S.trow, gridTemplateColumns: '2fr 1.5fr 1fr 1fr 1fr 1fr 1.5fr' }}>
+              <div style={S.td}><div style={{ color: '#f0fdf4', fontSize: 11 }}>{l.seller_name || '—'}</div><div style={{ color: '#f59e0bcc', fontSize: 9 }}>{l.seller_email}</div></div>
+              <div style={{ ...S.td, fontSize: 10 }}>{l.project_name || '—'}</div>
+              <div style={{ ...S.td, fontSize: 8, color: '#60a5facc', fontFamily: 'monospace' }}>{(l.registry_serial || '—').slice(0, 14)}</div>
+              <div style={{ ...S.td, fontSize: 11, color: '#22c55e' }}>{l.amount_remaining}</div>
+              <div style={{ ...S.td, fontSize: 10 }}>₹{parseFloat(l.price_per_credit_inr || 0).toLocaleString('en-IN')}</div>
+              <div style={S.td}><Badge status={l.standard || 'VCS'} /></div>
+              <div style={{ ...S.td, display: 'flex', gap: 4 }}>
+                <button style={{ ...S.viewBtn, borderColor: '#f59e0b33', color: '#f59e0b' }} onClick={() => { setPriceOverride(''); setReason(''); setModal({ type: 'price_override', data: l }); }}>₹ PRICE</button>
+                <button style={S.rejectBtn} onClick={() => { setReason(''); setModal({ type: 'force_delist', data: l }); }}>DELIST</button>
+              </div>
+            </div>)}
+          </div>}
+        </div>}
+
+        {/* ══ BUY ORDERS ══ */}
+        {tab === 'buyorders' && <div>
+          <div style={S.title}>Buy Orders</div>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>{['open', 'cancelled', 'filled', 'all'].map(s => <button key={s} style={{ ...S.filterBtn, ...(buyOrderFilter === s ? S.filterActive : {}) }} onClick={() => { setBuyOrderFilter(s); loadBuyOrders(s === 'all' ? undefined : s); }}>{s.toUpperCase()}</button>)}</div>
+          {loading ? <div style={S.loading}>Loading...</div> : <div style={S.table}>
+            <div style={{ ...S.thead, gridTemplateColumns: '2fr 1.5fr 1fr 1fr 1fr 1fr 1fr 1.5fr' }}>{['BUYER', 'PROJECT', 'TOKEN', 'AMOUNT', 'FILLED', 'LIMIT₹', 'ETH ESC.', 'ACTIONS'].map(h => <div key={h} style={S.th}>{h}</div>)}</div>
+            {buyOrders.length === 0 && <div style={S.empty}>No {buyOrderFilter} buy orders</div>}
+            {buyOrders.map(o => <div key={o.id} style={{ ...S.trow, gridTemplateColumns: '2fr 1.5fr 1fr 1fr 1fr 1fr 1fr 1.5fr', ...(o.status === 'open' ? { borderLeft: '2px solid #f59e0b33' } : {}) }}>
+              <div style={S.td}><div style={{ color: '#f0fdf4', fontSize: 11 }}>{o.buyer_name || '—'}</div><div style={{ color: '#f59e0bcc', fontSize: 9 }}>{o.buyer_email}</div></div>
+              <div style={{ ...S.td, fontSize: 10 }}>{o.project_name || '—'}</div>
+              <div style={{ ...S.td, fontSize: 10, color: '#60a5fa' }}>#{o.token_id}</div>
+              <div style={{ ...S.td, fontSize: 11, color: '#22c55e' }}>{o.amount}t</div>
+              <div style={{ ...S.td, fontSize: 11 }}>{o.amount_filled || 0}t</div>
+              <div style={{ ...S.td, fontSize: 10 }}>₹{parseFloat(o.limit_price_inr || 0).toLocaleString('en-IN')}</div>
+              <div style={{ ...S.td, fontSize: 10, color: '#f59e0b' }}>{parseFloat(o.eth_escrowed || 0).toFixed(4)}</div>
+              <div style={{ ...S.td, display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+                <Badge status={o.status} />
+                {o.status === 'open' && <>
+                  <button style={S.rejectBtn} onClick={() => { setReason(''); setModal({ type: 'cancel_order', data: o }); }}>CANCEL (DB)</button>
+                  <button style={{ ...S.rejectBtn, borderColor: '#f9731644', background: '#f9731611', color: '#f97316' }} onClick={() => { setReason(''); setModal({ type: 'cancel_order_onchain', data: o }); }}>⛓ CANCEL+REFUND</button>
+                </>}
+              </div>
+            </div>)}
+          </div>}
+        </div>}
+
+        {/* ══ TRADES ══ */}
+        {tab === 'trades' && <div>
+          <div style={S.title}>Trade Records</div>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>{['completed', 'pending', 'failed'].map(s => <button key={s} style={{ ...S.filterBtn, ...(tradeFilter === s ? S.filterActive : {}) }} onClick={() => { setTradeFilter(s); loadTrades(s); }}>{s.toUpperCase()}</button>)}</div>
+          {loading ? <div style={S.loading}>Loading...</div> : <div style={S.table}>
+            <div style={{ ...S.thead, gridTemplateColumns: '1.5fr 1.5fr 1.5fr 1fr 1fr 1fr 1fr 1.5fr' }}>{['BUYER', 'SELLER', 'PROJECT', 'QTY', 'PRICE', 'TOTAL', 'STATUS', 'ACTIONS'].map(h => <div key={h} style={S.th}>{h}</div>)}</div>
+            {trades.length === 0 && <div style={S.empty}>No {tradeFilter} trades</div>}
+            {trades.map(t => <div key={t.id} style={{ ...S.trow, gridTemplateColumns: '1.5fr 1.5fr 1.5fr 1fr 1fr 1fr 1fr 1.5fr' }}>
+              <div style={S.td}><div style={{ color: '#f0fdf4', fontSize: 10 }}>{t.buyer_name || '—'}</div><div style={{ color: '#f59e0bcc', fontSize: 8 }}>{t.buyer_email}</div></div>
+              <div style={S.td}><div style={{ color: '#f0fdf4', fontSize: 10 }}>{t.seller_name || '—'}</div><div style={{ color: '#f59e0bcc', fontSize: 8 }}>{t.seller_email}</div></div>
+              <div style={{ ...S.td, fontSize: 10 }}>{t.project_name || '—'}<div style={{ fontSize: 8, color: '#f59e0b44' }}>{t.standard}</div></div>
+              <div style={{ ...S.td, fontSize: 11, color: '#22c55e' }}>{t.quantity}t</div>
+              <div style={{ ...S.td, fontSize: 10 }}>₹{parseFloat(t.price_per_credit_inr || 0).toLocaleString('en-IN')}</div>
+              <div style={{ ...S.td, fontSize: 10 }}>₹{parseFloat(t.subtotal_inr || 0).toLocaleString('en-IN')}</div>
+              <div style={S.td}><Badge status={t.status} /></div>
+              <div style={{ ...S.td, display: 'flex', gap: 4 }}>
+                {t.tx_hash && <a href={`https://sepolia.etherscan.io/tx/${t.tx_hash}`} target="_blank" rel="noreferrer" style={{ ...S.viewBtn, textDecoration: 'none', display: 'flex', alignItems: 'center' }}>⛓</a>}
+                {t.status === 'completed' && <button style={{ ...S.viewBtn, borderColor: '#22c55e33', color: '#22c55e' }} onClick={() => { setReason(''); setModal({ type: 'reconcile_trade', data: t }); }}>RECONCILE</button>}
+              </div>
+            </div>)}
+          </div>}
+        </div>}
+
+        {/* ══ ACCOUNTS ══ */}
+        {tab === 'accounts' && <div>
+          <div style={S.title}>Account Management</div>
+          {kycExpiring.length > 0 && <div style={{ ...S.section, marginBottom: 14, border: '1px solid #f59e0b33', background: '#0d0800' }}>
+            <div style={{ fontSize: 9, color: '#f59e0b', letterSpacing: '.14em', marginBottom: 8 }}>⚠ KYC EXPIRING WITHIN 90 DAYS</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(240px,1fr))', gap: 7 }}>
+              {kycExpiring.map(u => <div key={u.id} style={{ padding: '9px 12px', background: '#0a0800', border: '1px solid #f59e0b22', borderRadius: 7, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 7 }}>
+                <div><div style={{ fontSize: 11, color: '#f0fdf4' }}>{u.full_name}</div><div style={{ fontSize: 8, color: '#f59e0b88', marginTop: 2 }}>{u.days_left}d · {fmt(u.kyc_expires_at)}</div></div>
+                <button style={{ ...S.viewBtn, borderColor: '#f59e0b33', color: '#f59e0b' }} onClick={() => handleKycReminder(u.id, u.email)}>📧</button>
+              </div>)}
+            </div>
+          </div>}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+            <input style={S.searchInput} placeholder="Search name or email..." value={userSearch} onChange={e => setUserSearch(e.target.value)} onKeyDown={e => e.key === 'Enter' && loadUsers()} />
+            {['', 'frozen', 'verified', 'pending'].map(s => <button key={s} style={{ ...S.filterBtn, ...(userFilter === s ? S.filterActive : {}) }} onClick={() => setUserFilter(s)}>{s || 'ALL'}</button>)}
+          </div>
+          {loading ? <div style={S.loading}>Loading...</div> : <div style={S.table}>
+            <div style={{ ...S.thead, gridTemplateColumns: '2fr 1.5fr 1fr 1fr 1fr 3fr' }}>{['USER', 'WALLET', 'KYC', 'STATUS', 'JOINED', 'ACTIONS'].map(h => <div key={h} style={S.th}>{h}</div>)}</div>
+            {users.length === 0 && <div style={S.empty}>No users found</div>}
+            {users.map(u => <div key={u.id} style={{ ...S.trow, gridTemplateColumns: '2fr 1.5fr 1fr 1fr 1fr 3fr' }}>
+              <div style={S.td}><div style={{ color: u.frozen ? '#f87171' : '#f0fdf4', fontSize: 11 }}>{u.full_name || '—'}{u.frozen && ' 🔒'}</div><div style={{ color: '#f59e0bcc', fontSize: 9 }}>{u.email}</div></div>
+              <div style={{ ...S.td, fontSize: 8, color: '#60a5facc', fontFamily: 'monospace' }}>{u.wallet_address ? `${u.wallet_address.slice(0, 6)}...${u.wallet_address.slice(-4)}` : '—'}</div>
+              <div style={S.td}><Badge status={u.kyc_status || 'pending'} /></div>
+              <div style={S.td}><Badge status={u.frozen ? 'frozen' : 'active'} /></div>
+              <div style={{ ...S.td, fontSize: 8, color: '#f59e0bbb' }}>{fmt(u.created_at)}</div>
+              <div style={{ ...S.td, display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+                <button style={S.viewBtn} onClick={() => { loadUserData(u.id); setModal({ type: 'user_detail', data: u }); }}>VIEW</button>
+                <button style={{ ...S.viewBtn, borderColor: '#22c55e33', color: '#22c55eaa' }} onClick={() => { loadUserData(u.id); setModal({ type: 'user_history', data: u }); }}>HISTORY</button>
+                <button style={{ ...S.viewBtn, borderColor: '#f59e0b33', color: '#f59e0baa' }} onClick={() => { setMsgSubject(''); setMsgBody(''); setModal({ type: 'send_msg', data: u }); }}>📧</button>
+                {!u.frozen ? <button style={S.rejectBtn} onClick={() => setModal({ type: 'freeze', data: u })}>FREEZE</button> : <button style={S.approveBtn} onClick={() => setModal({ type: 'unfreeze', data: u })}>UNFREEZE</button>}
+                <button style={{ ...S.viewBtn, borderColor: '#60a5fa33', color: '#60a5faaa' }} onClick={() => { setNewWallet(''); setReason(''); setModal({ type: 'reassign_wallet', data: u }); }}>🔑</button>
+                <button style={{ ...S.viewBtn, borderColor: '#a78bfa33', color: '#a78bfaaa' }} onClick={() => handleResync(u.id)}>🔄</button>
+                <button style={{ ...S.viewBtn, borderColor: '#f59e0b33', color: '#f59e0baa' }} onClick={() => { setReason(''); setModal({ type: 'rekyc', data: u }); }}>↻KYC</button>
+                <button style={{ ...S.rejectBtn, fontSize: 7, padding: '2px 4px', opacity: .7 }} onClick={() => { setReason(''); setModal({ type: 'delete_user', data: u }); }}>DEL</button>
+              </div>
+            </div>)}
+          </div>}
+        </div>}
+
+        {/* ══ PROJECTS ══ */}
+        {tab === 'projects' && <div>
+          <div style={S.title}>Project Registry</div>
+          {loading ? <div style={S.loading}>Loading...</div> : <div style={S.table}>
+            <div style={{ ...S.thead, gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr 1fr 1fr' }}>{['PROJECT', 'STD', 'BATCHES', 'TOTAL', 'AVAIL', 'RETIRED', 'MINTED'].map(h => <div key={h} style={S.th}>{h}</div>)}</div>
+            {projects.length === 0 && <div style={S.empty}>No projects</div>}
+            {projects.map(p => <div key={p.id} style={{ ...S.trow, gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr 1fr 1fr' }}>
+              <div style={S.td}><div style={{ color: '#f0fdf4', fontSize: 11 }}>{p.project_name}</div><div style={{ color: '#f59e0bcc', fontSize: 8 }}>{p.project_code} · {p.developer_name || '—'}</div></div>
+              <div style={S.td}><Badge status={p.standard} /></div>
+              <div style={{ ...S.td, fontSize: 11 }}>{p.batch_count}</div>
+              <div style={{ ...S.td, fontSize: 11, color: '#f0fdf4' }}>{parseInt(p.total_credits).toLocaleString()}</div>
+              <div style={{ ...S.td, fontSize: 11, color: '#22c55e' }}>{parseInt(p.available_credits).toLocaleString()}</div>
+              <div style={{ ...S.td, fontSize: 11, color: '#f87171' }}>{parseInt(p.retired_credits).toLocaleString()}</div>
+              <div style={{ ...S.td, fontSize: 11, color: p.minted_batches > 0 ? '#22c55e' : '#f59e0baa' }}>{p.minted_batches}/{p.batch_count}</div>
+            </div>)}
+          </div>}
+        </div>}
+
+        {/* ══ REVENUE ══ */}
+        {tab === 'revenue' && <div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
+            <div style={S.title}>Revenue & Fee Dashboard</div>
+            <div style={{ display: 'flex', gap: 7 }}>{['7', '30', '90', '365'].map(p => <button key={p} style={{ ...S.filterBtn, ...(revPeriod === p ? S.filterActive : {}) }} onClick={() => { setRevPeriod(p); loadRevenue(p); }}>{p === '365' ? '1Y' : `${p}D`}</button>)}</div>
+          </div>
+          {loading || !revenue ? <div style={S.loading}>Loading...</div> : <>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 16 }}>
+              {[{ l: `FEES(${revPeriod}D)`, v: fmtINR(revenue.summary?.period_fees_inr), c: '#22c55e' }, { l: 'TOTAL FEES', v: fmtINR(revenue.summary?.total_fees_inr), c: '#22c55e' }, { l: 'VOLUME', v: fmtINR(revenue.summary?.total_volume_inr), c: '#60a5fa' }, { l: 'CREDITS TRADED', v: `${parseInt(revenue.summary?.total_credits_traded || 0).toLocaleString()}t`, c: '#f59e0b' }, { l: 'TOTAL TRADES', v: revenue.summary?.total_trades || 0, c: '#a78bfa' }, { l: `ACTIVE USERS(${revPeriod}D)`, v: revenue.activeUsers || 0, c: '#34d399' }].map(({ l, v, c }) => (
+                <div key={l} style={{ ...S.statCard, padding: '11px' }}><div style={{ fontSize: 16, fontWeight: 700, color: c, marginBottom: 3 }}>{v}</div><div style={{ fontSize: 8, color: '#f59e0bcc', letterSpacing: '.1em' }}>{l}</div></div>
+              ))}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
+              <div style={S.section}><div style={S.secTitle}>FEES BY MONTH</div>{(revenue.feesByMonth || []).map(m => <div key={m.month} style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: '1px solid #f59e0b08' }}><span style={{ fontSize: 10, color: '#f59e0bcc' }}>{m.month}</span><div style={{ textAlign: 'right' }}><div style={{ fontSize: 10, color: '#22c55e' }}>{fmtINR(m.fees_inr)}</div><div style={{ fontSize: 8, color: '#f59e0b44' }}>{m.trades} trades</div></div></div>)}</div>
+              <div style={S.section}><div style={S.secTitle}>RETIREMENTS BY MONTH</div>{(revenue.retirementsByMonth || []).map(m => <div key={m.month} style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: '1px solid #f59e0b08' }}><span style={{ fontSize: 10, color: '#f59e0bcc' }}>{m.month}</span><div style={{ textAlign: 'right' }}><div style={{ fontSize: 10, color: '#f87171' }}>{parseInt(m.tco2).toLocaleString()}t</div><div style={{ fontSize: 8, color: '#f59e0b44' }}>{m.count} certs</div></div></div>)}</div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+              <div style={S.section}><div style={S.secTitle}>TOP 10 TRADERS</div>{(revenue.topTraders || []).map((t, i) => <div key={t.email} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0', borderBottom: '1px solid #f59e0b08' }}><div><span style={{ fontSize: 8, color: '#f59e0b44', marginRight: 5 }}>#{i + 1}</span><span style={{ fontSize: 11, color: '#f0fdf4' }}>{t.full_name || t.email}</span><div style={{ fontSize: 8, color: '#f59e0b44' }}>{t.trade_count} trades</div></div><div style={{ fontSize: 11, color: '#22c55e' }}>{fmtINR(t.volume_inr)}</div></div>)}</div>
+              <div style={S.section}><div style={S.secTitle}>CREDITS BY STANDARD</div>{(revenue.creditsByStandard || []).map(s => <div key={s.standard} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0', borderBottom: '1px solid #f59e0b08' }}><div><Badge status={s.standard} /><span style={{ fontSize: 8, color: '#f59e0b44', marginLeft: 5 }}>{s.batches} batches</span></div><div style={{ fontSize: 11, color: '#f0fdf4' }}>{parseInt(s.total_credits).toLocaleString()}t</div></div>)}</div>
+            </div>
+          </>}
+        </div>}
+
+        {/* ══ CHAIN HEALTH ══ */}
+        {tab === 'health' && <div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+            <div style={S.title}>🩺 On-Chain Health Monitor</div>
+            <button style={{ ...S.quickBtn, borderColor: '#22c55e44', color: '#22c55e' }} onClick={loadHealth} disabled={healthLoading}>{healthLoading ? '⟳ Checking...' : '↻ REFRESH'}</button>
+          </div>
+          {healthLoading && !health ? <div style={S.loading}>Connecting to Sepolia...</div> : health && <>
+            {health.minterWallet && !health.minterWallet.ok && <div style={{ padding: '12px 16px', background: '#1a0707', border: '1px solid #f8717133', borderRadius: 8, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 22 }}>🚨</span>
+              <div><div style={{ fontSize: 13, color: '#f87171', fontWeight: 700 }}>MINTER WALLET LOW — Mints will fail</div><div style={{ fontSize: 10, color: '#f8717188', marginTop: 3 }}>{health.minterWallet.balanceEth} ETH · Need &gt;0.01 · <a href="https://faucet.sepolia.dev" target="_blank" rel="noreferrer" style={{ color: '#60a5fa' }}>Faucet↗</a></div></div>
+            </div>}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 10, marginBottom: 16 }}>
+              {[{ l: 'RPC', v: health.rpcConnected ? 'CONNECTED' : 'DOWN', c: health.rpcConnected ? '#22c55e' : '#f87171', i: health.rpcConnected ? '✅' : '❌' }, { l: 'MINTER ETH', v: health.minterWallet?.balanceEth != null ? `${health.minterWallet.balanceEth} ETH` : '?', c: health.minterWallet?.ok ? '#22c55e' : '#f87171', i: '💰' }, { l: 'CHAIN ID', v: health.chainId ? `#${health.chainId}` : '?', c: '#60a5fa', i: '⛓' }, { l: 'PENDING', v: health.pendingMints ?? '—', c: (health.pendingMints ?? 0) > 0 ? '#f59e0b' : '#22c55e', i: '⏳' }, { l: 'FAILED', v: health.failedMints ?? '—', c: (health.failedMints ?? 0) > 0 ? '#f87171' : '#22c55e', i: '❌' }, { l: 'LAST MINT', v: health.lastMint ? fmt(health.lastMint.tokenised_at) : 'Never', c: '#f0fdf4', i: '🕐' }].map(({ l, v, c, i }) => (
+                <div key={l} style={{ ...S.statCard, padding: '12px' }}><div style={{ fontSize: 18, marginBottom: 4 }}>{i}</div><div style={{ fontSize: 14, fontWeight: 700, color: c, marginBottom: 2 }}>{v}</div><div style={{ fontSize: 8, color: '#f59e0bcc', letterSpacing: '.1em' }}>{l}</div></div>
+              ))}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+              <div style={S.section}><div style={S.secTitle}>CONTRACT ADDRESSES</div>
+                {[['Token', health.contractAddress], ['Marketplace', health.marketplaceAddress], ['Minter', health.minterWallet?.address]].map(([label, addr]) => <div key={label} style={{ padding: '6px 0', borderBottom: '1px solid #f59e0b08' }}><div style={{ fontSize: 8, color: '#f59e0baa', letterSpacing: '.1em', marginBottom: 2 }}>{label}</div>{addr ? <a href={`https://sepolia.etherscan.io/address/${addr}`} target="_blank" rel="noreferrer" style={{ fontSize: 8, color: '#60a5fa', fontFamily: 'monospace', textDecoration: 'none', wordBreak: 'break-all' }}>{addr}</a> : <span style={{ fontSize: 8, color: '#f8717188' }}>Not configured</span>}</div>)}
+              </div>
+              <div style={S.section}><div style={S.secTitle}>QUICK ACTIONS</div>
+                <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', marginBottom: 12 }}>
+                  <a href="https://faucet.sepolia.dev" target="_blank" rel="noreferrer" style={{ ...S.quickBtn, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', fontSize: 9 }}>💧 FAUCET↗</a>
+                  <a href={`https://sepolia.etherscan.io/address/${health.minterWallet?.address}`} target="_blank" rel="noreferrer" style={{ ...S.quickBtn, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', fontSize: 9 }}>🔍 MINTER↗</a>
+                  <button style={{ ...S.quickBtn, borderColor: '#f87171', color: '#f87171', fontSize: 9 }} onClick={() => setTab('credits')}>⚠ FAILED MINTS</button>
+                </div>
+                {health.lastMint && <><div style={M.row}><span style={M.key}>Last Token</span><span style={{ ...M.val, color: '#22c55e' }}>#{health.lastMint.token_id}</span></div><div style={M.row}><span style={M.key}>Project</span><span style={M.val}>{health.lastMint.project_name}</span></div><div style={M.row}><span style={M.key}>At</span><span style={M.val}>{fmtT(health.lastMint.tokenised_at)}</span></div></>}
               </div>
             </div>
-            {loading||!revenue?<div style={S.loading}>Loading...</div>:(
-              <>
-                {/* Summary cards */}
-                <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:24}}>
+          </>}
+        </div>}
+
+        {/* ══ BLACKLIST ══ */}
+        {tab === 'blacklist' && <div>
+          <div style={S.title}>Serial Number Blacklist</div>
+          <div style={{ ...S.section, marginBottom: 14 }}><div style={S.secTitle}>BLACKLIST NEW SERIAL</div>
+            <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap' }}>
+              <input style={{ ...S.searchInput, minWidth: 200 }} placeholder="Serial number" value={newSerial} onChange={e => setNewSerial(e.target.value)} />
+              <input style={{ ...S.searchInput, flex: 1 }} placeholder="Reason..." value={reason} onChange={e => setReason(e.target.value)} />
+              <button style={{ ...S.quickBtn, borderColor: '#f87171', color: '#f87171' }} onClick={handleBlacklistSerial}>🚫 BLACKLIST</button>
+            </div>
+          </div>
+          {loading ? <div style={S.loading}>Loading...</div> : <div style={S.table}>
+            <div style={{ ...S.thead, gridTemplateColumns: '2fr 3fr 1.5fr 1fr' }}>{['SERIAL', 'REASON', 'BY', 'ACTION'].map(h => <div key={h} style={S.th}>{h}</div>)}</div>
+            {blacklist.length === 0 && <div style={S.empty}>No blacklisted serials</div>}
+            {blacklist.map(b => <div key={b.serial_number} style={{ ...S.trow, gridTemplateColumns: '2fr 3fr 1.5fr 1fr' }}>
+              <div style={{ ...S.td, fontSize: 9, color: '#f87171', fontFamily: 'monospace' }}>{b.serial_number}</div>
+              <div style={{ ...S.td, fontSize: 10, color: '#f59e0bbb' }}>{b.reason}</div>
+              <div style={{ ...S.td, fontSize: 9, color: '#f59e0b88' }}>{b.blacklisted_by_email || '—'}</div>
+              <div style={S.td}><button style={S.approveBtn} onClick={() => handleUnblacklist(b.serial_number)}>REMOVE</button></div>
+            </div>)}
+          </div>}
+        </div>}
+
+        {/* ══ ANNOUNCEMENTS ══ */}
+        {tab === 'announcements' && <div>
+          <div style={S.title}>Announcements & Messaging</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 20 }}>
+            <div style={S.section}><div style={S.secTitle}>📢 BROADCAST TO ALL USERS</div>
+              <input style={{ ...S.searchInput, width: '100%', marginBottom: 10 }} placeholder="Subject/Title" value={annTitle} onChange={e => setAnnTitle(e.target.value)} />
+              <textarea style={{ ...M.ta, marginBottom: 10 }} placeholder="Message body..." value={annMsg} onChange={e => setAnnMsg(e.target.value)} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}><input type="checkbox" id="ae" checked={annEmail} onChange={e => setAnnEmail(e.target.checked)} /><label htmlFor="ae" style={{ fontSize: 10, color: '#f59e0bcc' }}>Also send email</label></div>
+              <button style={{ ...S.quickBtn, borderColor: '#f59e0b66', color: '#f59e0b', width: '100%', textAlign: 'center', opacity: broadcasting ? .5 : 1 }} onClick={handleBroadcast} disabled={broadcasting}>{broadcasting ? '⟳ BROADCASTING...' : `📢 BROADCAST${annEmail ? ' + EMAIL' : ' (IN-APP)'}`}</button>
+            </div>
+            <div style={S.section}><div style={S.secTitle}>🪧 PLATFORM BANNER</div>
+              <input style={{ ...S.searchInput, width: '100%', marginBottom: 10 }} placeholder="Banner title" value={annTitle} onChange={e => setAnnTitle(e.target.value)} />
+              <textarea style={{ ...M.ta, marginBottom: 10, minHeight: 60 }} placeholder="Banner message..." value={annMsg} onChange={e => setAnnMsg(e.target.value)} />
+              <select style={{ ...S.searchInput, width: '100%', marginBottom: 12 }} value={annType} onChange={e => setAnnType(e.target.value)}>
+                <option value="info">ℹ Info</option><option value="warning">⚠ Warning</option><option value="critical">🚨 Critical</option><option value="success">✅ Success</option>
+              </select>
+              <button style={{ ...S.quickBtn, borderColor: '#60a5fa44', color: '#60a5fa', width: '100%', textAlign: 'center' }} onClick={handleSaveBanner}>🪧 SAVE BANNER</button>
+            </div>
+          </div>
+          <div style={S.secTitle}>ACTIVE BANNERS</div>
+          {announcements.length === 0 ? <div style={S.empty}>No active banners</div> : announcements.map(a => <div key={a.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', marginBottom: 7, background: '#0d0a00', border: '1px solid #f59e0b22', borderRadius: 8 }}>
+            <div><div style={{ fontSize: 11, color: '#f0fdf4', fontWeight: 600 }}>{a.title}</div><div style={{ fontSize: 10, color: '#f59e0baa', marginTop: 2 }}>{a.message?.slice(0, 80)}...</div><div style={{ fontSize: 9, color: '#f59e0b44', marginTop: 2 }}>{fmt(a.created_at)} · {a.type?.toUpperCase()}</div></div>
+            <button style={S.rejectBtn} onClick={() => handleDeleteAnn(a.id)}>REMOVE</button>
+          </div>)}
+        </div>}
+
+        {/* ══ DISPUTES ══ */}
+        {tab === 'disputes' && <div>
+          <div style={S.title}>Disputes</div>
+          <button style={{ ...S.quickBtn, marginBottom: 14 }} onClick={() => setModal({ type: 'new_dispute' })}>+ OPEN DISPUTE</button>
+          {loading ? <div style={S.loading}>Loading...</div> : <div style={S.table}>
+            <div style={{ ...S.thead, gridTemplateColumns: 'repeat(5,1fr)' }}>{['TARGET', 'REASON', 'STATUS', 'OPENED', 'ACTIONS'].map(h => <div key={h} style={S.th}>{h}</div>)}</div>
+            {disputes.length === 0 && <div style={S.empty}>No disputes</div>}
+            {disputes.map(d => <div key={d.id} style={{ ...S.trow, gridTemplateColumns: 'repeat(5,1fr)' }}>
+              <div style={S.td}><div style={{ color: '#f0fdf4', fontSize: 11 }}>{d.target_name || '—'}</div><div style={{ color: '#f59e0bcc', fontSize: 9 }}>{d.target_email}</div></div>
+              <div style={{ ...S.td, fontSize: 10, color: '#f59e0bdd' }}>{d.reason?.slice(0, 60)}</div>
+              <div style={S.td}><Badge status={d.status} /></div>
+              <div style={{ ...S.td, fontSize: 9, color: '#f59e0bbb' }}>{fmt(d.created_at)}</div>
+              <div style={S.td}>{d.status === 'open' && <button style={S.approveBtn} onClick={() => setModal({ type: 'resolve_dispute', data: d })}>RESOLVE</button>}</div>
+            </div>)}
+          </div>}
+        </div>}
+
+        {/* ══ AUDIT ══ */}
+        {tab === 'audit' && <div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+            <div style={S.title}>Audit Log</div>
+            <button style={{ ...S.quickBtn, borderColor: '#22c55e44', color: '#22c55e' }} onClick={handleExportAudit}>↓ EXPORT CSV</button>
+          </div>
+          {loading ? <div style={S.loading}>Loading...</div> : <div style={S.table}>
+            <div style={{ ...S.thead, gridTemplateColumns: 'repeat(4,1fr)' }}>{['ACTION', 'TARGET', 'DETAILS', 'TIMESTAMP'].map(h => <div key={h} style={S.th}>{h}</div>)}</div>
+            {audit.length === 0 && <div style={S.empty}>No entries</div>}
+            {audit.map(a => <div key={a.id} style={{ ...S.trow, gridTemplateColumns: 'repeat(4,1fr)' }}>
+              <div style={S.td}><span style={{ fontSize: 8, padding: '2px 7px', borderRadius: 20, background: '#1a0f0066', border: '1px solid #f59e0b66', color: '#f59e0b' }}>{a.action}</span></div>
+              <div style={S.td}><div style={{ fontSize: 11, color: '#f0fdf4' }}>{a.target_name || '—'}</div><div style={{ fontSize: 9, color: '#f59e0bcc' }}>{a.target_email}</div></div>
+              <div style={{ ...S.td, fontSize: 9, color: '#f59e0bbb', maxWidth: 220 }}>{a.details}</div>
+              <div style={{ ...S.td, fontSize: 9, color: '#f59e0baa' }}>{fmtT(a.created_at)}</div>
+            </div>)}
+          </div>}
+        </div>}
+
+        {/* ══ COMPLIANCE ══ */}
+        {tab === 'compliance' && <div>
+          <div style={S.title}>🛡 Compliance Dashboard</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 14 }}>
+            {[{ l: 'OPEN FLAGS', v: compStats.openFlags, c: '#f59e0b', i: '🚩' }, { l: 'CRITICAL', v: compStats.criticalFlags, c: '#f87171', i: '🚨' }, { l: 'TOTAL TDS', v: fmtINR(compStats.totalTds), c: '#60a5fa', i: '📋' }, { l: 'FEMA CONV.', v: compStats.totalConversions, c: '#a78bfa', i: '🔄' }].map(({ l, v, c, i }) => (
+              <div key={l} style={{ ...S.statCard, padding: '12px' }}><div style={{ fontSize: 18, marginBottom: 4 }}>{i}</div><div style={{ fontSize: 18, fontWeight: 700, color: c, marginBottom: 2 }}>{v}</div><div style={{ fontSize: 8, color: '#f59e0bcc', letterSpacing: '.12em' }}>{l}</div></div>
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 14, borderBottom: '1px solid #f59e0b11' }}>
+            {[{ id: 'flags', l: '🚩 Flags' }, { id: 'tds', l: '📋 TDS' }, { id: 'fema', l: '🔄 FEMA' }, { id: 'config', l: '⚙️ Config' }].map(t => (
+              <button key={t.id} style={{ padding: '8px 14px', border: 'none', background: 'transparent', cursor: 'pointer', fontFamily: "'DM Mono',monospace", fontSize: 10, borderBottom: `2px solid ${compTab === t.id ? '#f59e0b' : 'transparent'}`, color: compTab === t.id ? '#f59e0b' : '#f59e0bcc', marginBottom: -1 }} onClick={() => setCompTab(t.id)}>{t.l}</button>
+            ))}
+          </div>
+          {compTab === 'flags' && <div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+              {['all', 'open', 'reviewed', 'cleared', 'escalated'].map(s => <button key={s} style={{ ...S.filterBtn, ...(flagFilter === s ? S.filterActive : {}) }} onClick={() => setFlagFilter(s)}>{s.toUpperCase()}</button>)}
+              <span style={{ marginLeft: 8, fontSize: 9, color: '#f59e0baa' }}>SEV:</span>
+              {['', 'low', 'medium', 'high', 'critical'].map(s => <button key={s} style={{ ...S.filterBtn, ...(flagSeverity === s ? S.filterActive : {}) }} onClick={() => setFlagSeverity(s)}>{s || 'ALL'}</button>)}
+            </div>
+            {compLoading ? <div style={S.loading}>Loading...</div> : <div style={S.table}>
+              <div style={{ ...S.thead, gridTemplateColumns: '1.5fr 1fr 1fr 1fr 2fr 1fr 1fr' }}>{['USER', 'FLAG', 'AMOUNT', 'SEV', 'DESC', 'STATUS', 'ACTIONS'].map(h => <div key={h} style={S.th}>{h}</div>)}</div>
+              {compFlags.length === 0 && <div style={S.empty}>No flags</div>}
+              {compFlags.map(f => <div key={f.id} style={{ ...S.trow, gridTemplateColumns: '1.5fr 1fr 1fr 1fr 2fr 1fr 1fr', ...(f.severity === 'critical' && f.status === 'open' ? { borderLeft: '2px solid #f8717133' } : {}) }}>
+                <div style={S.td}><div style={{ color: '#f0fdf4', fontSize: 11 }}>{f.full_name || '—'}</div><div style={{ color: '#f59e0bcc', fontSize: 9 }}>{f.email}</div></div>
+                <div style={S.td}><span style={{ fontSize: 9, padding: '2px 6px', borderRadius: 4, background: '#1a0f0066', border: '1px solid #f59e0b33', color: '#f59e0b' }}>{f.flag_type}</span></div>
+                <div style={{ ...S.td, fontSize: 11 }}>{f.amount ? `₹${parseFloat(f.amount).toLocaleString('en-IN')}` : '—'}</div>
+                <div style={S.td}><span style={{ fontSize: 9, padding: '2px 6px', borderRadius: 4, border: `1px solid ${({ low: '#22c55e', medium: '#f59e0b', high: '#f97316', critical: '#f87171' }[f.severity] || '#f59e0b')}33`, color: ({ low: '#22c55e', medium: '#f59e0b', high: '#f97316', critical: '#f87171' }[f.severity] || '#f59e0b') }}>{f.severity?.toUpperCase()}</span></div>
+                <div style={{ ...S.td, fontSize: 9, color: '#f59e0bbb' }}>{f.description?.slice(0, 70)}</div>
+                <div style={S.td}><Badge status={f.status} /></div>
+                <div style={{ ...S.td, display: 'flex', gap: 4 }}>
+                  {f.status === 'open' && <><button style={S.approveBtn} onClick={() => setModal({ type: 'flag_review', data: f, action: 'cleared' })}>CLEAR</button><button style={{ ...S.rejectBtn, fontSize: 8, padding: '3px 5px' }} onClick={() => setModal({ type: 'flag_review', data: f, action: 'escalated' })}>ESC</button></>}
+                  {f.status !== 'open' && <button style={S.viewBtn} onClick={() => setModal({ type: 'flag_detail', data: f })}>VIEW</button>}
+                </div>
+              </div>)}
+            </div>}
+          </div>}
+          {compTab === 'tds' && <div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>{['', '2024-25', '2025-26', '2026-27'].map(fy => <button key={fy} style={{ ...S.filterBtn, ...(fyFilter === fy ? S.filterActive : {}) }} onClick={() => setFyFilter(fy)}>{fy || 'ALL'}</button>)}</div>
+            {compLoading ? <div style={S.loading}>Loading...</div> : <div style={S.table}>
+              <div style={{ ...S.thead, gridTemplateColumns: '1.5fr 1fr 1fr 1fr 1fr 1fr 1fr' }}>{['USER', 'FY/QTR', 'GROSS', 'TDS 1%', 'NET', 'PAN', 'STATUS'].map(h => <div key={h} style={S.th}>{h}</div>)}</div>
+              {compTDS.length === 0 && <div style={S.empty}>No TDS records</div>}
+              {compTDS.map(t => <div key={t.id} style={{ ...S.trow, gridTemplateColumns: '1.5fr 1fr 1fr 1fr 1fr 1fr 1fr' }}>
+                <div style={S.td}><div style={{ fontSize: 11, color: '#f0fdf4' }}>{t.full_name || '—'}</div><div style={{ fontSize: 9, color: '#f59e0bcc' }}>{t.email}</div></div>
+                <div style={S.td}><div style={{ fontSize: 10 }}>{t.financial_year}</div><div style={{ fontSize: 9, color: '#f59e0bcc' }}>{t.quarter}</div></div>
+                <div style={{ ...S.td, fontSize: 11 }}>{fmtINR(t.transaction_amount)}</div>
+                <div style={{ ...S.td, fontSize: 11, color: '#f87171', fontWeight: 600 }}>{fmtINR(t.tds_amount)}</div>
+                <div style={{ ...S.td, fontSize: 11, color: '#22c55e' }}>{fmtINR(t.net_amount)}</div>
+                <div style={{ ...S.td, fontSize: 9, color: '#60a5facc', fontFamily: 'monospace' }}>{t.pan || '—'}</div>
+                <div style={S.td}><Badge status={t.status} /></div>
+              </div>)}
+            </div>}
+          </div>}
+          {compTab === 'fema' && <div>
+            {compLoading ? <div style={S.loading}>Loading...</div> : <div style={S.table}>
+              <div style={{ ...S.thead, gridTemplateColumns: '1.5fr 1fr 1fr 1fr 1fr 1.5fr 1fr' }}>{['USER', 'INR', 'ETH', 'RATE', 'PURPOSE', 'TX', 'DATE'].map(h => <div key={h} style={S.th}>{h}</div>)}</div>
+              {compFEMA.length === 0 && <div style={S.empty}>No FEMA records</div>}
+              {compFEMA.map(c => <div key={c.id} style={{ ...S.trow, gridTemplateColumns: '1.5fr 1fr 1fr 1fr 1fr 1.5fr 1fr' }}>
+                <div style={S.td}><div style={{ fontSize: 11, color: '#f0fdf4' }}>{c.full_name || '—'}</div><div style={{ fontSize: 9, color: '#f59e0bcc' }}>{c.email}</div></div>
+                <div style={{ ...S.td, fontSize: 11, color: '#22c55e', fontWeight: 600 }}>{fmtINR(c.inr_amount)}</div>
+                <div style={{ ...S.td, fontSize: 11, color: '#60a5fa' }}>{parseFloat(c.crypto_amount).toFixed(6)}</div>
+                <div style={{ ...S.td, fontSize: 10, color: '#f59e0bbb' }}>₹{parseFloat(c.eth_inr_rate).toLocaleString('en-IN')}</div>
+                <div style={{ ...S.td, fontSize: 9, color: '#a78bfacc' }}>{c.purpose?.replace(/_/g, ' ').toUpperCase()}</div>
+                <div style={{ ...S.td, fontSize: 8, color: '#60a5fa88', fontFamily: 'monospace' }}>{c.tx_hash ? `${c.tx_hash.slice(0, 8)}...` : '—'}</div>
+                <div style={{ ...S.td, fontSize: 9, color: '#f59e0baa' }}>{fmt(c.created_at)}</div>
+              </div>)}
+            </div>}
+          </div>}
+          {compTab === 'config' && <div>
+            {compLoading ? <div style={S.loading}>Loading...</div> : <div style={S.table}>
+              <div style={{ ...S.thead, gridTemplateColumns: '2fr 1fr 3fr 1.5fr' }}>{['KEY', 'VALUE', 'DESCRIPTION', 'ACTION'].map(h => <div key={h} style={S.th}>{h}</div>)}</div>
+              {compConfig.length === 0 && <div style={S.empty}>No config</div>}
+              {compConfig.map(c => <div key={c.key} style={{ ...S.trow, gridTemplateColumns: '2fr 1fr 3fr 1.5fr', alignItems: 'center' }}>
+                <div style={{ ...S.td, fontSize: 10, color: '#60a5fa', fontFamily: 'monospace' }}>{c.key}</div>
+                <div style={S.td}>{editingConfig[c.key] !== undefined ? <input style={{ ...S.searchInput, width: 90, padding: '4px 8px', fontSize: 11 }} value={editingConfig[c.key]} onChange={e => setEditingConfig(p => ({ ...p, [c.key]: e.target.value }))} onKeyDown={e => e.key === 'Enter' && saveConfig(c.key, editingConfig[c.key])} autoFocus /> : <span style={{ fontSize: 13, color: '#22c55e', fontWeight: 700 }}>{c.value}</span>}</div>
+                <div style={{ ...S.td, fontSize: 10, color: '#f59e0baa', lineHeight: 1.5 }}>{c.description}</div>
+                <div style={{ ...S.td, display: 'flex', gap: 6 }}>{editingConfig[c.key] !== undefined ? <><button style={S.approveBtn} onClick={() => saveConfig(c.key, editingConfig[c.key])}>SAVE</button><button style={S.viewBtn} onClick={() => setEditingConfig(p => { const n = { ...p }; delete n[c.key]; return n; })}>CANCEL</button></> : <button style={S.viewBtn} onClick={() => setEditingConfig(p => ({ ...p, [c.key]: c.value }))}>EDIT</button>}</div>
+              </div>)}
+            </div>}
+          </div>}
+        </div>}
+
+         {/* ══ CORPORATE ══ */}
+        {tab === 'corporate' && (
+          <div>
+            <div style={S.title}>🏢 Corporate Plan Management</div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 20 }}>
+
+              {/* ── Left: Activate ── */}
+              <div style={S.section}>
+                <div style={S.secTitle}>ACTIVATE CORPORATE — FIND USER</div>
+
+                <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+                  <input
+                    style={{ ...S.searchInput, flex: 1 }}
+                    placeholder="Search email or name..."
+                    value={corpSearch}
+                    onChange={e => setCorpSearch(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && handleCorpUserSearch()}
+                  />
+                  <button
+                    style={{ ...S.quickBtn, borderColor: '#f59e0b44', color: '#f59e0b' }}
+                    onClick={handleCorpUserSearch}
+                    disabled={corpSearching}
+                  >
+                    {corpSearching ? '⟳' : '🔍'}
+                  </button>
+                </div>
+
+                {corpSearchResults !== null && (
+                  <div style={{ marginBottom: 12, maxHeight: 200, overflowY: 'auto' }}>
+                    {corpSearchResults.length === 0 && (
+                      <div style={{ fontSize: 10, color: '#f59e0b44', padding: '8px 0' }}>No users found</div>
+                    )}
+                    {corpSearchResults.map(u => (
+                      <div
+                        key={u.id}
+                        onClick={() => setCorpForm(f => ({ ...f, userId: u.id, email: u.email }))}
+                        style={{
+                          padding: '8px 10px', borderRadius: 6, cursor: 'pointer', marginBottom: 4,
+                          background: corpForm.userId === u.id ? '#f59e0b18' : '#0a0800',
+                          border: `1px solid ${corpForm.userId === u.id ? '#f59e0b66' : '#f59e0b11'}`,
+                          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontSize: 11, color: '#f0fdf4' }}>{u.full_name || '—'}</div>
+                          <div style={{ fontSize: 9, color: '#f59e0bcc' }}>{u.email}</div>
+                        </div>
+                        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+                          {u.kyc_verified
+                            ? <span style={{ fontSize: 8, color: '#22c55e' }}>✓ KYC</span>
+                            : <span style={{ fontSize: 8, color: '#f87171' }}>✕ KYC</span>
+                          }
+                          <span style={{ fontSize: 8, padding: '2px 6px', borderRadius: 3, background: u.subscription_plan === 'corporate' ? '#f59e0b22' : '#f59e0b08', color: u.subscription_plan === 'corporate' ? '#f59e0b' : '#f59e0b66', border: '1px solid #f59e0b22' }}>
+                            {(u.subscription_plan || 'free').toUpperCase()}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {corpForm.userId && (
+                  <div style={{ padding: '8px 12px', borderRadius: 6, background: '#f59e0b14', border: '1px solid #f59e0b44', marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div>
+                      <div style={{ fontSize: 9, color: '#f59e0bcc', letterSpacing: '.1em' }}>SELECTED USER</div>
+                      <div style={{ fontSize: 11, color: '#f59e0b', marginTop: 2 }}>{corpForm.email}</div>
+                    </div>
+                    <button style={{ background: 'none', border: 'none', color: '#f59e0b88', cursor: 'pointer', fontSize: 14 }} onClick={() => setCorpForm(f => ({ ...f, userId: '', email: '' }))}>✕</button>
+                  </div>
+                )}
+
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: 9, color: '#f59e0bcc', letterSpacing: '.1em', marginBottom: 6 }}>BILLING CYCLE</div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    {['monthly', 'annual'].map(c => (
+                      <button key={c} onClick={() => setCorpForm(f => ({ ...f, cycle: c }))}
+                        style={{ flex: 1, padding: '8px', borderRadius: 6, cursor: 'pointer', fontFamily: "'DM Mono',monospace", fontSize: 10, fontWeight: 700, border: `1px solid ${corpForm.cycle === c ? '#f59e0b' : '#f59e0b22'}`, background: corpForm.cycle === c ? '#f59e0b18' : 'transparent', color: corpForm.cycle === c ? '#f59e0b' : '#f59e0b66' }}>
+                        {c.toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: 9, color: '#f59e0bcc', letterSpacing: '.1em', marginBottom: 5 }}>SEATS (blank = unlimited)</div>
+                  <input style={{ ...M.inp, marginBottom: 0 }} type="number" min="1" placeholder="e.g. 25" value={corpForm.seats} onChange={e => setCorpForm(f => ({ ...f, seats: e.target.value }))} />
+                </div>
+
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: 9, color: '#f59e0bcc', letterSpacing: '.1em', marginBottom: 5 }}>NEGOTIATED PRICE ₹ (0 = offline billing)</div>
+                  <input style={{ ...M.inp, marginBottom: 0 }} type="number" min="0" step="1000" placeholder="e.g. 75000" value={corpForm.customPriceINR} onChange={e => setCorpForm(f => ({ ...f, customPriceINR: e.target.value }))} />
+                </div>
+
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: 9, color: '#f59e0bcc', letterSpacing: '.1em', marginBottom: 5 }}>RENEWAL IN MONTHS (blank = auto from cycle)</div>
+                  <input style={{ ...M.inp, marginBottom: 0 }} type="number" min="1" max="60" placeholder="e.g. 12" value={corpForm.renewalMonths} onChange={e => setCorpForm(f => ({ ...f, renewalMonths: e.target.value }))} />
+                </div>
+
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 9, color: '#f59e0bcc', letterSpacing: '.1em', marginBottom: 5 }}>NOTES (deal memo, PO number, contact)</div>
+                  <textarea style={{ ...M.ta, minHeight: 52, marginBottom: 0 }} placeholder="e.g. Signed 2026-06-08 · PO #1234 · cfo@acme.com" value={corpForm.notes} onChange={e => setCorpForm(f => ({ ...f, notes: e.target.value }))} />
+                </div>
+
+                <button
+                  style={{ ...M.aPrimary, background: 'linear-gradient(135deg,#d97706,#b45309)', width: '100%', padding: '11px', opacity: (corpActivating || !corpForm.userId) ? 0.45 : 1 }}
+                  onClick={handleCorpActivate}
+                  disabled={corpActivating || !corpForm.userId}
+                >
+                  {corpActivating ? '⟳ ACTIVATING...' : '🏢 ACTIVATE CORPORATE PLAN →'}
+                </button>
+              </div>
+
+              {/* ── Right: Extend / Update Renewal ── */}
+              <div style={S.section}>
+                <div style={S.secTitle}>EXTEND / UPDATE RENEWAL</div>
+                <div style={{ fontSize: 10, color: '#f59e0b88', marginBottom: 14, lineHeight: 1.7 }}>
+                  Use to extend an existing corporate plan, update seats, or adjust renewal date after a new invoice.
+                </div>
+
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: 9, color: '#f59e0bcc', letterSpacing: '.1em', marginBottom: 5 }}>USER ID (paste from table below or click ↻ RENEW)</div>
+                  <input style={{ ...M.inp, marginBottom: 0 }} placeholder="UUID e.g. 3f4a…" value={corpRenewalForm.userId} onChange={e => setCorpRenewalForm(f => ({ ...f, userId: e.target.value.trim() }))} />
+                </div>
+
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: 9, color: '#f59e0bcc', letterSpacing: '.1em', marginBottom: 5 }}>NEW RENEWAL DATE</div>
+                  <input style={{ ...M.inp, marginBottom: 0 }} type="date" min={new Date().toISOString().slice(0, 10)} value={corpRenewalForm.renewalDate} onChange={e => setCorpRenewalForm(f => ({ ...f, renewalDate: e.target.value }))} />
+                </div>
+
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: 9, color: '#f59e0bcc', letterSpacing: '.1em', marginBottom: 5 }}>SEATS (blank = no change)</div>
+                  <input style={{ ...M.inp, marginBottom: 0 }} type="number" min="1" placeholder="e.g. 50" value={corpRenewalForm.seats} onChange={e => setCorpRenewalForm(f => ({ ...f, seats: e.target.value }))} />
+                </div>
+
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 9, color: '#f59e0bcc', letterSpacing: '.1em', marginBottom: 5 }}>NOTES</div>
+                  <textarea style={{ ...M.ta, minHeight: 52, marginBottom: 0 }} placeholder="e.g. Renewal PO #5678" value={corpRenewalForm.notes} onChange={e => setCorpRenewalForm(f => ({ ...f, notes: e.target.value }))} />
+                </div>
+
+                <button
+                  style={{ ...M.aPrimary, background: 'linear-gradient(135deg,#1d4ed8,#1e40af)', width: '100%', padding: '11px', opacity: (corpRenewing || !corpRenewalForm.userId || !corpRenewalForm.renewalDate) ? 0.45 : 1 }}
+                  onClick={handleCorpRenewal}
+                  disabled={corpRenewing || !corpRenewalForm.userId || !corpRenewalForm.renewalDate}
+                >
+                  {corpRenewing ? '⟳ UPDATING...' : '📅 UPDATE RENEWAL →'}
+                </button>
+
+                {/* What unlocks info box */}
+                <div style={{ marginTop: 16, padding: '12px 14px', borderRadius: 8, background: '#0a0800', border: '1px solid #f59e0b11' }}>
+                  <div style={{ fontSize: 9, color: '#f59e0b', letterSpacing: '.12em', marginBottom: 8 }}>WHAT ACTIVATION UNLOCKS (auto — no deploy)</div>
                   {[
-                    {label:`FEES (${revPeriod}D)`,   value:`₹${parseFloat(revenue.summary?.period_fees_inr||0).toLocaleString('en-IN',{maximumFractionDigits:0})}`, color:'#22c55e'},
-                    {label:'TOTAL FEES (ALL)',        value:`₹${parseFloat(revenue.summary?.total_fees_inr||0).toLocaleString('en-IN',{maximumFractionDigits:0})}`, color:'#22c55e'},
-                    {label:'TOTAL VOLUME',            value:`₹${parseFloat(revenue.summary?.total_volume_inr||0).toLocaleString('en-IN',{maximumFractionDigits:0})}`, color:'#60a5fa'},
-                    {label:'CREDITS TRADED',          value:`${parseInt(revenue.summary?.total_credits_traded||0).toLocaleString()} t`, color:'#f59e0b'},
-                    {label:'TOTAL TRADES',            value:revenue.summary?.total_trades||0, color:'#a78bfa'},
-                    {label:`ACTIVE USERS (${revPeriod}D)`, value:revenue.activeUsers||0, color:'#34d399'},
-                  ].map(({label,value,color})=>(
-                    <div key={label} style={{...S.statCard,padding:'14px'}}>
-                      <div style={{fontSize:20,fontWeight:700,color,marginBottom:4}}>{value}</div>
-                      <div style={{fontSize:9,color:'#f59e0bcc',letterSpacing:'.1em'}}>{label}</div>
+                    'Full Scope 3 all 15 GHG categories',
+                    'BRSR / CDP / TCFD / GHG PDF exports',
+                    'Audit trail + verifier integration',
+                    'PAT scheme + CCTS + GEI/BEE',
+                    '5-year decarbonisation plan',
+                    'SBTi targets + MRV calendar',
+                    'Supplier data portal',
+                    'Multi-entity consolidation',
+                    'Carbon neutrality certificate',
+                    'Compliance dashboard route',
+                    'Team management (custom seats)',
+                  ].map(f => (
+                    <div key={f} style={{ fontSize: 9, color: '#22c55e88', marginBottom: 3, display: 'flex', gap: 6 }}>
+                      <span style={{ color: '#22c55e', flexShrink: 0 }}>✓</span>{f}
                     </div>
                   ))}
-                </div>
-
-                {/* Fees by month */}
-                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16,marginBottom:20}}>
-                  <div style={S.section}>
-                    <div style={S.sectionTitle}>FEES BY MONTH</div>
-                    {revenue.feesByMonth?.length===0?<div style={{fontSize:10,color:'#f59e0b44'}}>No data</div>:revenue.feesByMonth?.map(m=>(
-                      <div key={m.month} style={{display:'flex',justifyContent:'space-between',padding:'7px 0',borderBottom:'1px solid #f59e0b08'}}>
-                        <span style={{fontSize:10,color:'#f59e0bcc'}}>{m.month}</span>
-                        <div style={{textAlign:'right'}}>
-                          <div style={{fontSize:11,color:'#22c55e'}}>₹{parseFloat(m.fees_inr).toLocaleString('en-IN',{maximumFractionDigits:0})}</div>
-                          <div style={{fontSize:9,color:'#f59e0b44'}}>{m.trades} trades</div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  <div style={S.section}>
-                    <div style={S.sectionTitle}>RETIREMENTS BY MONTH</div>
-                    {revenue.retirementsByMonth?.length===0?<div style={{fontSize:10,color:'#f59e0b44'}}>No data</div>:revenue.retirementsByMonth?.map(m=>(
-                      <div key={m.month} style={{display:'flex',justifyContent:'space-between',padding:'7px 0',borderBottom:'1px solid #f59e0b08'}}>
-                        <span style={{fontSize:10,color:'#f59e0bcc'}}>{m.month}</span>
-                        <div style={{textAlign:'right'}}>
-                          <div style={{fontSize:11,color:'#f87171'}}>{parseInt(m.tco2).toLocaleString()} tCO₂</div>
-                          <div style={{fontSize:9,color:'#f59e0b44'}}>{m.count} certs</div>
-                        </div>
-                      </div>
-                    ))}
+                  <div style={{ fontSize: 8, color: '#f59e0b33', marginTop: 8, lineHeight: 1.7 }}>
+                    All features are already built and gate-checked against subscription_plan = 'corporate'.
+                    Activation is a single DB write — no deployment needed.
                   </div>
                 </div>
+              </div>
+            </div>
 
-                {/* Top traders + credits by standard */}
-                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
-                  <div style={S.section}>
-                    <div style={S.sectionTitle}>TOP 10 TRADERS BY VOLUME</div>
-                    {revenue.topTraders?.map((t,i)=>(
-                      <div key={t.email} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'7px 0',borderBottom:'1px solid #f59e0b08'}}>
-                        <div><span style={{fontSize:9,color:'#f59e0b44',marginRight:8}}>#{i+1}</span><span style={{fontSize:11,color:'#f0fdf4'}}>{t.full_name||t.email}</span><div style={{fontSize:9,color:'#f59e0b44'}}>{t.trade_count} trades</div></div>
-                        <div style={{fontSize:11,color:'#22c55e'}}>₹{parseFloat(t.volume_inr).toLocaleString('en-IN',{maximumFractionDigits:0})}</div>
-                      </div>
-                    ))}
-                  </div>
-                  <div style={S.section}>
-                    <div style={S.sectionTitle}>CREDITS BY STANDARD</div>
-                    {revenue.creditsByStandard?.map(s=>(
-                      <div key={s.standard} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'7px 0',borderBottom:'1px solid #f59e0b08'}}>
-                        <div><Badge status={s.standard}/><span style={{fontSize:9,color:'#f59e0b44',marginLeft:8}}>{s.batches} batches</span></div>
-                        <div style={{fontSize:11,color:'#f0fdf4'}}>{parseInt(s.total_credits).toLocaleString()} t</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {/* ── CHAIN HEALTH ── */}
-        {tab === 'health' && (
-          <div>
-            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20}}>
-              <div style={S.pageTitle}>🩺 On-Chain Health Monitor</div>
-              <button style={{...S.quickBtn,borderColor:'#22c55e44',color:'#22c55e'}} onClick={loadHealth} disabled={healthLoading}>
-                {healthLoading?'⟳ Checking...':'↻ REFRESH'}
+            {/* ── Active Corporate Accounts Table ── */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+              <div style={S.secTitle}>ACTIVE CORPORATE ACCOUNTS</div>
+              <button style={{ ...S.quickBtn, borderColor: '#f59e0b44', color: '#f59e0b', fontSize: 9 }} onClick={loadCorpActivations} disabled={loading}>
+                {loading ? '⟳ LOADING...' : '↻ REFRESH'}
               </button>
             </div>
-            {healthLoading&&!health?<div style={S.loading}>Connecting to Sepolia...</div>:health&&(
-              <>
-                {/* Minter wallet alert */}
-                {health.minterWallet&&!health.minterWallet.ok&&(
-                  <div style={{padding:'14px 18px',background:'#1a0707',border:'1px solid #f8717133',borderRadius:8,marginBottom:20,display:'flex',alignItems:'center',gap:12}}>
-                    <span style={{fontSize:24}}>🚨</span>
-                    <div>
-                      <div style={{fontSize:13,color:'#f87171',fontWeight:700}}>MINTER WALLET LOW ON ETH — Mints will fail</div>
-                      <div style={{fontSize:11,color:'#f8717188',marginTop:4}}>Balance: {health.minterWallet.balanceEth} ETH · Need &gt;0.01 ETH to mint · <a href="https://faucet.sepolia.dev" target="_blank" rel="noreferrer" style={{color:'#60a5fa'}}>Get Sepolia ETH ↗</a></div>
-                    </div>
-                  </div>
-                )}
 
-                <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12,marginBottom:24}}>
-                  {[
-                    {label:'RPC CONNECTION',   value:health.rpcConnected?'CONNECTED':'DOWN',         color:health.rpcConnected?'#22c55e':'#f87171',   icon:health.rpcConnected?'✅':'❌'},
-                    {label:'MINTER BALANCE',    value:health.minterWallet?.balanceEth!=null?`${health.minterWallet.balanceEth} ETH`:'Unknown', color:health.minterWallet?.ok?'#22c55e':'#f87171', icon:health.minterWallet?.ok?'💰':'⚠'},
-                    {label:'CHAIN ID',          value:health.chainId?`#${health.chainId} Sepolia`:'Unknown', color:'#60a5fa', icon:'⛓'},
-                    {label:'PENDING MINTS',     value:health.pendingMints??'—',     color:health.pendingMints>0?'#f59e0b':'#22c55e', icon:'⏳'},
-                    {label:'FAILED MINTS',      value:health.failedMints??'—',      color:health.failedMints>0?'#f87171':'#22c55e', icon:'❌'},
-                    {label:'LAST MINT',         value:health.lastMint?fmt(health.lastMint.tokenised_at):'Never', color:'#f0fdf4', icon:'🕐'},
-                  ].map(({label,value,color,icon})=>(
-                    <div key={label} style={{...S.statCard,padding:'16px'}}>
-                      <div style={{fontSize:22,marginBottom:6}}>{icon}</div>
-                      <div style={{fontSize:18,fontWeight:700,color,marginBottom:4}}>{value}</div>
-                      <div style={{fontSize:9,color:'#f59e0bcc',letterSpacing:'.1em'}}>{label}</div>
-                    </div>
+            {loading ? <div style={S.loading}>Loading...</div> : (
+              <div style={S.table}>
+                <div style={{ ...S.thead, gridTemplateColumns: '2fr 1.5fr 1fr 1fr 1.5fr 1fr 2fr 1fr' }}>
+                  {['USER', 'COMPANY', 'CYCLE', 'SEATS', 'RENEWAL', 'PRICE', 'NOTES', 'ACTIONS'].map(h => (
+                    <div key={h} style={S.th}>{h}</div>
                   ))}
                 </div>
 
-                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
-                  <div style={S.section}>
-                    <div style={S.sectionTitle}>CONTRACT ADDRESSES</div>
-                    {[
-                      ['Carbon Credit Token', health.contractAddress],
-                      ['Marketplace',         health.marketplaceAddress],
-                      ['Minter Wallet',       health.minterWallet?.address],
-                    ].map(([label,addr])=>(
-                      <div key={label} style={{padding:'8px 0',borderBottom:'1px solid #f59e0b08'}}>
-                        <div style={{fontSize:9,color:'#f59e0baa',letterSpacing:'.1em',marginBottom:3}}>{label}</div>
-                        {addr
-                          ? <a href={`https://sepolia.etherscan.io/address/${addr}`} target="_blank" rel="noreferrer" style={{fontSize:10,color:'#60a5fa',fontFamily:'monospace',textDecoration:'none',wordBreak:'break-all'}}>{addr}</a>
-                          : <span style={{fontSize:10,color:'#f8717188'}}>Not configured</span>
+                {corpActivations.length === 0 && <div style={S.empty}>No corporate accounts yet</div>}
+
+                {corpActivations.map(a => {
+                  const renewalD  = a.subscription_renewal_date ? new Date(a.subscription_renewal_date) : null;
+                  const daysLeft  = renewalD ? Math.ceil((renewalD - new Date()) / 86400000) : null;
+                  const expColor  = daysLeft === null ? '#f59e0b44' : daysLeft <= 30 ? '#f87171' : daysLeft <= 90 ? '#f59e0b' : '#22c55e';
+
+                  return (
+                    <div key={a.id} style={{ ...S.trow, gridTemplateColumns: '2fr 1.5fr 1fr 1fr 1.5fr 1fr 2fr 1fr' }}>
+                      <div style={S.td}>
+                        <div style={{ color: '#f0fdf4', fontSize: 11 }}>{a.full_name || '—'}</div>
+                        <div style={{ color: '#f59e0bcc', fontSize: 9 }}>{a.email}</div>
+                      </div>
+                      <div style={{ ...S.td, fontSize: 10, color: '#f0fdf4' }}>{a.company_name || a.org_name || '—'}</div>
+                      <div style={S.td}>
+                        <span style={{ fontSize: 8, padding: '2px 7px', borderRadius: 3, background: '#f59e0b14', color: '#f59e0b', border: '1px solid #f59e0b33' }}>
+                          {(a.subscription_cycle || '—').toUpperCase()}
+                        </span>
+                      </div>
+                      <div style={{ ...S.td, fontSize: 11, color: '#22c55e' }}>
+                        {a.seats_limit === 999 || a.seats_limit === null ? '∞' : a.seats_limit}
+                      </div>
+                      <div style={S.td}>
+                        {renewalD ? (
+                          <div>
+                            <div style={{ fontSize: 10, color: '#f0fdf4' }}>
+                              {renewalD.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' })}
+                            </div>
+                            <div style={{ fontSize: 8, color: expColor }}>
+                              {daysLeft > 0 ? `${daysLeft}d left` : daysLeft === 0 ? 'TODAY' : 'EXPIRED'}
+                            </div>
+                          </div>
+                        ) : <span style={{ color: '#f59e0b44', fontSize: 10 }}>—</span>}
+                      </div>
+                      <div style={{ ...S.td, fontSize: 10, color: '#22c55e' }}>
+                        {a.amount_paise > 0
+                          ? `₹${(a.amount_paise / 100).toLocaleString('en-IN')}`
+                          : <span style={{ color: '#f59e0b44' }}>Custom</span>
                         }
                       </div>
-                    ))}
-                  </div>
-                  <div style={S.section}>
-                    <div style={S.sectionTitle}>LAST MINTED TOKEN</div>
-                    {health.lastMint?(
-                      <>
-                        <div style={M.row}><span style={M.key}>TOKEN ID</span><span style={{...M.val,color:'#22c55e'}}>#{health.lastMint.token_id}</span></div>
-                        <div style={M.row}><span style={M.key}>PROJECT</span><span style={M.val}>{health.lastMint.project_name}</span></div>
-                        <div style={M.row}><span style={M.key}>MINTED AT</span><span style={M.val}>{fmtTime(health.lastMint.tokenised_at)}</span></div>
-                      </>
-                    ):<div style={{fontSize:10,color:'#f59e0b44',padding:'12px 0'}}>No mints recorded yet</div>}
-                    <div style={{marginTop:16}}>
-                      <div style={S.sectionTitle}>QUICK ACTIONS</div>
-                      <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
-                        <a href="https://faucet.sepolia.dev" target="_blank" rel="noreferrer" style={{...S.quickBtn,textDecoration:'none',display:'inline-flex',alignItems:'center',fontSize:10}}>💧 SEPOLIA FAUCET ↗</a>
-                        <a href={`https://sepolia.etherscan.io/address/${health.minterWallet?.address}`} target="_blank" rel="noreferrer" style={{...S.quickBtn,textDecoration:'none',display:'inline-flex',alignItems:'center',fontSize:10}}>🔍 MINTER ON ETHERSCAN ↗</a>
-                        <button style={{...S.quickBtn,borderColor:'#f87171',color:'#f87171'}} onClick={()=>setTab('credits')}>⚠ VIEW FAILED MINTS</button>
+                      <div style={{ ...S.td, fontSize: 9, color: '#f59e0b88', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {a.activation_notes || '—'}
+                      </div>
+                      <div style={{ ...S.td, display: 'flex', gap: 4 }}>
+                        <button
+                          style={{ ...S.viewBtn, borderColor: '#f59e0b33', color: '#f59e0b', fontSize: 7, whiteSpace: 'nowrap' }}
+                          onClick={() => setCorpRenewalForm({
+                            userId:      a.id,
+                            renewalDate: renewalD ? renewalD.toISOString().slice(0, 10) : '',
+                            seats:       (a.seats_limit && a.seats_limit !== 999) ? String(a.seats_limit) : '',
+                            notes:       '',
+                          })}
+                          title="Pre-fill renewal form"
+                        >
+                          ↻ RENEW
+                        </button>
                       </div>
                     </div>
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {/* ── DISPUTES ── */}
-        {tab === 'disputes' && (
-          <div>
-            <div style={S.pageTitle}>Disputes</div>
-            <button style={{...S.quickBtn,marginBottom:20}} onClick={() => setModal({type:'new_dispute'})}>+ OPEN NEW DISPUTE</button>
-            {loading?<div style={S.loading}>Loading...</div>:(
-              <div style={S.table}>
-                <div style={{...S.tableHead,gridTemplateColumns:'repeat(5,1fr)'}}>{['TARGET','REASON','STATUS','OPENED','ACTIONS'].map(h=><div key={h} style={S.th}>{h}</div>)}</div>
-                {disputes.length===0&&<div style={S.empty}>No disputes</div>}
-                {disputes.map(d=>(
-                  <div key={d.id} style={{...S.tableRow,gridTemplateColumns:'repeat(5,1fr)'}}>
-                    <div style={S.td}><div style={{color:'#f0fdf4',fontSize:11}}>{d.target_name||'—'}</div><div style={{color:'#f59e0bcc',fontSize:9}}>{d.target_email}</div></div>
-                    <div style={{...S.td,fontSize:10,color:'#f59e0bdd'}}>{d.reason?.slice(0,60)}</div>
-                    <div style={S.td}><Badge status={d.status}/></div>
-                    <div style={{...S.td,fontSize:10,color:'#f59e0bbb'}}>{fmt(d.created_at)}</div>
-                    <div style={S.td}>{d.status==='open'&&<button style={S.approveBtn} onClick={() => setModal({type:'resolve_dispute',data:d})}>RESOLVE</button>}</div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
         )}
 
-        {/* ── AUDIT LOG ── */}
-        {tab === 'audit' && (
-          <div>
-            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:24}}>
-              <div style={S.pageTitle}>Audit Log</div>
-              <button style={{...S.quickBtn,borderColor:'#22c55e44',color:'#22c55e'}} onClick={handleExportAudit}>↓ EXPORT CSV</button>
-            </div>
-            {loading?<div style={S.loading}>Loading...</div>:(
-              <div style={S.table}>
-                <div style={{...S.tableHead,gridTemplateColumns:'repeat(4,1fr)'}}>{['ACTION','TARGET','DETAILS','TIMESTAMP'].map(h=><div key={h} style={S.th}>{h}</div>)}</div>
-                {audit.length===0&&<div style={S.empty}>No audit entries</div>}
-                {audit.map(a=>(
-                  <div key={a.id} style={{...S.tableRow,gridTemplateColumns:'repeat(4,1fr)'}}>
-                    <div style={S.td}><span style={{fontSize:9,padding:'3px 8px',borderRadius:20,background:'#1a0f0066',border:'1px solid #f59e0b66',color:'#f59e0b',letterSpacing:'.06em'}}>{a.action}</span></div>
-                    <div style={S.td}><div style={{fontSize:11,color:'#f0fdf4'}}>{a.target_name||'—'}</div><div style={{fontSize:9,color:'#f59e0bcc'}}>{a.target_email}</div></div>
-                    <div style={{...S.td,fontSize:10,color:'#f59e0bbb',maxWidth:240}}>{a.details}</div>
-                    <div style={{...S.td,fontSize:10,color:'#f59e0baa'}}>{fmtTime(a.created_at)}</div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+      </div>{/* end main */}
 
-        {/* ── COMPLIANCE ── */}
-        {tab === 'compliance' && (
-          <div>
-            <div style={S.pageTitle}>🛡 Compliance Dashboard</div>
-            <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:20}}>
-              {[{label:'OPEN FLAGS',value:compStats.openFlags,color:'#f59e0b',icon:'🚩'},{label:'CRITICAL',value:compStats.criticalFlags,color:'#f87171',icon:'🚨'},{label:'TOTAL TDS',value:`₹${parseFloat(compStats.totalTds||0).toLocaleString('en-IN',{maximumFractionDigits:0})}`,color:'#60a5fa',icon:'📋'},{label:'FEMA CONV.',value:compStats.totalConversions,color:'#a78bfa',icon:'🔄'}].map(({label,value,color,icon})=>(
-                <div key={label} style={S.statCard}><div style={{fontSize:20,marginBottom:6}}>{icon}</div><div style={{fontSize:22,fontWeight:700,color,marginBottom:4}}>{value}</div><div style={{fontSize:9,color:'#f59e0bcc',letterSpacing:'.12em'}}>{label}</div></div>
+      {modal?.type === 'kyc_detail' && <Dlg title="KYC Submission Details" onClose={() => setModal(null)} wide>
+        {[['Name', modal.data.full_name], ['Email', modal.data.email], ['ID Type', modal.data.id_type || '—'], ['Submitted', fmt(modal.data.submitted_at)], ['Status', modal.data.status], ['Reviewed At', modal.data.reviewed_at ? fmt(modal.data.reviewed_at) : 'Not yet reviewed'], ['Rejection Reason', modal.data.rejection_reason || '—'], ['Wallet', modal.data.wallet_address || 'Not connected'], ['Aadhaar Hash', modal.data.aadhaar_hash ? `${modal.data.aadhaar_hash.slice(0, 12)}...` : '—'], ['PAN Hash', modal.data.pan_hash ? `${modal.data.pan_hash.slice(0, 12)}...` : '—']].map(([k, v]) => <div key={k} style={M.row}><span style={M.key}>{k}</span><span style={{ ...M.val, color: k === 'Status' && modal.data.status === 'rejected' ? '#f87171' : k === 'Status' && modal.data.status === 'approved' ? '#22c55e' : undefined }}>{v}</span></div>)}
+        {modal.data.doc_ipfs_hash && <div style={{ marginTop: 12, padding: '10px 12px', background: '#051409', border: '1px solid #22c55e22', borderRadius: 6 }}><div style={{ fontSize: 9, color: '#22c55eaa', letterSpacing: '.1em', marginBottom: 6 }}>KYC DOCUMENT</div><a href={`${PG}/${modal.data.doc_ipfs_hash}`} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: '#60a5fa', textDecoration: 'none' }}>📄 VIEW IPFS DOC ↗ ({modal.data.doc_ipfs_hash.slice(0, 20)}...)</a></div>}
+        {modal.data.status === 'pending' && <div style={{ display: 'flex', gap: 8, marginTop: 14 }}><button style={M.aPrimary} onClick={() => setModal({ type: 'kyc_approve', data: modal.data })}>✓ APPROVE KYC</button><button style={M.rPrimary} onClick={() => setModal({ type: 'kyc_reject', data: modal.data })}>✕ REJECT KYC</button></div>}
+        {modal.data.status === 'approved' && <div style={{ marginTop: 14, padding: '9px 12px', background: '#051409', border: '1px solid #22c55e22', borderRadius: 6, fontSize: 10, color: '#22c55e88' }}>✅ KYC approved</div>}
+        {modal.data.status === 'rejected' && <div style={{ marginTop: 14, padding: '9px 12px', background: '#1a0707', border: '1px solid #f8717133', borderRadius: 6, fontSize: 10, color: '#f87171' }}>❌ KYC rejected — user must resubmit</div>}
+      </Dlg>}
+
+      {modal?.type === 'kyc_approve' && (
+        <Dlg title="Approve KYC" onClose={() => { setModal(null); setReason(''); setKycTier('full'); }}>
+          <div style={M.ct}>Approve KYC for <strong style={{ color: '#f0fdf4' }}>{modal.data.full_name}</strong>?</div>
+          <div style={{ marginBottom:14 }}>
+            <div style={{ fontSize:9, color:'#f59e0bcc', letterSpacing:'.12em', marginBottom:8 }}>KYC TIER — determines which features unlock</div>
+            <div style={{ display:'flex', gap:7 }}>
+              {[{value:'phone',label:'Phone',desc:'Basic access'},{value:'basic',label:'Basic',desc:'Standard features'},{value:'full',label:'Full',desc:'All features'}].map(({value,label,desc}) => (
+                <button key={value} onClick={() => setKycTier(value)} style={{ flex:1, padding:'10px 8px', borderRadius:7, cursor:'pointer', fontFamily:"'DM Mono',monospace", fontSize:10, fontWeight:700, border:`1px solid ${kycTier===value?'#22c55e':'#22c55e22'}`, background:kycTier===value?'#0d2e1f':'transparent', color:kycTier===value?'#22c55e':'#22c55e66' }}>
+                  <div>{label}</div>
+                  <div style={{ fontSize:8, fontWeight:400, marginTop:2, opacity:.7 }}>{desc}</div>
+                </button>
               ))}
             </div>
-            <div style={{display:'flex',gap:6,marginBottom:20,borderBottom:'1px solid #f59e0b11',paddingBottom:0}}>
-              {[{id:'flags',label:'🚩 Flags'},{id:'tds',label:'📋 TDS'},{id:'fema',label:'🔄 FEMA'},{id:'config',label:'⚙️ Config'}].map(t=>(
-                <button key={t.id} style={{padding:'9px 16px',border:'none',background:'transparent',cursor:'pointer',fontFamily:"'DM Mono',monospace",fontSize:10,letterSpacing:'.08em',borderBottom:`2px solid ${compTab===t.id?'#f59e0b':'transparent'}`,color:compTab===t.id?'#f59e0b':'#f59e0bcc',marginBottom:-1}} onClick={()=>setCompTab(t.id)}>{t.label}</button>
-              ))}
-            </div>
-            {compTab==='flags'&&(
-              <div>
-                <div style={{display:'flex',gap:8,marginBottom:14,flexWrap:'wrap',alignItems:'center'}}>
-                  {['all','open','reviewed','cleared','escalated'].map(s=><button key={s} style={{...S.filterBtn,...(flagFilter===s?S.filterBtnActive:{})}} onClick={()=>setFlagFilter(s)}>{s.toUpperCase()}</button>)}
-                  <span style={{marginLeft:8,fontSize:9,color:'#f59e0baa'}}>SEVERITY:</span>
-                  {['','low','medium','high','critical'].map(s=><button key={s} style={{...S.filterBtn,...(flagSeverity===s?S.filterBtnActive:{})}} onClick={()=>setFlagSeverity(s)}>{s||'ALL'}</button>)}
-                </div>
-                {compLoading?<div style={S.loading}>Loading...</div>:(
-                  <div style={S.table}>
-                    <div style={{...S.tableHead,gridTemplateColumns:'1.5fr 1fr 1fr 1fr 2fr 1fr 1fr'}}>{['USER','FLAG','AMOUNT','SEVERITY','DESC','STATUS','ACTIONS'].map(h=><div key={h} style={S.th}>{h}</div>)}</div>
-                    {compFlags.length===0&&<div style={S.empty}>No flags</div>}
-                    {compFlags.map(f=>(
-                      <div key={f.id} style={{...S.tableRow,gridTemplateColumns:'1.5fr 1fr 1fr 1fr 2fr 1fr 1fr',...(f.severity==='critical'&&f.status==='open'?{borderLeft:'2px solid #f8717133'}:{})}}>
-                        <div style={S.td}><div style={{color:'#f0fdf4',fontSize:11}}>{f.full_name||'—'}</div><div style={{color:'#f59e0bcc',fontSize:9}}>{f.email}</div></div>
-                        <div style={S.td}><span style={{fontSize:9,padding:'2px 6px',borderRadius:4,background:'#1a0f0066',border:'1px solid #f59e0b33',color:'#f59e0b'}}>{flagTypeLabel[f.flag_type]||f.flag_type}</span></div>
-                        <div style={{...S.td,fontSize:11}}>{f.amount?`₹${parseFloat(f.amount).toLocaleString('en-IN')}`:'—'}</div>
-                        <div style={S.td}><span style={{fontSize:9,padding:'2px 6px',borderRadius:4,border:`1px solid ${sevColor[f.severity]||'#f59e0b'}33`,color:sevColor[f.severity]||'#f59e0b'}}>{f.severity?.toUpperCase()}</span></div>
-                        <div style={{...S.td,fontSize:9,color:'#f59e0bbb'}}>{f.description?.slice(0,70)}</div>
-                        <div style={S.td}><Badge status={f.status}/></div>
-                        <div style={{...S.td,display:'flex',gap:4}}>
-                          {f.status==='open'&&<><button style={S.approveBtn} onClick={()=>setModal({type:'flag_review',data:f,action:'cleared'})}>CLEAR</button><button style={{...S.rejectBtn,fontSize:8,padding:'3px 6px'}} onClick={()=>setModal({type:'flag_review',data:f,action:'escalated'})}>ESC</button></>}
-                          {f.status!=='open'&&<button style={S.viewBtn} onClick={()=>setModal({type:'flag_detail',data:f})}>VIEW</button>}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            {compTab==='tds'&&(
-              <div>
-                <div style={{display:'flex',gap:8,marginBottom:14,alignItems:'center'}}>
-                  {['','2024-25','2025-26','2026-27'].map(fy=><button key={fy} style={{...S.filterBtn,...(fyFilter===fy?S.filterBtnActive:{})}} onClick={()=>setFyFilter(fy)}>{fy||'ALL'}</button>)}
-                </div>
-                {compLoading?<div style={S.loading}>Loading...</div>:(
-                  <div style={S.table}>
-                    <div style={{...S.tableHead,gridTemplateColumns:'1.5fr 1fr 1fr 1fr 1fr 1fr 1fr'}}>{['USER','FY/QTR','GROSS','TDS 1%','NET','PAN','STATUS'].map(h=><div key={h} style={S.th}>{h}</div>)}</div>
-                    {compTDS.length===0&&<div style={S.empty}>No TDS records</div>}
-                    {compTDS.map(t=>(
-                      <div key={t.id} style={{...S.tableRow,gridTemplateColumns:'1.5fr 1fr 1fr 1fr 1fr 1fr 1fr'}}>
-                        <div style={S.td}><div style={{fontSize:11,color:'#f0fdf4'}}>{t.full_name||'—'}</div><div style={{fontSize:9,color:'#f59e0bcc'}}>{t.email}</div></div>
-                        <div style={S.td}><div style={{fontSize:10}}>{t.financial_year}</div><div style={{fontSize:9,color:'#f59e0bcc'}}>{t.quarter}</div></div>
-                        <div style={{...S.td,fontSize:11}}>{fmtINR(t.transaction_amount)}</div>
-                        <div style={{...S.td,fontSize:11,color:'#f87171',fontWeight:600}}>{fmtINR(t.tds_amount)}</div>
-                        <div style={{...S.td,fontSize:11,color:'#22c55e'}}>{fmtINR(t.net_amount)}</div>
-                        <div style={{...S.td,fontSize:10,color:'#60a5facc',fontFamily:'monospace'}}>{t.pan||'—'}</div>
-                        <div style={S.td}><Badge status={t.status}/></div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            {compTab==='fema'&&(
-              <div>
-                {compLoading?<div style={S.loading}>Loading...</div>:(
-                  <div style={S.table}>
-                    <div style={{...S.tableHead,gridTemplateColumns:'1.5fr 1fr 1fr 1fr 1fr 1.5fr 1fr'}}>{['USER','INR','ETH','RATE','PURPOSE','TX','DATE'].map(h=><div key={h} style={S.th}>{h}</div>)}</div>
-                    {compFEMA.length===0&&<div style={S.empty}>No FEMA records</div>}
-                    {compFEMA.map(c=>(
-                      <div key={c.id} style={{...S.tableRow,gridTemplateColumns:'1.5fr 1fr 1fr 1fr 1fr 1.5fr 1fr'}}>
-                        <div style={S.td}><div style={{fontSize:11,color:'#f0fdf4'}}>{c.full_name||'—'}</div><div style={{fontSize:9,color:'#f59e0bcc'}}>{c.email}</div></div>
-                        <div style={{...S.td,fontSize:11,color:'#22c55e',fontWeight:600}}>{fmtINR(c.inr_amount)}</div>
-                        <div style={{...S.td,fontSize:11,color:'#60a5fa'}}>{parseFloat(c.crypto_amount).toFixed(6)}</div>
-                        <div style={{...S.td,fontSize:10,color:'#f59e0bbb'}}>₹{parseFloat(c.eth_inr_rate).toLocaleString('en-IN')}</div>
-                        <div style={{...S.td,fontSize:9,color:'#a78bfacc'}}>{c.purpose?.replace(/_/g,' ').toUpperCase()}</div>
-                        <div style={{...S.td,fontSize:9,color:'#60a5fa88',fontFamily:'monospace'}}>{c.tx_hash?`${c.tx_hash.slice(0,8)}...`:'—'}</div>
-                        <div style={{...S.td,fontSize:10,color:'#f59e0baa'}}>{fmt(c.created_at)}</div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            {compTab==='config'&&(
-              <div>
-                {compLoading?<div style={S.loading}>Loading...</div>:(
-                  <div style={S.table}>
-                    <div style={{...S.tableHead,gridTemplateColumns:'2fr 1fr 3fr 1.5fr'}}>{['KEY','VALUE','DESCRIPTION','ACTION'].map(h=><div key={h} style={S.th}>{h}</div>)}</div>
-                    {compConfig.length===0&&<div style={S.empty}>No config — run compliance_migration.sql</div>}
-                    {compConfig.map(c=>(
-                      <div key={c.key} style={{...S.tableRow,gridTemplateColumns:'2fr 1fr 3fr 1.5fr',alignItems:'center'}}>
-                        <div style={{...S.td,fontSize:10,color:'#60a5fa',fontFamily:'monospace'}}>{c.key}</div>
-                        <div style={S.td}>{editingConfig[c.key]!==undefined?<input style={{...S.searchInput,width:100,padding:'4px 8px',fontSize:11}} value={editingConfig[c.key]} onChange={e=>setEditingConfig(p=>({...p,[c.key]:e.target.value}))} onKeyDown={e=>e.key==='Enter'&&saveConfig(c.key,editingConfig[c.key])} autoFocus/>:<span style={{fontSize:13,color:'#22c55e',fontWeight:700}}>{c.value}</span>}</div>
-                        <div style={{...S.td,fontSize:10,color:'#f59e0baa',lineHeight:1.5}}>{c.description}</div>
-                        <div style={{...S.td,display:'flex',gap:6}}>{editingConfig[c.key]!==undefined?<><button style={S.approveBtn} onClick={()=>saveConfig(c.key,editingConfig[c.key])}>SAVE</button><button style={S.viewBtn} onClick={()=>setEditingConfig(p=>{const n={...p};delete n[c.key];return n;})}>CANCEL</button></>:<button style={S.viewBtn} onClick={()=>setEditingConfig(p=>({...p,[c.key]:c.value}))}>EDIT</button>}</div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
           </div>
-        )}
-      </div>
-
-      {/* ════════════════ MODALS ════════════════ */}
-
-      {modal?.type==='kyc_detail'&&<Modal title="KYC Details" onClose={()=>setModal(null)}>{[['Name',modal.data.full_name],['Email',modal.data.email],['ID Type',modal.data.id_type],['Submitted',fmt(modal.data.submitted_at)],['Status',modal.data.status],['Wallet',modal.data.wallet_address||'Not connected']].map(([k,v])=><div key={k} style={M.row}><span style={M.key}>{k}</span><span style={M.val}>{v}</span></div>)}{modal.data.doc_ipfs_hash&&<div style={{marginTop:12}}><a href={`${PINATA_GW}/${modal.data.doc_ipfs_hash}`} target="_blank" rel="noreferrer" style={{fontSize:11,color:'#60a5fa',textDecoration:'none'}}>📄 VIEW IPFS DOC ↗</a></div>}{modal.data.status==='pending'&&<div style={{display:'flex',gap:8,marginTop:16}}><button style={M.approveBtn} onClick={()=>setModal({type:'kyc_approve',data:modal.data})}>APPROVE</button><button style={M.rejectBtn} onClick={()=>setModal({type:'kyc_reject',data:modal.data})}>REJECT</button></div>}</Modal>}
-      {modal?.type==='kyc_approve'&&<Modal title="Approve KYC" onClose={()=>{setModal(null);setReason('');}}><div style={M.confirmText}>Approve KYC for <strong style={{color:'#f0fdf4'}}>{modal.data.full_name}</strong>?</div><button style={M.approveBtn} onClick={()=>kycAction(modal.data.id,'approve')}>CONFIRM APPROVE</button></Modal>}
-      {modal?.type==='kyc_reject'&&<Modal title="Reject KYC" onClose={()=>{setModal(null);setReason('');}}><textarea style={M.textarea} value={reason} onChange={e=>setReason(e.target.value)} placeholder="Rejection reason..."/><button style={M.rejectBtn} onClick={()=>kycAction(modal.data.id,'reject')} disabled={!reason.trim()}>CONFIRM REJECT</button></Modal>}
-
-      {modal?.type==='credit_detail'&&<Modal title="Credit Details" onClose={()=>setModal(null)}>{[['User',modal.data.full_name],['Email',modal.data.email],['Serial',modal.data.registry_serial],['Project',modal.data.project_name],['Quantity',modal.data.quantity],['Vintage',modal.data.vintage_year],['Standard',modal.data.standard],['Status',modal.data.admin_status],['Token ID',modal.data.token_id!=null?`#${modal.data.token_id}`:'Not minted'],['Wallet',modal.data.user_wallet||'NONE — wallet required']].map(([k,v])=><div key={k} style={M.row}><span style={M.key}>{k}</span><span style={{...M.val,color:k==='Token ID'&&!modal.data.token_id?'#f87171':k==='Wallet'&&!modal.data.user_wallet?'#f87171':undefined}}>{v}</span></div>)}{modal.data.doc_ipfs_hash&&<div style={{marginTop:10}}><a href={`${PINATA_GW}/${modal.data.doc_ipfs_hash}`} target="_blank" rel="noreferrer" style={{fontSize:11,color:'#60a5fa',textDecoration:'none'}}>📄 VIEW PROOF ↗</a></div>}<div style={{display:'flex',gap:8,marginTop:16,flexWrap:'wrap'}}>{modal.data.admin_status==='pending'&&<><button style={M.approveBtn} onClick={()=>setModal({type:'credit_approve',data:modal.data})}>APPROVE</button><button style={M.rejectBtn} onClick={()=>setModal({type:'credit_reject',data:modal.data})}>REJECT</button></>}{modal.data.admin_status==='approved'&&!modal.data.token_id&&<><button style={{...M.approveBtn,background:'linear-gradient(135deg,#dc2626,#b91c1c)'}} onClick={()=>{setModal(null);retryMint(modal.data.id);}}>⟳ RETRY MINT</button><button style={{...M.approveBtn,background:'linear-gradient(135deg,#1d4ed8,#1e40af)'}} onClick={()=>{setManualTokenId('');setModal({type:'manual_token_sync',data:modal.data});}}>✎ SET ID</button>{!modal.data.user_wallet&&<button style={{...M.approveBtn,background:'linear-gradient(135deg,#7c3aed,#6d28d9)'}} onClick={()=>{setAssignWallet('');setModal({type:'assign_wallet_mint',data:modal.data});}}>🔑 ASSIGN WALLET + MINT</button>}</>}</div></Modal>}
-      {modal?.type==='credit_approve'&&<Modal title="Approve Credit" onClose={()=>{setModal(null);setReason('');}}><div style={M.confirmText}>Approve <strong style={{color:'#f0fdf4'}}>{modal.data.project_name}</strong> for <strong style={{color:'#22c55e'}}>{modal.data.full_name}</strong>?</div><textarea style={M.textarea} value={reason} onChange={e=>setReason(e.target.value)} placeholder="Optional admin notes..."/><button style={M.approveBtn} onClick={()=>creditAction(modal.data.id,'approve')}>CONFIRM APPROVE</button></Modal>}
-      {modal?.type==='credit_reject'&&<Modal title="Reject Credit" onClose={()=>{setModal(null);setReason('');}}><textarea style={M.textarea} value={reason} onChange={e=>setReason(e.target.value)} placeholder="Rejection reason..."/><button style={M.rejectBtn} onClick={()=>creditAction(modal.data.id,'reject')} disabled={!reason.trim()}>CONFIRM REJECT</button></Modal>}
-
-      {modal?.type==='assign_wallet_mint'&&<Modal title="🔑 Assign Wallet + Mint" onClose={()=>{setModal(null);setAssignWallet('');}}><div style={M.confirmText}>User <strong style={{color:'#f0fdf4'}}>{modal.data.full_name}</strong> has no wallet. Provide their wallet address to assign it and mint Token in one step.</div><div style={{fontSize:9,color:'#f59e0baa',letterSpacing:'.12em',marginBottom:6,marginTop:12}}>WALLET ADDRESS (0x...)</div><input style={M.input} placeholder="0x1234...abcd" value={assignWallet} onChange={e=>setAssignWallet(e.target.value)}/><div style={{padding:'10px 12px',background:'#110a00',border:'1px solid #f59e0b22',borderRadius:6,marginBottom:12,fontSize:9,color:'#f59e0baa',lineHeight:1.6}}>This will bind the wallet to the user's account AND mint the credit token to it in a single operation.</div><button style={{...M.approveBtn,opacity:syncingId===modal.data.id?.5:1}} onClick={()=>handleAssignWalletAndMint(modal.data.id)} disabled={!assignWallet||syncingId===modal.data.id}>{syncingId===modal.data.id?'MINTING...':'ASSIGN + MINT →'}</button></Modal>}
-
-      {modal?.type==='manual_token_sync'&&<Modal title="✎ Set Token ID Manually" onClose={()=>{setModal(null);setManualTokenId('');}}><div style={M.confirmText}>Use only if mint succeeded on-chain but DB wasn't updated. Check Etherscan for the correct Token ID first.<br/><span style={{color:'#f87171aa',fontSize:10}}>Project: {modal.data.project_name}</span></div><div style={{fontSize:9,color:'#f59e0baa',letterSpacing:'.12em',marginBottom:6,marginTop:12}}>TOKEN ID (from CreditMinted event)</div><input style={M.input} type="number" min="0" placeholder="e.g. 4" value={manualTokenId} onChange={e=>setManualTokenId(e.target.value)}/><a href="https://sepolia.etherscan.io" target="_blank" rel="noreferrer" style={{fontSize:10,color:'#60a5fa88',textDecoration:'none',display:'block',marginBottom:16}}>🔗 Open Etherscan ↗</a><button style={{...M.approveBtn,background:'linear-gradient(135deg,#1d4ed8,#1e40af)',opacity:syncingId===modal.data.id?.5:1}} onClick={()=>handleManualTokenSync(modal.data.id)} disabled={!manualTokenId||syncingId===modal.data.id}>{syncingId===modal.data.id?'SYNCING...':'CONFIRM SET TOKEN ID'}</button></Modal>}
-
-      {modal?.type==='qty_correction'&&<Modal title="✎ Correct Quantity" onClose={()=>{setModal(null);setNewQty('');setReason('');}}><div style={M.confirmText}>Correct quantity for <strong style={{color:'#f0fdf4'}}>{modal.data.project_name}</strong>. Only available before minting.</div><div style={M.row}><span style={M.key}>Current</span><span style={M.val}>{modal.data.quantity} tCO₂</span></div><div style={{fontSize:9,color:'#f59e0baa',letterSpacing:'.12em',marginBottom:6,marginTop:14}}>NEW QUANTITY (tCO₂)</div><input style={M.input} type="number" min="1" value={newQty} onChange={e=>setNewQty(e.target.value)}/><div style={{fontSize:9,color:'#f59e0baa',letterSpacing:'.12em',marginBottom:6}}>REASON</div><textarea style={M.textarea} value={reason} onChange={e=>setReason(e.target.value)} placeholder="e.g. User submitted 400 instead of 4000"/><button style={M.approveBtn} onClick={()=>handleQtyCorrection(modal.data.id)} disabled={!newQty||!reason.trim()}>CONFIRM CORRECTION</button></Modal>}
-
-      {modal?.type==='flag_retirement'&&<Modal title="⚠ Flag Retirement as Disputed" onClose={()=>{setModal(null);setReason('');}}><div style={M.confirmText}>Flag retirement <strong style={{color:'#f0fdf4'}}>{modal.data.certificate_id}</strong> ({modal.data.amount} tCO₂) as disputed.<br/><span style={{color:'#f87171aa',fontSize:10}}>The certificate will show a dispute warning. The on-chain burn cannot be reversed.</span></div><textarea style={M.textarea} value={reason} onChange={e=>setReason(e.target.value)} placeholder="Reason for dispute e.g. Wrong quantity, wrong scope..."/><button style={M.rejectBtn} onClick={()=>handleFlagRetirement(modal.data.id)} disabled={!reason.trim()}>CONFIRM FLAG</button></Modal>}
-
-      {modal?.type==='user_detail'&&<Modal title="User Details" onClose={()=>setModal(null)}>{[['Name',modal.data.full_name||'—'],['Email',modal.data.email],['Wallet',modal.data.wallet_address||'Not connected'],['KYC',modal.data.kyc_status||'pending'],['Frozen',modal.data.frozen?`Yes — ${modal.data.freeze_reason}`:'No'],['Joined',fmt(modal.data.created_at)]].map(([k,v])=><div key={k} style={M.row}><span style={M.key}>{k}</span><span style={M.val}>{v}</span></div>)}<div style={{display:'flex',gap:8,marginTop:16,flexWrap:'wrap'}}>{!modal.data.frozen?<button style={M.rejectBtn} onClick={()=>setModal({type:'freeze',data:modal.data})}>FREEZE</button>:<button style={M.approveBtn} onClick={()=>setModal({type:'unfreeze',data:modal.data})}>UNFREEZE</button>}<button style={{...M.approveBtn,background:'linear-gradient(135deg,#1d4ed8,#1e40af)'}} onClick={()=>{setNewWallet('');setReason('');setModal({type:'reassign_wallet',data:modal.data});}}>🔑 REASSIGN WALLET</button><button style={{...M.rejectBtn,background:'linear-gradient(135deg,#7c2d12,#991b1b)'}} onClick={()=>{setReason('');setModal({type:'delete_user',data:modal.data});}}>DELETE USER</button></div></Modal>}
-
-      {modal?.type==='user_history'&&(
-        <Modal title={`History — ${modal.data.full_name}`} onClose={()=>setModal(null)} wide>
-          {userDataLoading?<div style={{padding:24,textAlign:'center',color:'#f59e0baa'}}>Loading...</div>:(
-            <>
-              <div style={{fontSize:9,color:'#22c55e88',letterSpacing:'.14em',marginBottom:8}}>CREDITS ({userCredits.length})</div>
-              {userCredits.length===0?<div style={{fontSize:10,color:'#f59e0b44',marginBottom:16}}>No credits</div>:userCredits.map(c=>(
-                <div key={c.id} style={{display:'grid',gridTemplateColumns:'2fr 1fr 1fr 1fr 1fr',gap:8,padding:'8px 0',borderBottom:'1px solid #f59e0b08',alignItems:'center'}}>
-                  <div style={{fontSize:11,color:'#f0fdf4'}}>{c.project_name}<div style={{fontSize:9,color:'#f59e0bcc'}}>{c.registry_serial}</div></div>
-                  <div style={{fontSize:11,color:'#22c55e'}}>{c.quantity} t</div>
-                  <div style={{fontSize:10,color:'#f59e0bbb'}}>{c.vintage_year}</div>
-                  <div>{c.token_id!=null?<span style={{fontSize:9,color:'#22c55e'}}>⛓ #{c.token_id}</span>:<span style={{fontSize:9,color:'#f8717188'}}>⏳</span>}</div>
-                  <div><Badge status={c.admin_status}/></div>
-                </div>
-              ))}
-              <div style={{fontSize:9,color:'#60a5fa88',letterSpacing:'.14em',margin:'16px 0 8px'}}>TRADES ({userTrades.length})</div>
-              {userTrades.length===0?<div style={{fontSize:10,color:'#f59e0b44'}}>No trades</div>:userTrades.slice(0,20).map(t=>(
-                <div key={t.id} style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr 1fr',gap:8,padding:'8px 0',borderBottom:'1px solid #f59e0b08',alignItems:'center'}}>
-                  <div style={{fontSize:10,color:'#f0fdf4'}}>{t.project_name||'—'}</div>
-                  <div style={{fontSize:10,color:t.buyer_id===modal.data.id?'#22c55e':'#f87171'}}>{t.buyer_id===modal.data.id?'BOUGHT':'SOLD'}</div>
-                  <div style={{fontSize:11,color:'#f0fdf4'}}>{t.quantity} t</div>
-                  <div style={{fontSize:10,color:'#22c55e'}}>₹{parseFloat(t.subtotal_inr||0).toLocaleString('en-IN')}</div>
-                  <div style={{fontSize:9,color:'#f59e0baa'}}>{fmt(t.created_at)}</div>
-                </div>
-              ))}
-            </>
-          )}
-        </Modal>
+          <div style={{ padding:'9px 12px', background:'#051409', border:'1px solid #22c55e22', borderRadius:6, fontSize:10, color:'#22c55e88', lineHeight:1.7, marginBottom:14 }}>
+            ✅ Sets kyc_status=verified · tier={kycTier} · pushes SSE unlock · sends approval email
+          </div>
+          <button style={M.aPrimary} onClick={() => kycAction(modal.data.id, 'approve')}>
+            CONFIRM APPROVE — {kycTier.toUpperCase()} TIER
+          </button>
+        </Dlg>
       )}
 
-      {modal?.type==='send_message'&&<Modal title={`📧 Message — ${modal.data.full_name}`} onClose={()=>{setModal(null);setMsgSubject('');setMsgBody('');}}><div style={M.confirmText}>Send email + in-app notification to <strong style={{color:'#f0fdf4'}}>{modal.data.email}</strong></div><div style={{fontSize:9,color:'#f59e0baa',letterSpacing:'.12em',marginBottom:6}}>SUBJECT</div><input style={M.input} placeholder="e.g. Action required on your account" value={msgSubject} onChange={e=>setMsgSubject(e.target.value)}/><div style={{fontSize:9,color:'#f59e0baa',letterSpacing:'.12em',marginBottom:6}}>MESSAGE</div><textarea style={{...M.textarea,minHeight:120}} value={msgBody} onChange={e=>setMsgBody(e.target.value)} placeholder="Write your message here..."/><button style={M.approveBtn} onClick={()=>handleSendMessage(modal.data.id)} disabled={!msgSubject.trim()||!msgBody.trim()}>SEND MESSAGE →</button></Modal>}
+      {modal?.type === 'kyc_reject' && <Dlg title="Reject KYC" onClose={() => { setModal(null); setReason(''); }}><textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="Rejection reason..." /><button style={M.rPrimary} onClick={() => kycAction(modal.data.id, 'reject')} disabled={!reason.trim()}>CONFIRM REJECT</button></Dlg>}
 
-      {modal?.type==='reassign_wallet'&&<Modal title="🔑 Reassign Wallet" onClose={()=>{setModal(null);setNewWallet('');setReason('');}}><div style={M.confirmText}>Reassign wallet for <strong style={{color:'#f0fdf4'}}>{modal.data.full_name}</strong>.<br/><span style={{color:'#f87171aa',fontSize:10}}>Current: {modal.data.wallet_address||'None'}</span></div><div style={{fontSize:9,color:'#f59e0baa',letterSpacing:'.12em',marginBottom:6,marginTop:12}}>NEW WALLET (0x...)</div><input style={M.input} placeholder="0x1234...abcd" value={newWallet} onChange={e=>setNewWallet(e.target.value)}/><div style={{fontSize:9,color:'#f59e0baa',letterSpacing:'.12em',marginBottom:6}}>REASON</div><textarea style={M.textarea} value={reason} onChange={e=>setReason(e.target.value)} placeholder="e.g. User lost access to original wallet"/><button style={{...M.approveBtn,background:'linear-gradient(135deg,#1d4ed8,#1e40af)'}} onClick={()=>handleWalletReassign(modal.data.id)} disabled={!newWallet||!reason.trim()}>CONFIRM REASSIGN</button></Modal>}
+      {modal?.type === 'credit_detail' && <Dlg title="Credit Details" onClose={() => setModal(null)} wide>
+        {[['User', modal.data.full_name], ['Email', modal.data.email], ['Project', modal.data.project_name], ['Location', modal.data.project_location || '—'], ['Country', modal.data.country || '—'], ['Developer', modal.data.developer || '—'], ['Standard', modal.data.standard || '—'], ['Project Type', modal.data.project_type || '—'], ['Serial', modal.data.registry_serial || '—'], ['Quantity', `${modal.data.quantity} tCO₂`], ['Vintage Year', modal.data.vintage_year || '—'], ['Expiry Date', modal.data.expiry_date || '—'], ['Price/Credit', modal.data.price_per_credit_inr ? `₹${parseFloat(modal.data.price_per_credit_inr).toLocaleString('en-IN')}` : '—'], ['CBAM Eligible', modal.data.cbam_eligible ? '✅ Yes' : 'No'], ['ICVCM CCP', modal.data.icvcm_ccp_eligible ? `✅ ${modal.data.icvcm_ccp_label || 'Yes'}` : 'No'], ['SDG Tags', modal.data.sdg_tags?.join(', ') || '—'], ['Admin Status', modal.data.admin_status], ['Token ID', modal.data.token_id != null ? `#${modal.data.token_id}` : 'Not minted'], ['TX Hash', modal.data.tx_hash_mint ? `${modal.data.tx_hash_mint.slice(0, 16)}...` : '—'], ['Wallet', modal.data.user_wallet || 'NONE — wallet required'], ['Admin Notes', modal.data.admin_notes || '—']].map(([k, v]) => <div key={k} style={M.row}><span style={M.key}>{k}</span><span style={{ ...M.val, color: k === 'Token ID' && !modal.data.token_id ? '#f87171' : k === 'Wallet' && !modal.data.user_wallet ? '#f87171' : undefined, maxWidth: 320 }}>{v}</span></div>)}
+        <div style={{ display: 'flex', gap: 10, marginTop: 12, flexWrap: 'wrap' }}>
+          {modal.data.doc_ipfs_hash && <a href={`${PG}/${modal.data.doc_ipfs_hash}`} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: '#60a5fa', textDecoration: 'none' }}>📄 VIEW PROOF DOC ↗</a>}
+          {modal.data.registry_link && <a href={modal.data.registry_link} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: '#22c55e', textDecoration: 'none' }}>🔗 REGISTRY LINK ↗</a>}
+          {modal.data.tx_hash_mint && <a href={`https://sepolia.etherscan.io/tx/${modal.data.tx_hash_mint}`} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: '#f59e0b', textDecoration: 'none' }}>⛓ ETHERSCAN ↗</a>}
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
+          {modal.data.admin_status === 'pending' && <><button style={M.aPrimary} onClick={() => setModal({ type: 'credit_approve', data: modal.data })}>✓ APPROVE</button><button style={M.rPrimary} onClick={() => setModal({ type: 'credit_reject', data: modal.data })}>✕ REJECT</button><button style={{ ...M.aPrimary, background: 'linear-gradient(135deg,#7c3aed,#6d28d9)' }} onClick={() => { setNewQty(String(modal.data.quantity)); setReason(''); setModal({ type: 'qty_fix', data: modal.data }); }}>✎ CORRECT QTY</button></>}
+          {modal.data.admin_status === 'approved' && !modal.data.token_id && <>
+            <button style={{ ...M.aPrimary, background: 'linear-gradient(135deg,#dc2626,#b91c1c)' }} onClick={() => { setModal(null); retryMint(modal.data.id); }}>⟳ RETRY MINT</button>
+            <button style={{ ...M.aPrimary, background: 'linear-gradient(135deg,#1d4ed8,#1e40af)' }} onClick={() => { setManualTokenId(''); setModal({ type: 'manual_sync', data: modal.data }); }}>✎ SET TOKEN ID</button>
+            <button style={{ ...M.aPrimary, background: 'linear-gradient(135deg,#a16207,#854d0e)' }} onClick={() => handleLoadMintDiag(modal.data.id)}>🔍 DIAGNOSE</button>
+            {!modal.data.user_wallet && <button style={{ ...M.aPrimary, background: 'linear-gradient(135deg,#7c3aed,#6d28d9)' }} onClick={() => { setAssignWallet(''); setModal({ type: 'assign_mint', data: modal.data }); }}>🔑 ASSIGN + MINT</button>}
+          </>}
+        </div>
+      </Dlg>}
 
-      {modal?.type==='price_override'&&<Modal title="📝 Override Listing Price" onClose={()=>{setModal(null);setPriceOverride('');setReason('');}}><div style={M.confirmText}>Override price for listing <strong style={{color:'#60a5fa'}}>#{modal.data.listingId}</strong>.</div><div style={{fontSize:9,color:'#f59e0baa',letterSpacing:'.12em',marginBottom:6,marginTop:12}}>NEW PRICE (₹ per credit)</div><input style={M.input} type="number" min="1" placeholder="e.g. 850" value={priceOverride} onChange={e=>setPriceOverride(e.target.value)}/><div style={{fontSize:9,color:'#f59e0baa',letterSpacing:'.12em',marginBottom:6}}>REASON</div><textarea style={M.textarea} value={reason} onChange={e=>setReason(e.target.value)} placeholder="e.g. User listed at ₹8500 instead of ₹850 — typo"/><button style={M.approveBtn} onClick={()=>handlePriceOverride(modal.data.listingId)} disabled={!priceOverride||!reason.trim()}>CONFIRM PRICE OVERRIDE</button></Modal>}
+      {modal?.type === 'credit_approve' && <Dlg title="Approve Credit" onClose={() => { setModal(null); setReason(''); }}><div style={M.ct}>Approve <strong style={{ color: '#f0fdf4' }}>{modal.data.project_name}</strong>?</div><textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="Optional notes..." /><button style={M.aPrimary} onClick={() => creditAction(modal.data.id, 'approve')}>CONFIRM APPROVE</button></Dlg>}
 
-      {modal?.type==='delete_user'&&<Modal title="🗑 Delete User Account" onClose={()=>{setModal(null);setReason('');}}><div style={{padding:'12px 14px',background:'#1a0707',border:'1px solid #f8717133',borderRadius:8,marginBottom:16,fontSize:11,color:'#f87171',lineHeight:1.7}}>⛔ <strong>Irreversible.</strong> Personal data anonymised (GDPR). On-chain tokens remain on the blockchain permanently.</div>{[['Name',modal.data.full_name],['Email',modal.data.email],['Wallet',modal.data.wallet_address||'None']].map(([k,v])=><div key={k} style={M.row}><span style={M.key}>{k}</span><span style={M.val}>{v}</span></div>)}<div style={{fontSize:9,color:'#f59e0baa',letterSpacing:'.12em',marginBottom:6,marginTop:14}}>DELETION REASON (required)</div><textarea style={M.textarea} value={reason} onChange={e=>setReason(e.target.value)} placeholder="e.g. GDPR Art.17 request, fraudulent account..."/><button style={{...M.rejectBtn,background:'linear-gradient(135deg,#7c2d12,#991b1b)',opacity:deletingUserId===modal.data.id?.5:1}} onClick={()=>handleDeleteUser(modal.data.id)} disabled={!reason.trim()||deletingUserId===modal.data.id}>{deletingUserId===modal.data.id?'DELETING...':'CONFIRM DELETE'}</button></Modal>}
+      {modal?.type === 'credit_reject' && <Dlg title="Reject Credit" onClose={() => { setModal(null); setReason(''); }}><textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="Rejection reason..." /><button style={M.rPrimary} onClick={() => creditAction(modal.data.id, 'reject')} disabled={!reason.trim()}>CONFIRM REJECT</button></Dlg>}
 
-      {modal?.type==='freeze'&&<Modal title="Freeze Account" onClose={()=>{setModal(null);setReason('');}}><div style={M.confirmText}>Freeze <strong style={{color:'#f87171'}}>{modal.data.email}</strong>?</div><textarea style={M.textarea} value={reason} onChange={e=>setReason(e.target.value)} placeholder="Reason for freezing..."/><button style={M.rejectBtn} onClick={()=>freezeAction(modal.data.id,'freeze')} disabled={!reason.trim()}>CONFIRM FREEZE</button></Modal>}
-      {modal?.type==='unfreeze'&&<Modal title="Unfreeze Account" onClose={()=>{setModal(null);setReason('');}}><div style={M.confirmText}>Unfreeze <strong style={{color:'#22c55e'}}>{modal.data.email}</strong>?</div><button style={M.approveBtn} onClick={()=>freezeAction(modal.data.id,'unfreeze')}>CONFIRM UNFREEZE</button></Modal>}
-      {modal?.type==='new_dispute'&&<Modal title="Open Dispute" onClose={()=>{setModal(null);setReason('');}}><input style={M.input} placeholder="Target user ID..." onChange={e=>setModal(m=>({...m,targetId:e.target.value}))}/><textarea style={M.textarea} value={reason} onChange={e=>setReason(e.target.value)} placeholder="Dispute reason..."/><button style={M.approveBtn} onClick={async()=>{try{await apiFetch('/api/admin/disputes',{method:'POST',body:JSON.stringify({targetUserId:modal.targetId,reason,notes:''})});showToast('Dispute opened');setModal(null);setReason('');loadDisputes();}catch(e){showToast(`❌ ${e.message}`);}}} disabled={!reason.trim()}>OPEN DISPUTE</button></Modal>}
-      {modal?.type==='resolve_dispute'&&<Modal title="Resolve Dispute" onClose={()=>{setModal(null);setReason('');}}><div style={M.confirmText}>{modal.data.reason}</div><textarea style={M.textarea} value={reason} onChange={e=>setReason(e.target.value)} placeholder="Resolution notes..."/><button style={M.approveBtn} onClick={()=>resolveDispute(modal.data.id)} disabled={!reason.trim()}>MARK RESOLVED</button></Modal>}
-      {modal?.type==='flag_review'&&<Modal title={modal.action==='cleared'?'✅ Clear Flag':'🚨 Escalate Flag'} onClose={()=>{setModal(null);setReason('');}}><div style={M.confirmText}>{modal.action==='cleared'?'Clear':'Escalate'} flag for <strong style={{color:'#f0fdf4'}}>{modal.data.email}</strong>?</div><textarea style={M.textarea} value={reason} onChange={e=>setReason(e.target.value)} placeholder={modal.action==='cleared'?'Why is this cleared?':'Escalation reason...'}/><button style={modal.action==='cleared'?M.approveBtn:M.rejectBtn} onClick={()=>reviewFlag(modal.data.id,modal.action,reason)} disabled={!reason.trim()}>CONFIRM {modal.action.toUpperCase()}</button></Modal>}
-      {modal?.type==='flag_detail'&&<Modal title="Flag Details" onClose={()=>setModal(null)}>{[['User',modal.data.email],['Type',modal.data.flag_type],['Amount',modal.data.amount?`₹${parseFloat(modal.data.amount).toLocaleString('en-IN')}`:'—'],['Severity',modal.data.severity],['Status',modal.data.status],['Description',modal.data.description],['Review Notes',modal.data.review_notes||'—'],['Created',fmtTime(modal.data.created_at)]].map(([k,v])=><div key={k} style={M.row}><span style={M.key}>{k}</span><span style={{...M.val,maxWidth:300}}>{v||'—'}</span></div>)}</Modal>}
+      {modal?.type === 'manual_sync' && <Dlg title="✎ Set Token ID Manually" onClose={() => { setModal(null); setManualTokenId(''); }}>
+        <div style={M.ct}>Use only if mint succeeded on-chain but DB was not updated.<br /><span style={{ color: '#f87171aa', fontSize: 10 }}>Project: {modal.data.project_name} · Serial: {modal.data.registry_serial}</span></div>
+        <div style={{ padding: '9px 12px', background: '#110a00', border: '1px solid #f59e0b22', borderRadius: 6, marginBottom: 12, fontSize: 10, color: '#f59e0baa', lineHeight: 1.7 }}>1. Open Etherscan → find mint TX<br />2. Find <strong>CreditMinted</strong> event<br />3. Copy <strong>tokenId</strong> and paste below</div>
+        <input style={M.inp} type="number" min="0" placeholder="e.g. 4" value={manualTokenId} onChange={e => setManualTokenId(e.target.value)} />
+        <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}><a href="https://sepolia.etherscan.io" target="_blank" rel="noreferrer" style={{ fontSize: 10, color: '#60a5fa88', textDecoration: 'none' }}>🔗 Open Etherscan ↗</a>{modal.data.user_wallet && <a href={`https://sepolia.etherscan.io/address/${modal.data.user_wallet}`} target="_blank" rel="noreferrer" style={{ fontSize: 10, color: '#60a5fa88', textDecoration: 'none' }}>🔗 User Wallet ↗</a>}</div>
+        <button style={{ ...M.aPrimary, background: 'linear-gradient(135deg,#1d4ed8,#1e40af)', opacity: syncingId === modal.data.id ? .5 : 1 }} onClick={() => handleManualSync(modal.data.id)} disabled={!manualTokenId || syncingId === modal.data.id}>{syncingId === modal.data.id ? 'SYNCING...' : 'CONFIRM SET TOKEN ID'}</button>
+      </Dlg>}
 
-      {modal?.type==='force_delist'&&<Modal title="Force Delist Listing" onClose={()=>{setModal(null);setReason('');}}><div style={M.confirmText}>Force-delist listing from <strong style={{color:'#f0fdf4'}}>{modal.data.seller_name||modal.data.seller_email}</strong>?</div><textarea style={M.textarea} value={reason} onChange={e=>setReason(e.target.value)} placeholder="Reason for delisting..."/><button style={M.rejectBtn} onClick={()=>handleForceDelist(modal.data.id)} disabled={!reason.trim()}>CONFIRM DELIST</button></Modal>}
+      {modal?.type === 'qty_fix' && <Dlg title="✎ Correct Quantity" onClose={() => { setModal(null); setNewQty(''); setReason(''); }}><div style={M.row}><span style={M.key}>Current</span><span style={M.val}>{modal.data.quantity} tCO₂</span></div><input style={{ ...M.inp, marginTop: 12 }} type="number" min="1" value={newQty} onChange={e => setNewQty(e.target.value)} placeholder="New quantity" /><textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="Reason..." /><button style={M.aPrimary} onClick={() => handleQtyFix(modal.data.id)} disabled={!newQty || !reason.trim()}>CONFIRM</button></Dlg>}
 
-      {modal?.type==='require_rekyc'&&<Modal title="↻ Require Re-KYC" onClose={()=>{setModal(null);setReason('');}}><div style={M.confirmText}>Require <strong style={{color:'#f0fdf4'}}>{modal.data.full_name}</strong> to re-submit KYC?</div><textarea style={M.textarea} value={reason} onChange={e=>setReason(e.target.value)} placeholder="Reason e.g. KYC document expired, suspicious activity..."/><button style={M.rejectBtn} onClick={()=>handleRequireRekyc(modal.data.id)} disabled={!reason.trim()}>CONFIRM RE-KYC</button></Modal>}
+      {modal?.type === 'assign_mint' && <Dlg title="🔑 Assign Wallet + Mint" onClose={() => { setModal(null); setAssignWallet(''); }}>
+        <div style={M.ct}>User <strong style={{ color: '#f0fdf4' }}>{modal.data.full_name}</strong> has no wallet.</div>
+        <input style={M.inp} placeholder="0x1234...abcd (42 chars)" value={assignWallet} onChange={e => setAssignWallet(e.target.value)} />
+        {assignWallet && !isValidWallet(assignWallet) && <div style={{ fontSize: 9, color: '#f87171', marginBottom: 8 }}>⚠ Invalid wallet format</div>}
+        <button style={{ ...M.aPrimary, opacity: syncingId === modal.data.id ? .5 : 1 }} onClick={() => handleAssignAndMint(modal.data.id)} disabled={!isValidWallet(assignWallet) || syncingId === modal.data.id}>{syncingId === modal.data.id ? 'MINTING...' : 'ASSIGN + MINT →'}</button>
+      </Dlg>}
+
+      {modal?.type === 'mint_diag' && <Dlg title="🔍 Mint Diagnosis" onClose={() => setModal(null)}>
+        {modal.data.diagnostics?.map((d, i) => <div key={i} style={{ padding: '9px 12px', borderRadius: 6, marginBottom: 7, background: d.severity === 'critical' ? '#1a0707' : d.severity === 'warning' ? '#110a00' : '#060a07', border: `1px solid ${d.severity === 'critical' ? '#f87171' : d.severity === 'warning' ? '#f59e0b' : '#22c55e'}33` }}><div style={{ fontSize: 11, color: d.severity === 'critical' ? '#f87171' : d.severity === 'warning' ? '#f59e0b' : '#22c55e', fontWeight: 600, marginBottom: 3 }}>{d.severity === 'critical' ? '🚨' : d.severity === 'warning' ? '⚠' : 'ℹ'} {d.issue}</div><div style={{ fontSize: 10, color: '#86efac88' }}>Fix: {d.fix}</div></div>)}
+        {modal.data.mintErrors?.map((e, i) => <div key={i} style={{ padding: '7px 10px', background: '#060a07', border: '1px solid #f8717122', borderRadius: 6, marginBottom: 5, fontSize: 9, color: '#f87171', fontFamily: 'monospace' }}>{e.timestamp}<br />{e.error}</div>)}
+      </Dlg>}
+
+      {/* ✅ THE CRASH FIX — cancel_order now properly guarded */}
+      {modal?.type === 'cancel_order' && <Dlg title="Cancel Buy Order" onClose={() => { setModal(null); setReason(''); }}>
+        <div style={M.ct}>Force-cancel order <strong style={{ color: '#60a5fa' }}>#{modal.data.id}</strong> from <strong style={{ color: '#f0fdf4' }}>{modal.data.buyer_name}</strong>.</div>
+        <div style={M.row}><span style={M.key}>ETH Escrowed</span><span style={{ ...M.val, color: '#f59e0b' }}>{parseFloat(modal.data.eth_escrowed || 0).toFixed(4)} ETH</span></div>
+        <div style={M.row}><span style={M.key}>Amount</span><span style={M.val}>{modal.data.amount} tCO₂</span></div>
+        <div style={{ padding: '9px 12px', background: '#110a00', border: '1px solid #f59e0b22', borderRadius: 6, margin: '10px 0', fontSize: 10, color: '#f59e0baa', lineHeight: 1.6 }}>⚠ DB updated immediately. ETH refund requires on-chain cancelBuyOrder separately.</div>
+        <textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="Reason for cancellation..." />
+        <button style={M.rPrimary} onClick={() => handleForceCancelOrder(modal.data.id)} disabled={!reason.trim()}>CONFIRM CANCEL</button>
+      </Dlg>}
+
+      {modal?.type === 'cancel_order_onchain' && <Dlg title="⛓ Cancel Order + Refund ETH On-Chain" onClose={() => { setModal(null); setReason(''); }}>
+        <div style={M.ct}>Cancel order <strong style={{ color: '#60a5fa' }}>#{modal.data.id}</strong> AND trigger on-chain ETH refund.</div>
+        <div style={M.row}><span style={M.key}>ETH Escrowed</span><span style={{ ...M.val, color: '#f59e0b' }}>{parseFloat(modal.data.eth_escrowed || 0).toFixed(4)} ETH</span></div>
+        <div style={M.row}><span style={M.key}>Buyer</span><span style={M.val}>{modal.data.buyer_name || modal.data.buyer_email}</span></div>
+        <div style={{ padding: '10px 12px', background: '#051409', border: '1px solid #22c55e22', borderRadius: 6, margin: '12px 0', fontSize: 10, color: '#22c55e88', lineHeight: 1.7 }}>✅ Calls cancelBuyOrder on-chain. Minter pays gas. ETH auto-refunded to buyer.<br />⏱ May take 15–30s on Sepolia.</div>
+        <textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="Reason..." />
+        <button style={{ ...M.aPrimary, background: 'linear-gradient(135deg,#f97316,#ea580c)' }} onClick={async () => {
+          if (!reason.trim()) { toast_('❌ Reason required', 3000, 'error'); return; }
+          toast_('⟳ Submitting TX to Sepolia...', 10000, 'info');
+          try { const r = await api(`/api/admin/buy-orders/${modal.data.id}/force-cancel-onchain`, { method: 'POST', body: JSON.stringify({ reason: sanitize(reason) }) }); toast_(`✅ ${r?.ethRefunded} ETH refunded · TX: ${r?.txHash?.slice(0, 12)}...`, 8000, 'success'); setModal(null); setReason(''); loadBuyOrders(buyOrderFilter); loadStats(); }
+          catch (e) { toast_(`❌ ${e.message}`, 6000, 'error'); }
+        }} disabled={!reason.trim()}>⛓ CONFIRM CANCEL + REFUND ETH ON-CHAIN</button>
+      </Dlg>}
+
+      {modal?.type === 'regen_cert' && <Dlg title="📄 Regenerate Certificate" onClose={() => { setModal(null); setReason(''); }}>
+        <div style={M.ct}>Regenerate PDF for <strong style={{ color: '#22c55e' }}>{modal.data.certificate_id?.slice(0, 24)}</strong>.<br /><span style={{ color: '#f59e0baa', fontSize: 10 }}>User will be emailed the updated certificate.</span></div>
+        {[['Beneficiary', modal.data.beneficiary_name || '—'], ['Entity', modal.data.beneficiary_entity || '—'], ['Scope', `Scope ${modal.data.retire_scope || '—'}`], ['Amount', `${modal.data.amount} tCO₂`]].map(([k, v]) => <div key={k} style={M.row}><span style={M.key}>{k}</span><span style={M.val}>{v}</span></div>)}
+        <div style={{ padding: '9px 12px', background: '#051409', border: '1px solid #22c55e22', borderRadius: 6, margin: '12px 0', fontSize: 10, color: '#22c55e88', lineHeight: 1.7 }}>⚠ Only regenerate after correcting data via ✎ CORRECT. New cert uses current DB values.</div>
+        <textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="Reason e.g. Corrected scope — certificate updated accordingly" />
+        <button style={M.aPrimary} onClick={async () => {
+          if (!reason.trim()) { toast_('❌ Reason required', 3000, 'error'); return; }
+          try { const r = await api(`/api/admin/retirements/${modal.data.id}/regenerate-certificate`, { method: 'POST', body: JSON.stringify({ reason: sanitize(reason) }) }); toast_(`✅ New IPFS: ${r?.newIpfsHash?.slice(0, 12)}...`, 6000, 'success'); setModal(null); setReason(''); loadRetirements(); }
+          catch (e) { toast_(`❌ ${e.message}`, 5000, 'error'); }
+        }} disabled={!reason.trim()}>📄 REGENERATE CERTIFICATE</button>
+      </Dlg>}
+
+      {modal?.type === 'reconcile_trade' && <Dlg title="🔁 Reconcile Trade" onClose={() => { setModal(null); setReason(''); }} wide>
+        <div style={M.ct}>Manually assign credits to buyer for trade <strong style={{ color: '#60a5fa' }}>#{modal.data.id}</strong>.</div>
+        {[['Buyer', modal.data.buyer_name || modal.data.buyer_email], ['Seller', modal.data.seller_name || modal.data.seller_email], ['Project', modal.data.project_name || '—'], ['Quantity', `${modal.data.quantity} tCO₂`], ['Total', `₹${parseFloat(modal.data.subtotal_inr || 0).toLocaleString('en-IN')}`], ['Status', modal.data.status], ['TX Hash', modal.data.tx_hash ? `${modal.data.tx_hash.slice(0, 20)}...` : 'None'], ['Trade Date', fmt(modal.data.created_at)]].map(([k, v]) => <div key={k} style={M.row}><span style={M.key}>{k}</span><span style={M.val}>{v}</span></div>)}
+        {modal.data.tx_hash && <div style={{ marginTop: 10 }}><a href={`https://sepolia.etherscan.io/tx/${modal.data.tx_hash}`} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: '#f59e0b', textDecoration: 'none' }}>⛓ VIEW TX ON ETHERSCAN ↗</a></div>}
+        <div style={{ padding: '10px 12px', background: '#051409', border: '1px solid #22c55e22', borderRadius: 6, margin: '12px 0', fontSize: 10, color: '#22c55e88', lineHeight: 1.7 }}>⚠ Use <strong>only</strong> when trade completed on-chain but credits are missing from buyer's portfolio. Verify on Etherscan first.</div>
+        <textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="Reason e.g. Trade completed on-chain but buyer portfolio not updated..." />
+        <button style={M.aPrimary} onClick={() => handleReconcile(modal.data.id)} disabled={!reason.trim()}>✅ CONFIRM RECONCILE — ASSIGN {modal.data.quantity}t TO BUYER</button>
+      </Dlg>}
+
+      {modal?.type === 'correct_retirement' && <Dlg title="✎ Correct Retirement Data" onClose={() => { setModal(null); setReason(''); setRetCorrect({}); }}>
+        <div style={M.ct}>Edit metadata for cert <strong style={{ color: '#22c55e' }}>{modal.data.certificate_id?.slice(0, 20)}</strong>.<br /><span style={{ color: '#f87171aa', fontSize: 10 }}>Amount and token ID cannot be changed — on-chain burns.</span></div>
+        {[['retire_scope', 'Scope (1/2/3)'], ['beneficiary_name', 'Beneficiary Name'], ['beneficiary_entity', 'Company / Entity'], ['beneficiary_gstin', 'GSTIN'], ['reporting_standard', 'Reporting Standard'], ['purpose', 'Purpose']].map(([field, label]) => <div key={field} style={{ marginBottom: 8 }}><div style={{ fontSize: 9, color: '#f59e0baa', letterSpacing: '.1em', marginBottom: 3 }}>{label.toUpperCase()}</div><input style={{ ...M.inp, marginBottom: 0 }} value={retCorrect[field] || ''} onChange={e => setRetCorrect(p => ({ ...p, [field]: e.target.value }))} placeholder={`Current: ${modal.data[field] || '—'}`} /></div>)}
+        <div style={{ fontSize: 9, color: '#f59e0baa', letterSpacing: '.1em', marginBottom: 4, marginTop: 10 }}>AUDIT REASON (required)</div>
+        <textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. User selected wrong scope" />
+        <button style={M.aPrimary} onClick={() => handleRetirementCorrect(modal.data.id)} disabled={!reason.trim()}>CONFIRM CORRECTION</button>
+      </Dlg>}
+
+      {modal?.type === 'flag_retirement' && <Dlg title="⚠ Flag Retirement" onClose={() => { setModal(null); setReason(''); }}><div style={M.ct}>Flag <strong style={{ color: '#f0fdf4' }}>{modal.data.certificate_id}</strong> ({modal.data.amount} tCO₂).</div><textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="Reason..." /><button style={M.rPrimary} onClick={() => handleFlagRetirement(modal.data.id)} disabled={!reason.trim()}>CONFIRM FLAG</button></Dlg>}
+
+      {modal?.type === 'user_detail' && <Dlg title="User Details" onClose={() => setModal(null)} wide>
+        {[['Name', modal.data.full_name || '—'], ['Email', modal.data.email], ['Role', modal.data.role || 'user'], ['Phone', modal.data.phone || '—'], ['Wallet', modal.data.wallet_address || 'Not connected'], ['KYC Status', modal.data.kyc_status || 'pending'], ['KYC Verified', modal.data.kyc_verified ? '✅ Yes' : '❌ No'], ['Account Status', modal.data.frozen ? `🔒 FROZEN — ${modal.data.freeze_reason}` : '✅ Active'], ['Joined', fmt(modal.data.created_at)]].map(([k, v]) => <div key={k} style={M.row}><span style={M.key}>{k}</span><span style={{ ...M.val, color: k === 'Account Status' && modal.data.frozen ? '#f87171' : k === 'KYC Verified' && !modal.data.kyc_verified ? '#f87171' : k === 'Wallet' && !modal.data.wallet_address ? '#f59e0b' : undefined }}>{v}</span></div>)}
+        <div style={{ display: 'flex', gap: 8, marginTop: 16, flexWrap: 'wrap' }}>
+          {!modal.data.frozen ? <button style={M.rPrimary} onClick={() => setModal({ type: 'freeze', data: modal.data })}>🔒 FREEZE ACCOUNT</button> : <button style={M.aPrimary} onClick={() => setModal({ type: 'unfreeze', data: modal.data })}>🔓 UNFREEZE ACCOUNT</button>}
+          <button style={{ ...M.aPrimary, background: 'linear-gradient(135deg,#1d4ed8,#1e40af)' }} onClick={() => { setNewWallet(''); setReason(''); setModal({ type: 'reassign_wallet', data: modal.data }); }}>🔑 REASSIGN WALLET</button>
+          <button style={{ ...M.aPrimary, background: 'linear-gradient(135deg,#a16207,#854d0e)' }} onClick={() => { setReason(''); setModal({ type: 'rekyc', data: modal.data }); }}>↻ REQUIRE RE-KYC</button>
+          <button style={{ ...M.aPrimary, background: 'linear-gradient(135deg,#0f766e,#0d9488)' }} onClick={() => handleResync(modal.data.id)}>🔄 RESYNC PORTFOLIO</button>
+          <button style={{ ...M.aPrimary, background: 'linear-gradient(135deg,#1e3a5f,#1d4ed8)' }} onClick={() => { setMsgSubject(''); setMsgBody(''); setModal({ type: 'send_msg', data: modal.data }); }}>📧 SEND MESSAGE</button>
+          <button style={{ ...M.rPrimary, background: 'linear-gradient(135deg,#7c2d12,#991b1b)' }} onClick={() => { setReason(''); setModal({ type: 'delete_user', data: modal.data }); }}>🗑 DELETE USER</button>
+        </div>
+      </Dlg>}
+
+      {modal?.type === 'user_history' && <Dlg title={`History — ${modal.data.full_name}`} onClose={() => setModal(null)} wide>
+        {userDataLoading ? <div style={{ padding: 20, textAlign: 'center', color: '#f59e0baa' }}>Loading...</div> : <>
+          <div style={{ fontSize: 9, color: '#22c55e88', letterSpacing: '.14em', marginBottom: 6 }}>CREDITS ({userCredits.length})</div>
+          {userCredits.length === 0 ? <div style={{ fontSize: 10, color: '#f59e0b44', marginBottom: 12 }}>No credits</div> : userCredits.map(c => <div key={c.id} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr', gap: 6, padding: '6px 0', borderBottom: '1px solid #f59e0b08', alignItems: 'center' }}><div style={{ fontSize: 11, color: '#f0fdf4' }}>{c.project_name}<div style={{ fontSize: 8, color: '#f59e0bcc' }}>{c.registry_serial}</div></div><div style={{ fontSize: 11, color: '#22c55e' }}>{c.quantity}t</div><div style={{ fontSize: 9, color: '#f59e0bbb' }}>{c.vintage_year}</div><div>{c.token_id != null ? <span style={{ fontSize: 9, color: '#22c55e' }}>⛓#{c.token_id}</span> : <span style={{ fontSize: 9, color: '#f8717188' }}>⏳</span>}</div><Badge status={c.admin_status} /></div>)}
+          <div style={{ fontSize: 9, color: '#60a5fa88', letterSpacing: '.14em', margin: '12px 0 6px' }}>TRADES ({userTrades.length})</div>
+          {userTrades.length === 0 ? <div style={{ fontSize: 10, color: '#f59e0b44', marginBottom: 12 }}>No trades</div> : userTrades.slice(0, 20).map(t => <div key={t.id} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr', gap: 6, padding: '6px 0', borderBottom: '1px solid #f59e0b08', alignItems: 'center' }}><div style={{ fontSize: 10, color: '#f0fdf4' }}>{t.project_name || '—'}</div><div style={{ fontSize: 10, color: t.buyer_id === modal.data.id ? '#22c55e' : '#f87171' }}>{t.buyer_id === modal.data.id ? 'BOUGHT' : 'SOLD'}</div><div style={{ fontSize: 11, color: '#f0fdf4' }}>{t.quantity}t</div><div style={{ fontSize: 10, color: '#22c55e' }}>₹{parseFloat(t.subtotal_inr || 0).toLocaleString('en-IN')}</div><div style={{ fontSize: 9, color: '#f59e0baa' }}>{fmt(t.created_at)}</div></div>)}
+          <div style={{ fontSize: 9, color: '#f59e0b88', letterSpacing: '.14em', margin: '12px 0 6px' }}>BUY ORDERS ({userOrders.length})</div>
+          {userOrders.length === 0 ? <div style={{ fontSize: 10, color: '#f59e0b44' }}>No buy orders</div> : userOrders.map(o => <div key={o.id} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr', gap: 6, padding: '6px 0', borderBottom: '1px solid #f59e0b08', alignItems: 'center' }}><div style={{ fontSize: 10, color: '#f0fdf4' }}>{o.project_name || `Token #${o.token_id}`}</div><div style={{ fontSize: 11, color: '#22c55e' }}>{o.amount}t</div><div style={{ fontSize: 10, color: '#f59e0b' }}>{parseFloat(o.eth_escrowed || 0).toFixed(4)} ETH</div><Badge status={o.status} /><div style={{ fontSize: 9, color: '#f59e0baa' }}>{fmt(o.created_at)}</div></div>)}
+        </>}
+      </Dlg>}
+
+      {modal?.type === 'send_msg' && <Dlg title={`📧 Message — ${modal.data.full_name}`} onClose={() => { setModal(null); setMsgSubject(''); setMsgBody(''); }}>
+        <div style={M.ct}>Send to <strong style={{ color: '#f0fdf4' }}>{modal.data.email}</strong></div>
+        <input style={M.inp} placeholder="Subject" value={msgSubject} onChange={e => setMsgSubject(e.target.value)} maxLength={200} />
+        <textarea style={{ ...M.ta, minHeight: 90 }} value={msgBody} onChange={e => setMsgBody(e.target.value)} placeholder="Message..." maxLength={2000} />
+        <div style={{ fontSize: 9, color: '#f59e0b44', marginBottom: 8, textAlign: 'right' }}>{msgBody.length}/2000</div>
+        <button style={M.aPrimary} onClick={() => handleSendMsg(modal.data.id)} disabled={!msgSubject.trim() || !msgBody.trim()}>SEND →</button>
+      </Dlg>}
+
+      {modal?.type === 'reassign_wallet' && <Dlg title="🔑 Reassign Wallet" onClose={() => { setModal(null); setNewWallet(''); setReason(''); }}>
+        <div style={M.ct}>Current: <span style={{ color: '#f87171aa', fontSize: 10 }}>{modal.data.wallet_address || 'None'}</span></div>
+        <input style={M.inp} placeholder="New wallet (0x... 42 chars)" value={newWallet} onChange={e => setNewWallet(e.target.value)} />
+        {newWallet && !isValidWallet(newWallet) && <div style={{ fontSize: 9, color: '#f87171', marginBottom: 8 }}>⚠ Invalid wallet format</div>}
+        <textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="Reason..." />
+        <button style={{ ...M.aPrimary, background: 'linear-gradient(135deg,#1d4ed8,#1e40af)' }} onClick={() => handleWalletReassign(modal.data.id)} disabled={!isValidWallet(newWallet) || !reason.trim()}>CONFIRM REASSIGN</button>
+      </Dlg>}
+
+      {modal?.type === 'rekyc' && <Dlg title="↻ Require Re-KYC" onClose={() => { setModal(null); setReason(''); }}><div style={M.ct}>Invalidate KYC for <strong style={{ color: '#f0fdf4' }}>{modal.data.full_name}</strong>.</div><textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="Reason..." /><button style={M.rPrimary} onClick={() => handleRekyc(modal.data.id)} disabled={!reason.trim()}>CONFIRM RE-KYC</button></Dlg>}
+
+      {modal?.type === 'delete_user' && <Dlg title="🗑 Delete User" onClose={() => { setModal(null); setReason(''); }}>
+        <div style={{ padding: '9px 12px', background: '#1a0707', border: '1px solid #f8717133', borderRadius: 6, marginBottom: 10, fontSize: 10, color: '#f87171', lineHeight: 1.6 }}>⛔ Irreversible. GDPR anonymise. On-chain tokens remain.</div>
+        {[['Name', modal.data.full_name], ['Email', modal.data.email]].map(([k, v]) => <div key={k} style={M.row}><span style={M.key}>{k}</span><span style={M.val}>{v}</span></div>)}
+        <textarea style={{ ...M.ta, marginTop: 10 }} value={reason} onChange={e => setReason(e.target.value)} placeholder="Deletion reason (required)..." />
+        <ConfirmBar message={`Permanently delete ${modal.data.email}? This cannot be undone.`} onConfirm={() => handleDeleteUser(modal.data.id)} onCancel={() => setModal(null)} />
+        {deletingUserId === modal.data.id && <div style={{ fontSize: 10, color: '#f87171', marginTop: 8 }}>⟳ Deleting...</div>}
+      </Dlg>}
+
+      {modal?.type === 'freeze' && <Dlg title="Freeze Account" onClose={() => { setModal(null); setReason(''); }}><div style={M.ct}>Freeze <strong style={{ color: '#f87171' }}>{modal.data.email}</strong>?</div><textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="Reason..." /><button style={M.rPrimary} onClick={() => freezeAction(modal.data.id, 'freeze')} disabled={!reason.trim()}>CONFIRM FREEZE</button></Dlg>}
+
+      {modal?.type === 'unfreeze' && <Dlg title="Unfreeze Account" onClose={() => { setModal(null); setReason(''); }}><div style={M.ct}>Unfreeze <strong style={{ color: '#22c55e' }}>{modal.data.email}</strong>?</div><button style={M.aPrimary} onClick={() => freezeAction(modal.data.id, 'unfreeze')}>CONFIRM UNFREEZE</button></Dlg>}
+
+      {modal?.type === 'force_delist' && <Dlg title="Force Delist" onClose={() => { setModal(null); setReason(''); }}><div style={M.ct}>Delist from <strong style={{ color: '#f0fdf4' }}>{modal.data.seller_name || modal.data.seller_email}</strong>?</div><textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="Reason..." /><button style={M.rPrimary} onClick={() => handleForceDelist(modal.data.listing_id || modal.data.batch_id)} disabled={!reason.trim()}>CONFIRM DELIST</button></Dlg>}
+
+      {modal?.type === 'price_override' && <Dlg title="₹ Override Price" onClose={() => { setModal(null); setPriceOverride(''); setReason(''); }}><div style={M.ct}>Override price for <strong style={{ color: '#f0fdf4' }}>{modal.data.project_name}</strong></div><input style={M.inp} type="number" min="1" placeholder="New price ₹" value={priceOverride} onChange={e => setPriceOverride(e.target.value)} /><textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="Reason..." /><button style={M.aPrimary} onClick={() => handlePriceOverride(modal.data.listing_id || modal.data.batch_id)} disabled={!priceOverride || !reason.trim()}>CONFIRM</button></Dlg>}
+
+      {modal?.type === 'new_dispute' && <Dlg title="Open Dispute" onClose={() => { setModal(null); setReason(''); }}>
+        <input style={M.inp} placeholder="Target user ID..." onChange={e => setModal(m => ({ ...m, targetId: e.target.value }))} />
+        <textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="Dispute reason..." />
+        <button style={M.aPrimary} onClick={async () => { try { await api('/api/admin/disputes', { method: 'POST', body: JSON.stringify({ targetUserId: modal.targetId, reason: sanitize(reason), notes: '' }) }); toast_('✅ Dispute opened', 3000, 'success'); setModal(null); setReason(''); loadDisputes(); } catch (e) { toast_(`❌ ${e.message}`, 4000, 'error'); } }} disabled={!reason.trim()}>OPEN DISPUTE</button>
+      </Dlg>}
+
+      {modal?.type === 'resolve_dispute' && <Dlg title="Resolve Dispute" onClose={() => { setModal(null); setReason(''); }}><div style={M.ct}>{modal.data.reason}</div><textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="Resolution notes..." /><button style={M.aPrimary} onClick={() => resolveDispute(modal.data.id)} disabled={!reason.trim()}>MARK RESOLVED</button></Dlg>}
+
+      {modal?.type === 'flag_review' && <Dlg title={modal.action === 'cleared' ? '✅ Clear Flag' : '🚨 Escalate Flag'} onClose={() => { setModal(null); setReason(''); }}>
+        <div style={M.ct}>{modal.action === 'cleared' ? 'Clear' : 'Escalate'} flag for <strong style={{ color: '#f0fdf4' }}>{modal.data.email}</strong>?</div>
+        <textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder={modal.action === 'cleared' ? 'Why cleared?' : 'Escalation reason...'} />
+        <button style={modal.action === 'cleared' ? M.aPrimary : M.rPrimary} onClick={() => reviewFlag(modal.data.id, modal.action, reason)} disabled={!reason.trim()}>CONFIRM {modal.action.toUpperCase()}</button>
+      </Dlg>}
+
+      {modal?.type === 'flag_detail' && <Dlg title="Flag Details" onClose={() => setModal(null)}>
+        {[['User', modal.data.email], ['Type', modal.data.flag_type], ['Amount', modal.data.amount ? `₹${parseFloat(modal.data.amount).toLocaleString('en-IN')}` : '—'], ['Severity', modal.data.severity], ['Status', modal.data.status], ['Description', modal.data.description], ['Review Notes', modal.data.review_notes || '—']].map(([k, v]) => <div key={k} style={M.row}><span style={M.key}>{k}</span><span style={{ ...M.val, maxWidth: 280 }}>{v || '—'}</span></div>)}
+      </Dlg>}
+
     </div>
   );
 }
 
 const S = {
-  page:           { display:'flex', minHeight:'100vh', background:'#0a0800', fontFamily:"'DM Mono',monospace", color:'#f0fdf4' },
-  sidebar:        { width:200, background:'#0d0a00', borderRight:'1px solid #f59e0b11', display:'flex', flexDirection:'column', flexShrink:0, position:'sticky', top:0, height:'100vh', overflowY:'auto' },
-  sideTop:        { padding:'20px 16px 14px', borderBottom:'1px solid #f59e0b11', marginBottom:6 },
-  logo:           { fontSize:12, fontWeight:700, color:'#f59e0b', letterSpacing:'.12em' },
-  logoSub:        { fontSize:8, color:'#f59e0baa', letterSpacing:'.2em', marginTop:3 },
-  navBtn:         { width:'100%', padding:'10px 14px', background:'transparent', border:'none', borderLeft:'2px solid transparent', color:'#f59e0bcc', cursor:'pointer', fontFamily:"'DM Mono',monospace", fontSize:10, textAlign:'left', letterSpacing:'.06em', display:'flex', alignItems:'center', justifyContent:'space-between', gap:4 },
-  navBtnActive:   { borderLeft:'2px solid #f59e0b', color:'#f59e0b', background:'#f59e0b18' },
-  badge:          { background:'#f59e0b', color:'#0a0800', fontSize:8, fontWeight:700, padding:'2px 5px', borderRadius:10, minWidth:14, textAlign:'center', flexShrink:0 },
-  logoutBtn:      { width:'100%', padding:'10px', borderRadius:6, border:'1px solid #f59e0b22', background:'transparent', color:'#f87171ee', cursor:'pointer', fontFamily:"'DM Mono',monospace", fontSize:10, letterSpacing:'.08em' },
-  main:           { flex:1, padding:'28px 36px', overflowY:'auto', minWidth:0 },
-  pageTitle:      { fontSize:18, fontWeight:500, color:'#f0fdf4', marginBottom:20, letterSpacing:'.04em' },
-  statsGrid:      { display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(150px,1fr))', gap:12, marginBottom:20 },
-  statCard:       { background:'#0d0a00', border:'1px solid #f59e0b33', borderRadius:10, padding:'18px 14px', textAlign:'center' },
-  section:        { background:'#0d0a00', border:'1px solid #f59e0b33', borderRadius:10, padding:'18px' },
-  sectionTitle:   { fontSize:9, color:'#f59e0bcc', letterSpacing:'.16em', marginBottom:12 },
-  quickBtn:       { padding:'9px 16px', borderRadius:6, border:'1px solid #f59e0b66', background:'transparent', color:'#f59e0bdd', cursor:'pointer', fontFamily:"'DM Mono',monospace", fontSize:10, letterSpacing:'.06em' },
-  filterBtn:      { padding:'7px 12px', borderRadius:6, border:'1px solid #f59e0b22', background:'transparent', color:'#f59e0bcc', cursor:'pointer', fontFamily:"'DM Mono',monospace", fontSize:10, letterSpacing:'.06em' },
-  filterBtnActive:{ borderColor:'#f59e0b', color:'#f59e0b', background:'#f59e0b11' },
-  searchInput:    { padding:'8px 12px', borderRadius:6, border:'1px solid #f59e0b22', background:'#0a0800', color:'#f0fdf4', fontFamily:"'DM Mono',monospace", fontSize:11, outline:'none', minWidth:200 },
-  table:          { background:'#0d0a00', border:'1px solid #f59e0b33', borderRadius:10, overflow:'hidden' },
-  tableHead:      { display:'grid', gridTemplateColumns:'repeat(6,1fr)', background:'#0a0800', padding:'10px 14px', borderBottom:'1px solid #f59e0b11' },
-  tableRow:       { display:'grid', gridTemplateColumns:'repeat(6,1fr)', padding:'11px 14px', borderBottom:'1px solid #f59e0b08', alignItems:'center' },
-  th:             { fontSize:9, color:'#f59e0baa', letterSpacing:'.1em' },
-  td:             { fontSize:11 },
-  loading:        { padding:40, textAlign:'center', color:'#f59e0baa', fontSize:12 },
-  empty:          { padding:40, textAlign:'center', color:'#f59e0bbb', fontSize:11 },
-  viewBtn:        { padding:'4px 9px', borderRadius:4, border:'1px solid #f59e0b22', background:'transparent', color:'#f59e0bdd', cursor:'pointer', fontFamily:"'DM Mono',monospace", fontSize:9 },
-  approveBtn:     { padding:'4px 9px', borderRadius:4, border:'1px solid #22c55e44', background:'#22c55e11', color:'#22c55e', cursor:'pointer', fontFamily:"'DM Mono',monospace", fontSize:9 },
-  rejectBtn:      { padding:'4px 9px', borderRadius:4, border:'1px solid #f8717144', background:'#f8717111', color:'#f87171', cursor:'pointer', fontFamily:"'DM Mono',monospace", fontSize:9 },
-  toast:          { position:'fixed', bottom:24, right:24, background:'#1a1200', border:'1px solid #f59e0b44', color:'#f59e0b', padding:'12px 20px', borderRadius:8, fontSize:12, zIndex:9999, fontFamily:"'DM Mono',monospace" },
-  spinner:        { width:12, height:12, border:'2px solid #f8717122', borderTopColor:'#f87171', borderRadius:'50%', animation:'spin 1s linear infinite', display:'inline-block' },
+  page:        { display: 'flex', minHeight: '100vh', background: '#0a0800', fontFamily: "'DM Mono',monospace", color: '#f0fdf4' },
+  sidebar:     { width: 188, background: '#0d0a00', borderRight: '1px solid #f59e0b11', display: 'flex', flexDirection: 'column', flexShrink: 0, position: 'sticky', top: 0, height: '100vh', overflowY: 'auto' },
+  sideTop:     { padding: '16px 12px 12px', borderBottom: '1px solid #f59e0b11', marginBottom: 4 },
+  logo:        { fontSize: 11, fontWeight: 700, color: '#f59e0b', letterSpacing: '.12em' },
+  logoSub:     { fontSize: 7, color: '#f59e0baa', letterSpacing: '.2em', marginTop: 3 },
+  navBtn:      { width: '100%', padding: '9px 12px', background: 'transparent', border: 'none', borderLeft: '2px solid transparent', color: '#f59e0bcc', cursor: 'pointer', fontFamily: "'DM Mono',monospace", fontSize: 10, textAlign: 'left', letterSpacing: '.04em', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 4 },
+  navActive:   { borderLeft: '2px solid #f59e0b', color: '#f59e0b', background: '#f59e0b18' },
+  badge:       { background: '#f59e0b', color: '#0a0800', fontSize: 8, fontWeight: 700, padding: '2px 5px', borderRadius: 10, minWidth: 14, textAlign: 'center', flexShrink: 0 },
+  logoutBtn:   { width: '100%', padding: '9px', borderRadius: 6, border: '1px solid #f59e0b22', background: 'transparent', color: '#f87171ee', cursor: 'pointer', fontFamily: "'DM Mono',monospace", fontSize: 10, letterSpacing: '.08em' },
+  main:        { flex: 1, padding: '24px 30px', overflowY: 'auto', minWidth: 0 },
+  title:       { fontSize: 18, fontWeight: 500, color: '#f0fdf4', marginBottom: 16, letterSpacing: '.04em' },
+  statsGrid:   { display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(130px,1fr))', gap: 10, marginBottom: 14 },
+  statCard:    { background: '#0d0a00', border: '1px solid #f59e0b33', borderRadius: 10, padding: '14px 10px', textAlign: 'center' },
+  section:     { background: '#0d0a00', border: '1px solid #f59e0b33', borderRadius: 10, padding: '14px' },
+  secTitle:    { fontSize: 9, color: '#f59e0bcc', letterSpacing: '.16em', marginBottom: 10 },
+  quickBtn:    { padding: '8px 13px', borderRadius: 6, border: '1px solid #f59e0b66', background: 'transparent', color: '#f59e0bdd', cursor: 'pointer', fontFamily: "'DM Mono',monospace", fontSize: 10, letterSpacing: '.06em' },
+  filterBtn:   { padding: '6px 10px', borderRadius: 6, border: '1px solid #f59e0b22', background: 'transparent', color: '#f59e0bcc', cursor: 'pointer', fontFamily: "'DM Mono',monospace", fontSize: 9, letterSpacing: '.06em' },
+  filterActive:{ borderColor: '#f59e0b', color: '#f59e0b', background: '#f59e0b11' },
+  searchInput: { padding: '7px 11px', borderRadius: 6, border: '1px solid #f59e0b22', background: '#0a0800', color: '#f0fdf4', fontFamily: "'DM Mono',monospace", fontSize: 11, outline: 'none', minWidth: 170 },
+  table:       { background: '#0d0a00', border: '1px solid #f59e0b33', borderRadius: 10, overflow: 'hidden' },
+  thead:       { display: 'grid', gridTemplateColumns: 'repeat(6,1fr)', background: '#0a0800', padding: '8px 12px', borderBottom: '1px solid #f59e0b11' },
+  trow:        { display: 'grid', gridTemplateColumns: 'repeat(6,1fr)', padding: '9px 12px', borderBottom: '1px solid #f59e0b08', alignItems: 'center' },
+  th:          { fontSize: 8, color: '#f59e0baa', letterSpacing: '.1em' },
+  td:          { fontSize: 11 },
+  loading:     { padding: 34, textAlign: 'center', color: '#f59e0baa', fontSize: 11 },
+  empty:       { padding: 34, textAlign: 'center', color: '#f59e0bbb', fontSize: 11 },
+  viewBtn:     { padding: '3px 7px', borderRadius: 4, border: '1px solid #f59e0b22', background: 'transparent', color: '#f59e0bdd', cursor: 'pointer', fontFamily: "'DM Mono',monospace", fontSize: 8 },
+  approveBtn:  { padding: '3px 7px', borderRadius: 4, border: '1px solid #22c55e44', background: '#22c55e11', color: '#22c55e', cursor: 'pointer', fontFamily: "'DM Mono',monospace", fontSize: 8 },
+  rejectBtn:   { padding: '3px 7px', borderRadius: 4, border: '1px solid #f8717144', background: '#f8717111', color: '#f87171', cursor: 'pointer', fontFamily: "'DM Mono',monospace", fontSize: 8 },
+  toast:       { position: 'fixed', bottom: 24, right: 24, background: '#1a1200', border: '1px solid #f59e0b44', color: '#f59e0b', padding: '12px 20px', borderRadius: 8, fontSize: 12, zIndex: 9999, fontFamily: "'DM Mono',monospace", maxWidth: 360 },
 };
-
 const M = {
-  overlay:    { position:'fixed', inset:0, background:'rgba(0,0,0,.8)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000, padding:20 },
-  box:        { background:'#0d0a00', border:'1px solid #f59e0b22', borderRadius:12, padding:'24px 28px', maxWidth:520, width:'100%', maxHeight:'85vh', overflowY:'auto', fontFamily:"'DM Mono',monospace" },
-  mTitle:     { fontSize:13, fontWeight:700, color:'#f59e0b', marginBottom:16, letterSpacing:'.08em' },
-  row:        { display:'flex', justifyContent:'space-between', padding:'7px 0', borderBottom:'1px solid #f59e0b08' },
-  key:        { fontSize:10, color:'#f59e0bcc', letterSpacing:'.1em' },
-  val:        { fontSize:11, color:'#f0fdf4', maxWidth:280, textAlign:'right', wordBreak:'break-all' },
-  confirmText:{ fontSize:11, color:'#f59e0bdd', lineHeight:1.7, marginBottom:12 },
-  textarea:   { width:'100%', minHeight:80, padding:'10px 12px', borderRadius:6, border:'1px solid #f59e0b22', background:'#0a0800', color:'#f0fdf4', fontFamily:"'DM Mono',monospace", fontSize:11, outline:'none', resize:'vertical', boxSizing:'border-box', marginBottom:12 },
-  input:      { width:'100%', padding:'10px 12px', borderRadius:6, border:'1px solid #f59e0b22', background:'#0a0800', color:'#f0fdf4', fontFamily:"'DM Mono',monospace", fontSize:11, outline:'none', boxSizing:'border-box', marginBottom:12 },
-  approveBtn: { padding:'10px 20px', borderRadius:6, border:'none', background:'linear-gradient(135deg,#16a34a,#15803d)', color:'#fff', cursor:'pointer', fontFamily:"'DM Mono',monospace", fontSize:11, fontWeight:700, letterSpacing:'.08em' },
-  rejectBtn:  { padding:'10px 20px', borderRadius:6, border:'none', background:'linear-gradient(135deg,#dc2626,#b91c1c)', color:'#fff', cursor:'pointer', fontFamily:"'DM Mono',monospace", fontSize:11, fontWeight:700, letterSpacing:'.08em' },
-  closeBtn:   { marginTop:14, padding:'7px 14px', borderRadius:6, border:'1px solid #f59e0b22', background:'transparent', color:'#f59e0bcc', cursor:'pointer', fontFamily:"'DM Mono',monospace", fontSize:10 },
+  ov:       { position: 'fixed', inset: 0, background: 'rgba(0,0,0,.82)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 20 },
+  bx:       { background: '#0d0a00', border: '1px solid #f59e0b22', borderRadius: 12, padding: '22px 26px', maxWidth: 520, width: '100%', maxHeight: '85vh', overflowY: 'auto', fontFamily: "'DM Mono',monospace" },
+  tt:       { fontSize: 13, fontWeight: 700, color: '#f59e0b', marginBottom: 14, letterSpacing: '.08em' },
+  row:      { display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid #f59e0b08' },
+  key:      { fontSize: 10, color: '#f59e0bcc', letterSpacing: '.1em' },
+  val:      { fontSize: 11, color: '#f0fdf4', maxWidth: 280, textAlign: 'right', wordBreak: 'break-all' },
+  ct:       { fontSize: 11, color: '#f59e0bdd', lineHeight: 1.7, marginBottom: 10 },
+  ta:       { width: '100%', minHeight: 70, padding: '9px 11px', borderRadius: 6, border: '1px solid #f59e0b22', background: '#0a0800', color: '#f0fdf4', fontFamily: "'DM Mono',monospace", fontSize: 11, outline: 'none', resize: 'vertical', boxSizing: 'border-box', marginBottom: 10 },
+  inp:      { width: '100%', padding: '9px 11px', borderRadius: 6, border: '1px solid #f59e0b22', background: '#0a0800', color: '#f0fdf4', fontFamily: "'DM Mono',monospace", fontSize: 11, outline: 'none', boxSizing: 'border-box', marginBottom: 10 },
+  aPrimary: { padding: '9px 18px', borderRadius: 6, border: 'none', background: 'linear-gradient(135deg,#16a34a,#15803d)', color: '#fff', cursor: 'pointer', fontFamily: "'DM Mono',monospace", fontSize: 11, fontWeight: 700, letterSpacing: '.08em' },
+  rPrimary: { padding: '9px 18px', borderRadius: 6, border: 'none', background: 'linear-gradient(135deg,#dc2626,#b91c1c)', color: '#fff', cursor: 'pointer', fontFamily: "'DM Mono',monospace", fontSize: 11, fontWeight: 700, letterSpacing: '.08em' },
+  cl:       { marginTop: 12, padding: '6px 14px', borderRadius: 6, border: '1px solid #f59e0b22', background: 'transparent', color: '#f59e0bcc', cursor: 'pointer', fontFamily: "'DM Mono',monospace", fontSize: 10 },
 };

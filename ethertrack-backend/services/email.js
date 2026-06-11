@@ -1,20 +1,53 @@
+// services/email.js — EtherTrack (PRODUCTION-HARDENED)
+// ─────────────────────────────────────────────────────────────────────────────
+// FIXES APPLIED:
+//
+// [FIX-1]  sendEmail now supports attachments for Resend.
+//          Resend requires content to be a base64-encoded string.
+//          If a Buffer is passed (from invoice.js pdfBuffer), it is
+//          automatically converted to base64. Invoice PDF emails now
+//          correctly attach the PDF instead of silently failing.
+//
+// [FIX-2]  Separated FROM addresses:
+//          - SUPPORT_FROM (support@ethertrack.in) for all user-facing emails
+//          - ADMIN_FROM   (admin@ethertrack.in)   for admin/internal emails
+
 const { Resend } = require('resend');
 
 const resend = new Resend(process.env.RESEND_API_KEY);
-const FROM   = process.env.EMAIL_FROM || 'noreply@ethertrack.io';
 
-// ── Generate 6-digit OTP ─────────────────────────────────────────
+const SUPPORT_FROM = process.env.EMAIL_SUPPORT_FROM || 'support@ethertrack.in';
+const ADMIN_FROM   = process.env.EMAIL_ADMIN_FROM   || 'admin@ethertrack.in';
+
+// ── Generate 6-digit OTP ──────────────────────────────────────────────────────
 const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
 
-// ── Generic sendEmail (used by kyc.js and other routes) ──────────
-const sendEmail = async ({ to, subject, html }) => {
-  await resend.emails.send({ from: FROM, to, subject, html });
+// ── Generic sendEmail — [FIX-1] now handles PDF attachments for Resend ────────
+const sendEmail = async ({ to, subject, html, attachments, isAdmin = false }) => {
+  const payload = {
+    from: isAdmin ? ADMIN_FROM : SUPPORT_FROM,
+    to,
+    subject,
+    html,
+  };
+
+  // [FIX-1] Resend requires base64 strings — convert Buffer if needed
+  if (attachments?.length) {
+    payload.attachments = attachments.map(a => ({
+      filename: a.filename,
+      content:  Buffer.isBuffer(a.content)
+        ? a.content.toString('base64')
+        : a.content, // already base64 string — pass through
+    }));
+  }
+
+  await resend.emails.send(payload);
 };
 
-// ── Send verification OTP ─────────────────────────────────────────
+// ── Send verification OTP ─────────────────────────────────────────────────────
 const sendVerificationEmail = async (email, otp, name = '') => {
   await resend.emails.send({
-    from:    FROM,
+    from:    SUPPORT_FROM,
     to:      email,
     subject: 'Verify your EtherTrack account',
     html: `
@@ -31,10 +64,10 @@ const sendVerificationEmail = async (email, otp, name = '') => {
   });
 };
 
-// ── Send welcome email ────────────────────────────────────────────
+// ── Send welcome email ────────────────────────────────────────────────────────
 const sendWelcomeEmail = async (email, name = '') => {
   await resend.emails.send({
-    from:    FROM,
+    from:    SUPPORT_FROM,
     to:      email,
     subject: 'Welcome to EtherTrack',
     html: `
@@ -47,7 +80,7 @@ const sendWelcomeEmail = async (email, name = '') => {
           <li>Complete KYC verification</li>
           <li>Start trading carbon credits</li>
         </ul>
-        <a href="${process.env.FRONTEND_URL}/dashboard" 
+        <a href="${process.env.FRONTEND_URL}/dashboard"
            style="display:inline-block;background:#16a34a;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;margin-top:16px">
           Go to Dashboard →
         </a>
@@ -56,10 +89,10 @@ const sendWelcomeEmail = async (email, name = '') => {
   });
 };
 
-// ── Send retirement certificate ───────────────────────────────────
+// ── Send retirement certificate ───────────────────────────────────────────────
 const sendRetirementEmail = async (email, name, cert) => {
   await resend.emails.send({
-    from:    FROM,
+    from:    SUPPORT_FROM,
     to:      email,
     subject: `Retirement Certificate — ${cert.certificateId}`,
     html: `
@@ -71,9 +104,9 @@ const sendRetirementEmail = async (email, name, cert) => {
           <div>Certificate ID: <span style="color:#22c55e">${cert.certificateId}</span></div>
           <div>Project: ${cert.projectName}</div>
           <div>Beneficiary: ${cert.beneficiary || 'Self'}</div>
-          <div>Tx Hash: <span style="color:#60a5fa88">${cert.txHash?.slice(0,20)}...</span></div>
+          <div>Tx Hash: <span style="color:#60a5fa88">${cert.txHash?.slice(0, 20)}...</span></div>
         </div>
-        <a href="${cert.ipfsUrl}" 
+        <a href="${cert.ipfsUrl}"
            style="display:inline-block;background:#16a34a;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none">
           View Certificate on IPFS →
         </a>
@@ -82,4 +115,10 @@ const sendRetirementEmail = async (email, name, cert) => {
   });
 };
 
-module.exports = { generateOTP, sendEmail, sendVerificationEmail, sendWelcomeEmail, sendRetirementEmail };
+module.exports = {
+  generateOTP,
+  sendEmail,
+  sendVerificationEmail,
+  sendWelcomeEmail,
+  sendRetirementEmail,
+};

@@ -8,23 +8,232 @@ import { walletAPI } from '../services/api';
 // ── Lightweight MetaMask-only header (no INR logic here)
 // All INR wallet functionality lives in /wallet page
 
+// ── Subscription tier helpers (mirrors App.jsx) ────────────────────────────
+const TIER_RANK = { free: 0, starter: 1, growth: 2, corporate: 3 };
+
+function getPlanTier(plan) {
+  if (!plan) return 'free';
+  const p = plan.toLowerCase();
+  if (p.includes('corporate')) return 'corporate';
+  if (p.includes('growth'))    return 'growth';
+  if (p.includes('starter'))   return 'starter';
+  return 'free';
+}
+
+function tierRank(plan) {
+  return TIER_RANK[getPlanTier(plan)] ?? 0;
+}
+
+const PLAN_INFO = {
+  starter: {
+    name:  'Starter',
+    price: '₹1,499/mo',
+    color: '#3b82f6',
+    features: [
+      'Everything in Free',
+      'Portfolio management',
+      'List & sell credits',
+      'Credit retirement',
+      'Portfolio export',
+      '3 seats',
+    ],
+  },
+  growth: {
+    name:  'Growth',
+    price: '₹7,999/mo',
+    color: '#a855f7',
+    features: [
+      'Everything in Starter',
+      'Scope 1 + 2 full tracking',
+      'Basic Scope 3 (5 categories)',
+      'GHG inventory ledger',
+      'CSV export + analytics dashboard',
+      'Carbon intensity metrics',
+      'Basic decarbonisation scenarios',
+      'GHG Protocol PDF report',
+      '10 seats',
+    ],
+  },
+  corporate: {
+    name:  'Corporate',
+    price: 'Contact Sales',
+    color: '#f59e0b',
+    features: [
+      'Everything in Growth',
+      'Full Scope 3 (all 15 categories)',
+      'BRSR / CDP / TCFD / GHG PDF reports',
+      'Audit trail + verifier integration',
+      'GEI / BEE / PAT / CCTS compliance',
+      '5-year decarbonisation plan',
+      'MRV calendar + SBTi target setting',
+      'Supplier data portal',
+      'Multi-entity consolidation',
+      'Carbon neutrality certificate',
+      'Regulatory deadline alerts',
+      'Custom seats',
+    ],
+  },
+};
+
+// ── Upgrade Modal ─────────────────────────────────────────────────────────────
+function UpgradeModal({ requiredPlan, onClose }) {
+  const info = PLAN_INFO[requiredPlan];
+  if (!info) return null;
+  const isCorporate = requiredPlan === 'corporate';
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position:       'fixed',
+        inset:          0,
+        background:     'rgba(0,0,0,0.80)',
+        backdropFilter: 'blur(5px)',
+        display:        'flex',
+        alignItems:     'center',
+        justifyContent: 'center',
+        zIndex:         9999,
+        padding:        '20px',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background:   '#0a0f0c',
+          border:       `1px solid ${info.color}55`,
+          borderRadius: '14px',
+          padding:      '36px 32px',
+          maxWidth:     '420px',
+          width:        '100%',
+          fontFamily:   "'DM Mono', monospace",
+          position:     'relative',
+          boxShadow:    `0 0 60px ${info.color}18, 0 24px 64px rgba(0,0,0,.7)`,
+          animation:    'upgradeModalIn 0.22s ease',
+        }}
+      >
+        <style>{`@keyframes upgradeModalIn{from{opacity:0;transform:translateY(-12px) scale(0.97)}to{opacity:1;transform:translateY(0) scale(1)}}`}</style>
+
+        {/* Close */}
+        <button onClick={onClose} style={{
+          position: 'absolute', top: '14px', right: '14px',
+          background: 'none', border: 'none', color: '#4b5563',
+          fontSize: '16px', cursor: 'pointer', lineHeight: 1,
+          transition: 'color 0.2s',
+        }}>✕</button>
+
+        {/* Lock icon */}
+        <div style={{ fontSize: '34px', marginBottom: '14px' }}>🔒</div>
+
+        {/* Plan badge */}
+        <div style={{
+          display: 'inline-block', fontSize: '9px', letterSpacing: '0.18em',
+          color: info.color, border: `1px solid ${info.color}44`,
+          borderRadius: '4px', padding: '3px 8px', marginBottom: '10px',
+          background: `${info.color}11`,
+        }}>
+          {info.name.toUpperCase()} PLAN REQUIRED
+        </div>
+
+        <h2 style={{ color: '#f0fdf4', margin: '0 0 8px', fontSize: '18px', fontWeight: 700 }}>
+          Upgrade to {info.name}
+        </h2>
+        <p style={{ color: '#86efac66', margin: '0 0 20px', fontSize: '12px', lineHeight: 1.7 }}>
+          This feature is available on the{' '}
+          <strong style={{ color: info.color }}>{info.name}</strong> plan
+          {!isCorporate && <> — starting at <strong style={{ color: '#f0fdf4' }}>{info.price}</strong></>}.
+        </p>
+
+        {/* Features */}
+        <ul style={{ margin: '0 0 24px', padding: 0, listStyle: 'none' }}>
+          {info.features.map((f) => (
+            <li key={f} style={{
+              display: 'flex', alignItems: 'flex-start', gap: '8px',
+              color: '#d1fae5', fontSize: '12px', marginBottom: '7px',
+            }}>
+              <span style={{ color: info.color, flexShrink: 0, marginTop: '1px' }}>✓</span>
+              {f}
+            </li>
+          ))}
+        </ul>
+
+        {/* CTA */}
+        {isCorporate ? (
+          <a
+            href="https://mail.google.com/mail/?view=cm&to=support@ethertrack.in" target="_blank" rel="noreferrer"
+            style={{
+              display: 'block', textAlign: 'center', padding: '12px',
+              background: info.color, color: '#000', borderRadius: '7px',
+              fontWeight: 'bold', fontSize: '13px', textDecoration: 'none',
+              letterSpacing: '0.06em',
+            }}
+          >
+            Contact Sales → support@ethertrack.in
+          </a>
+        ) : (
+          <a
+            href="/billing"
+            style={{
+              display: 'block', textAlign: 'center', padding: '12px',
+              background: info.color, color: '#000', borderRadius: '7px',
+              fontWeight: 'bold', fontSize: '13px', textDecoration: 'none',
+              letterSpacing: '0.06em',
+            }}
+          >
+            Upgrade to {info.name} →
+          </a>
+        )}
+
+        <p style={{ color: '#374151', fontSize: '10px', textAlign: 'center', margin: '10px 0 0' }}>
+          Cancel anytime · Billed monthly
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ── Nav link definitions with required plan ───────────────────────────────────
+// requiredPlan: undefined = free (always accessible), otherwise the minimum plan needed
+const NAV_LINKS = [
+  { to: '/dashboard',         label: 'DASHBOARD',  requiredPlan: undefined   },
+  { to: '/portfolio',         label: 'PORTFOLIO',  requiredPlan: 'starter'   },
+  { to: '/carbon-credits',    label: 'MARKET',     requiredPlan: undefined   },
+  { to: '/trading-history',   label: 'HISTORY',    requiredPlan: undefined   },
+  { to: '/wallet',            label: 'WALLET',     requiredPlan: undefined   },
+  { to: '/emission-tracking', label: 'EMISSIONS',  requiredPlan: 'growth'    },
+  { to: '/compliance',        label: 'COMPLIANCE', requiredPlan: 'corporate' },
+  { to: '/team',              label: 'TEAM',       requiredPlan: 'corporate' },
+  { to: '/profile',           label: 'PROFILE',    requiredPlan: undefined   },
+];
+
+// ── Header ─────────────────────────────────────────────────────────────────────
 const Header = () => {
   const { isAuthenticated, handleLogout, dbUser, setDbUser } = useContext(AuthContext);
   const { notifications, unreadCount, markRead, markAllRead, deleteOne, getTypeMeta, timeAgo } = useNotifications();
   const { address, shortAddress, isConnected, isConnecting, balance, balanceINR, network, connect, disconnect } = useWallet();
 
-  const navigate = useNavigate();
-  const location = useLocation();
+  const navigate  = useNavigate();
+  const location  = useLocation();
 
-  const [menuOpen,   setMenuOpen]   = useState(false);
-  const [bellOpen,   setBellOpen]   = useState(false);
-  const [walletOpen, setWalletOpen] = useState(false);
-  const [scrolled,   setScrolled]   = useState(false);
-  const [binding,    setBinding]    = useState(false);
-  const [bindDone,   setBindDone]   = useState(false);
+  const [menuOpen,      setMenuOpen]      = useState(false);
+  const [bellOpen,      setBellOpen]      = useState(false);
+  const [walletOpen,    setWalletOpen]    = useState(false);
+  const [scrolled,      setScrolled]      = useState(false);
+  const [binding,       setBinding]       = useState(false);
+  const [bindDone,      setBindDone]      = useState(false);
+
+  // Upgrade modal state
+  const [upgradeModal,  setUpgradeModal]  = useState(null); // null | 'starter' | 'growth' | 'corporate'
 
   const bellRef   = useRef(null);
   const walletRef = useRef(null);
+
+  const userPlan = dbUser?.subscription_plan || 'free';
+
+  // Check if user has access to a given required plan
+  const hasAccess = useCallback((requiredPlan) => {
+    if (!requiredPlan) return true;
+    return tierRank(userPlan) >= tierRank(requiredPlan);
+  }, [userPlan]);
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 8);
@@ -78,18 +287,18 @@ const Header = () => {
   const handleLogoutClick = () => { disconnect(); handleLogout(); navigate('/login'); };
   const isActive = (path) => location.pathname === path;
 
-  const navLinks = [
-    { to: '/dashboard',         label: 'DASHBOARD' },
-    { to: '/portfolio',         label: 'PORTFOLIO'  },
-    { to: '/carbon-credits',    label: 'MARKET'     },
-    { to: '/emission-tracking', label: 'EMISSIONS'  },
-    { to: '/trading-history',   label: 'HISTORY'    },
-    { to: '/wallet',            label: 'WALLET'     },
-    { to: '/team',              label: 'TEAM'       },
-    { to: '/profile',           label: 'PROFILE'    },
-  ];
+  // Handle nav link click — intercept locked routes
+  const handleNavClick = useCallback((e, link) => {
+    if (!hasAccess(link.requiredPlan)) {
+      e.preventDefault();
+      setUpgradeModal(link.requiredPlan);
+    }
+  }, [hasAccess]);
 
   const walletBound = !!dbUser?.wallet_address || bindDone;
+
+  // Lock badge colors per tier
+  const lockColor = { starter: '#3b82f6', growth: '#a855f7', corporate: '#f59e0b' };
 
   return (
     <>
@@ -100,9 +309,22 @@ const Header = () => {
         .et-header-inner{max-width:1200px;margin:0 auto;padding:0 24px;width:100%;display:flex;align-items:center;justify-content:space-between;gap:24px;}
         .et-header-brand{display:flex;align-items:center;gap:10px;text-decoration:none;flex-shrink:0;}
         .et-header-nav{display:flex;align-items:center;gap:4px;flex:1;justify-content:center;}
-        .et-nav-link{padding:6px 14px;border-radius:5px;font-size:11px;letter-spacing:0.1em;font-weight:500;color:#4ade8066;text-decoration:none;transition:color 0.2s,background 0.2s;white-space:nowrap;}
+
+        /* ── Unlocked nav link ── */
+        .et-nav-link{padding:6px 14px;border-radius:5px;font-size:11px;letter-spacing:0.1em;font-weight:500;color:#4ade8066;text-decoration:none;transition:color 0.2s,background 0.2s;white-space:nowrap;position:relative;display:inline-flex;align-items:center;gap:5px;}
         .et-nav-link:hover{color:#22c55e;background:#0d2e1f;}
         .et-nav-link.active{color:#22c55e;background:#0d2e1f;border:1px solid #16a34a22;}
+
+        /* ── Locked nav link ── */
+        .et-nav-link.locked{color:#4ade8033;cursor:pointer;}
+        .et-nav-link.locked:hover{background:#0f1a10;color:#4ade8055;}
+        .et-nav-link.locked .et-lock-badge{
+          display:inline-flex;align-items:center;gap:2px;
+          font-size:8px;letter-spacing:0.06em;padding:1px 5px;
+          border-radius:3px;font-weight:700;opacity:0.85;
+        }
+        /* Tier-specific lock badge colors applied via inline style */
+
         .et-header-right{display:flex;align-items:center;gap:10px;flex-shrink:0;}
         .et-header-divider{width:1px;height:20px;background:#0f2a1a;flex-shrink:0;}
         .et-live{display:flex;align-items:center;gap:5px;font-size:10px;color:#4ade8055;letter-spacing:0.1em;position:relative;cursor:default;}
@@ -111,14 +333,10 @@ const Header = () => {
         .et-live-tooltip{position:absolute;top:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#0a0f0c;border:1px solid #0f2a1a;border-radius:6px;padding:6px 10px;white-space:nowrap;font-size:9px;color:#86efac88;letter-spacing:0.06em;opacity:0;pointer-events:none;transition:opacity 0.2s;z-index:2000;line-height:1.6;}
         .et-live-tooltip::before{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:4px solid transparent;border-bottom-color:#0f2a1a;}
         @keyframes livePulse{0%,100%{box-shadow:0 0 0 0 rgba(34,197,94,0.4);}50%{box-shadow:0 0 0 3px rgba(34,197,94,0);}}
-
-        /* ── INR balance chip ── */
         .et-inr-chip{display:flex;align-items:center;gap:6px;padding:6px 12px;border-radius:6px;border:1px solid #22c55e33;background:#0d2e1f22;text-decoration:none;transition:all 0.2s;white-space:nowrap;}
         .et-inr-chip:hover{background:#0d2e1f;border-color:#22c55e55;}
         .et-inr-chip-flag{font-size:12px;}
         .et-inr-chip-bal{font-size:11px;font-weight:700;color:#22c55e;letter-spacing:0.04em;}
-
-        /* ── MetaMask status pill ── */
         .et-meta-pill{display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:6px;border:1px solid #0f2a1a;background:transparent;cursor:pointer;font-family:'DM Mono',monospace;font-size:10px;letter-spacing:0.06em;color:#4ade8044;transition:all 0.2s;white-space:nowrap;}
         .et-meta-pill:hover{background:#0d2e1f;border-color:#22c55e44;color:#22c55e;}
         .et-meta-pill.connected{border-color:#22c55e33;color:#22c55e88;}
@@ -126,8 +344,6 @@ const Header = () => {
         .et-meta-dot{width:5px;height:5px;border-radius:50%;}
         .et-meta-dot.on{background:#22c55e;}
         .et-meta-dot.off{background:#4ade8033;}
-
-        /* ── MetaMask dropdown ── */
         .et-meta-wrap{position:relative;}
         .et-meta-dropdown{position:absolute;top:calc(100% + 10px);right:0;width:240px;background:#0a0f0c;border:1px solid #0f2a1a;border-radius:12px;box-shadow:0 16px 48px rgba(0,0,0,0.7);z-index:2000;animation:dropIn 0.2s ease;overflow:hidden;}
         .et-meta-drop-hdr{padding:12px 14px;border-bottom:1px solid #0f2a1a;display:flex;align-items:center;justify-content:space-between;}
@@ -151,8 +367,6 @@ const Header = () => {
         .et-meta-not-conn{padding:14px;text-align:center;}
         .et-meta-not-conn-icon{font-size:26px;margin-bottom:8px;}
         .et-meta-not-conn-desc{font-size:9px;color:#4ade8044;letter-spacing:0.06em;line-height:1.7;margin-bottom:12px;}
-
-        /* ── Bell ── */
         .et-bell-wrap{position:relative;}
         .et-bell-btn{position:relative;width:34px;height:34px;border-radius:7px;border:1px solid #0f2a1a;background:transparent;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all 0.2s;font-size:15px;}
         .et-bell-btn:hover{border-color:#22c55e44;background:#0d2e1f;}
@@ -181,8 +395,6 @@ const Header = () => {
         .et-bell-footer{padding:12px 16px;border-top:1px solid #0f2a1a;text-align:center;}
         .et-bell-footer a{font-size:11px;color:#22c55e88;text-decoration:none;letter-spacing:0.08em;}
         .et-bell-footer a:hover{color:#22c55e;}
-
-        /* misc */
         .et-login-btn{padding:7px 16px;border-radius:6px;border:1px solid #0f2a1a;background:transparent;color:#4ade8088;cursor:pointer;font-family:'DM Mono',monospace;font-size:11px;letter-spacing:0.08em;transition:all 0.2s;text-decoration:none;display:inline-flex;align-items:center;}
         .et-login-btn:hover{color:#22c55e;border-color:#22c55e44;background:#0d2e1f;}
         .et-signup-btn{padding:7px 16px;border-radius:6px;border:1px solid #22c55e55;background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;cursor:pointer;font-family:'DM Mono',monospace;font-size:11px;letter-spacing:0.08em;transition:opacity 0.2s;text-decoration:none;display:inline-flex;align-items:center;}
@@ -195,8 +407,10 @@ const Header = () => {
         .et-hamburger.open span:nth-child(2){opacity:0;}
         .et-hamburger.open span:nth-child(3){transform:rotate(-45deg) translate(4px,-4px);}
         .et-mobile-menu{position:fixed;top:60px;left:0;right:0;background:#080c0af5;border-bottom:1px solid #0f2a1a;backdrop-filter:blur(12px);padding:16px 24px 20px;display:flex;flex-direction:column;gap:4px;z-index:999;animation:menuSlide 0.2s ease;}
-        .et-mobile-nav-link{padding:12px 16px;border-radius:6px;font-size:12px;letter-spacing:0.1em;color:#4ade8077;text-decoration:none;transition:all 0.2s;border:1px solid transparent;}
+        .et-mobile-nav-link{padding:12px 16px;border-radius:6px;font-size:12px;letter-spacing:0.1em;color:#4ade8077;text-decoration:none;transition:all 0.2s;border:1px solid transparent;display:flex;align-items:center;justify-content:space-between;}
         .et-mobile-nav-link:hover,.et-mobile-nav-link.active{color:#22c55e;background:#0d2e1f;border-color:#16a34a22;}
+        .et-mobile-nav-link.locked{color:#4ade8033;cursor:pointer;}
+        .et-mobile-nav-link.locked:hover{background:#0f1a10;color:#4ade8044;}
         .et-mobile-divider{height:1px;background:#0f2a1a;margin:8px 0;}
         @keyframes dropIn{from{opacity:0;transform:translateY(-8px);}to{opacity:1;transform:translateY(0);}}
         @keyframes menuSlide{from{opacity:0;transform:translateY(-8px);}to{opacity:1;transform:translateY(0);}}
@@ -214,12 +428,38 @@ const Header = () => {
               style={{ height:'42px', width:'auto', objectFit:'contain', mixBlendMode:'screen' }}/>
           </Link>
 
-          {/* Nav */}
+          {/* Nav — desktop */}
           {isAuthenticated && (
             <nav className="et-header-nav">
-              {navLinks.map(({ to, label }) => (
-                <Link key={to} to={to} className={`et-nav-link${isActive(to) ? ' active' : ''}`}>{label}</Link>
-              ))}
+              {NAV_LINKS.map(({ to, label, requiredPlan }) => {
+                const accessible = hasAccess(requiredPlan);
+                const color = requiredPlan ? lockColor[requiredPlan] : undefined;
+
+                if (accessible) {
+                  return (
+                    <Link
+                      key={to}
+                      to={to}
+                      className={`et-nav-link${isActive(to) ? ' active' : ''}`}
+                    >
+                      {label}
+                    </Link>
+                  );
+                }
+
+                // Locked — render as a div (prevents navigation), show badge
+                return (
+                  <div
+                    key={to}
+                    className="et-nav-link locked"
+                    onClick={() => setUpgradeModal(requiredPlan)}
+                    title={`Requires ${PLAN_INFO[requiredPlan]?.name} plan`}
+                  >
+                    {label}
+                    <span style={{ fontSize: '9px', opacity: 0.7 }}>🔒</span>
+                  </div>
+                );
+              })}
             </nav>
           )}
 
@@ -278,7 +518,7 @@ const Header = () => {
 
                 <div className="et-header-divider"/>
 
-                {/* ── MetaMask status pill + mini dropdown ── */}
+                {/* MetaMask status pill + mini dropdown */}
                 <div className="et-meta-wrap" ref={walletRef}>
                   <button
                     className={`et-meta-pill${isConnected ? ' connected' : ''}`}
@@ -351,11 +591,36 @@ const Header = () => {
         </div>
       </header>
 
+      {/* Mobile menu */}
       {isAuthenticated && menuOpen && (
         <div className="et-mobile-menu">
-          {navLinks.map(({ to, label }) => (
-            <Link key={to} to={to} className={`et-mobile-nav-link${isActive(to) ? ' active' : ''}`}>{label}</Link>
-          ))}
+          {NAV_LINKS.map(({ to, label, requiredPlan }) => {
+            const accessible = hasAccess(requiredPlan);
+            const color = requiredPlan ? lockColor[requiredPlan] : undefined;
+
+            if (accessible) {
+              return (
+                <Link
+                  key={to}
+                  to={to}
+                  className={`et-mobile-nav-link${isActive(to) ? ' active' : ''}`}
+                >
+                  {label}
+                </Link>
+              );
+            }
+
+            return (
+              <div
+                key={to}
+                className="et-mobile-nav-link locked"
+                onClick={() => { setUpgradeModal(requiredPlan); setMenuOpen(false); }}
+              >
+                <span>{label}</span>
+                <span style={{ fontSize: '11px', opacity: 0.5 }}>🔒</span>
+              </div>
+            );
+          })}
           <div className="et-mobile-divider"/>
           <button
             className="et-mobile-nav-link"
@@ -367,6 +632,14 @@ const Header = () => {
       )}
 
       <div className="et-header-spacer"/>
+
+      {/* Upgrade modal — rendered at root level so it overlays everything */}
+      {upgradeModal && (
+        <UpgradeModal
+          requiredPlan={upgradeModal}
+          onClose={() => setUpgradeModal(null)}
+        />
+      )}
     </>
   );
 };

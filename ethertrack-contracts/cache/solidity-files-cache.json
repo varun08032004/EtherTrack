@@ -1073,6 +1073,46 @@
       "artifacts": [
         "AMMPool"
       ]
+    },
+    "C:\\Users\\ASUS\\Desktop\\EtherTrack\\ethertrack-contracts\\contracts\\AuditTrail.sol": {
+      "lastModificationDate": 1780732226596,
+      "contentHash": "e85b1e0ce67e571c788c957f983eb2d1",
+      "sourceName": "contracts/AuditTrail.sol",
+      "solcConfig": {
+        "version": "0.8.26",
+        "settings": {
+          "optimizer": {
+            "enabled": true,
+            "runs": 200
+          },
+          "evmVersion": "cancun",
+          "viaIR": true,
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [
+        "@openzeppelin/contracts/access/Ownable.sol",
+        "@openzeppelin/contracts/utils/Pausable.sol"
+      ],
+      "versionPragmas": [
+        "^0.8.26"
+      ],
+      "artifacts": [
+        "AuditTrail"
+      ]
     }
   }
 }

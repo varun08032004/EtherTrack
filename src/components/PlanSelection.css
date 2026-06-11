@@ -1,0 +1,656 @@
+/* ── PlanSelection.css — EtherTrack v3 ───────────────────────────────────────
+   Covers every ps-* class used in PlanSelection.jsx
+   Theme: dark (#080c0a bg) · green accent (#22c55e) · monospace
+   ─────────────────────────────────────────────────────────────────────────── */
+
+/* ── Root & layout ───────────────────────────────────────────────────────── */
+.ps-root {
+  min-height: 100vh;
+  background: #080c0a;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 48px 16px 80px;
+  box-sizing: border-box;
+  font-family: 'JetBrains Mono', 'Fira Mono', 'Courier New', monospace;
+  color: #e2e8e4;
+}
+
+.ps-inner {
+  width: 100%;
+  max-width: 1320px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* ── Fade-in animation ───────────────────────────────────────────────────── */
+.ps-top,
+.ps-info-note,
+.ps-grid,
+.ps-confirm-bar {
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity 0.4s ease, transform 0.4s ease;
+}
+
+.ps-top.ps-visible      { opacity: 1; transform: none; transition-delay: 0.05s; }
+.ps-info-note.ps-visible { opacity: 1; transform: none; transition-delay: 0.12s; }
+.ps-grid.ps-visible     { opacity: 1; transform: none; transition-delay: 0.18s; }
+.ps-confirm-bar.ps-visible { opacity: 1; transform: none; transition-delay: 0.24s; }
+
+/* ── Header ──────────────────────────────────────────────────────────────── */
+.ps-eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #22c55e;
+  margin-bottom: 10px;
+}
+
+.ps-title {
+  font-size: clamp(26px, 4vw, 38px);
+  font-weight: 700;
+  color: #f0fdf4;
+  margin: 0 0 10px;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.ps-name {
+  color: #22c55e;
+}
+
+.ps-sub {
+  font-size: 14px;
+  color: #6b7280;
+  margin: 0 0 6px;
+  line-height: 1.6;
+  max-width: 600px;
+}
+
+.ps-skip-note {
+  font-size: 12px;
+  color: #4b5563;
+  margin: 0;
+}
+
+/* ── Info note ───────────────────────────────────────────────────────────── */
+.ps-info-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: #0d1f12;
+  border: 1px solid #1a3a22;
+  border-radius: 8px;
+  padding: 14px 16px;
+  font-size: 13px;
+  color: #9ca3af;
+  line-height: 1.6;
+}
+
+.ps-info-note strong {
+  color: #22c55e;
+}
+
+.ps-info-icon {
+  font-size: 15px;
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: #22c55e;
+}
+
+/* ── Error / retry ───────────────────────────────────────────────────────── */
+.ps-err {
+  background: #1c0a0a;
+  border: 1px solid #7f1d1d;
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-size: 13px;
+  color: #fca5a5;
+}
+
+.ps-retry-btn {
+  background: none;
+  border: none;
+  color: #22c55e;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.ps-retry-btn:hover { color: #4ade80; }
+
+/* ── Plan grid ───────────────────────────────────────────────────────────── */
+.ps-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 14px;
+  align-items: stretch;
+}
+
+/* ── Plan card ───────────────────────────────────────────────────────────── */
+.ps-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: #0d1410;
+  border: 1px solid #1f2d22;
+  border-radius: 12px;
+  padding: 20px 16px 16px;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  color: #e2e8e4;
+  transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
+  outline: none;
+}
+
+.ps-card:hover {
+  border-color: #2d4a32;
+  background: #101810;
+}
+
+.ps-card:focus-visible {
+  box-shadow: 0 0 0 2px #22c55e66;
+}
+
+.ps-card-selected {
+  border-color: #22c55e !important;
+  background: #0d1f12 !important;
+  box-shadow: 0 0 0 1px #22c55e33, 0 4px 24px #22c55e18;
+}
+
+.ps-card-popular {
+  border-color: #2d4a32;
+}
+
+/* ── Popular badge ───────────────────────────────────────────────────────── */
+.ps-highlight-badge {
+  position: absolute;
+  top: -12px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #0d1f12;
+  border: 1px solid currentColor;
+  border-radius: 20px;
+  padding: 3px 12px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* ── Check dot ───────────────────────────────────────────────────────────── */
+.ps-check-dot {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #040706;
+  flex-shrink: 0;
+}
+
+/* ── Card text ───────────────────────────────────────────────────────────── */
+.ps-card-tier {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+
+.ps-card-name {
+  font-size: 20px;
+  font-weight: 700;
+  color: #f0fdf4;
+  letter-spacing: -0.02em;
+}
+
+.ps-card-tagline {
+  font-size: 11px;
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+/* ── Price row ───────────────────────────────────────────────────────────── */
+.ps-price-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.ps-price {
+  font-size: 26px;
+  font-weight: 700;
+  color: #f0fdf4;
+  letter-spacing: -0.03em;
+}
+
+.ps-period {
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.ps-gst-note {
+  width: 100%;
+  font-size: 11px;
+  color: #4b5563;
+  margin-top: 1px;
+}
+
+.ps-saving {
+  width: 100%;
+  font-size: 11px;
+  font-weight: 600;
+  margin-top: 2px;
+}
+
+/* ── Features ────────────────────────────────────────────────────────────── */
+.ps-feat {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #9ca3af;
+  padding: 2px 0;
+}
+
+.ps-feat-ok {
+  color: #d1fae5;
+}
+
+.ps-feat-locked {
+  color: #4b5563;
+  flex-wrap: wrap;
+}
+
+.ps-feat-lock-icon {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.ps-lock-badge {
+  font-size: 10px;
+  background: #1f2d22;
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: #6b7280;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* ── Select label (bottom of card) ──────────────────────────────────────── */
+.ps-select-label {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid #1f2d22;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  border-radius: 6px;
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  margin-top: 14px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  transition: background 0.2s, color 0.2s;
+}
+
+/* ── Skeleton ────────────────────────────────────────────────────────────── */
+.ps-skeleton {
+  pointer-events: none;
+  min-height: 280px;
+}
+
+.ps-sk {
+  background: #1a2a1e;
+  border-radius: 4px;
+  animation: ps-shimmer 1.4s ease-in-out infinite;
+}
+
+.ps-sk-short  { height: 10px; width: 40%; margin-bottom: 8px; }
+.ps-sk-title  { height: 22px; width: 70%; margin-bottom: 12px; }
+.ps-sk-med    { height: 10px; width: 55%; margin-bottom: 6px; }
+.ps-sk-full   { height: 10px; width: 90%; margin-bottom: 6px; }
+
+@keyframes ps-shimmer {
+  0%, 100% { opacity: 0.4; }
+  50%       { opacity: 0.8; }
+}
+
+/* ── Confirm bar ─────────────────────────────────────────────────────────── */
+.ps-confirm-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+  background: #0d1f12;
+  border: 1px solid #1a3a22;
+  border-radius: 12px;
+  padding: 20px 24px;
+}
+
+.ps-confirm-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: #4b5563;
+  margin-bottom: 4px;
+}
+
+.ps-confirm-name {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.ps-confirm-price {
+  font-size: 13px;
+  font-weight: 400;
+  color: #6b7280;
+}
+
+.ps-confirm-meta {
+  font-size: 12px;
+  color: #4b5563;
+  margin-top: 4px;
+  line-height: 1.5;
+}
+
+.ps-confirm-btn {
+  flex-shrink: 0;
+  background: #22c55e;
+  color: #040706;
+  border: none;
+  border-radius: 8px;
+  padding: 12px 28px;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.1s;
+  white-space: nowrap;
+}
+
+.ps-confirm-btn:hover:not(:disabled) {
+  background: #4ade80;
+}
+
+.ps-confirm-btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.ps-confirm-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Footer note ─────────────────────────────────────────────────────────── */
+.ps-footer-note {
+  font-size: 11px;
+  color: #374151;
+  text-align: center;
+  line-height: 1.6;
+  margin: 0;
+}
+
+/* ── Success screen ──────────────────────────────────────────────────────── */
+.ps-success-root {
+  align-items: center;
+  justify-content: center;
+  padding: 48px 16px;
+}
+
+.ps-success {
+  text-align: center;
+  max-width: 480px;
+  width: 100%;
+  background: #0d1f12;
+  border: 1px solid #1a3a22;
+  border-radius: 16px;
+  padding: 48px 32px;
+}
+
+.ps-success-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+  animation: ps-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes ps-pop {
+  from { transform: scale(0.5); opacity: 0; }
+  to   { transform: scale(1);   opacity: 1; }
+}
+
+.ps-success-title {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0 0 12px;
+}
+
+.ps-success-sub {
+  font-size: 14px;
+  color: #6b7280;
+  line-height: 1.7;
+  margin: 0 0 20px;
+}
+
+.ps-success-invoice {
+  font-size: 13px;
+  color: #9ca3af;
+  margin-top: 12px;
+}
+
+.ps-success-invoice a {
+  color: #22c55e;
+  text-decoration: none;
+}
+
+.ps-success-invoice a:hover { text-decoration: underline; }
+
+/* ── GST Modal overlay ───────────────────────────────────────────────────── */
+.ps-overlay {
+  position: fixed;
+  inset: 0;
+  background: #00000088;
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  padding: 16px;
+}
+
+.ps-modal {
+  background: #0d1f12;
+  border: 1px solid #1a3a22;
+  border-radius: 14px;
+  width: 100%;
+  max-width: 460px;
+  font-family: inherit;
+  overflow: hidden;
+}
+
+.ps-modal-hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 20px;
+  border-bottom: 1px solid #1a3a22;
+}
+
+.ps-modal-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #f0fdf4;
+  letter-spacing: 0.02em;
+}
+
+.ps-modal-close {
+  background: none;
+  border: none;
+  color: #6b7280;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0;
+  font-family: inherit;
+  line-height: 1;
+  transition: color 0.15s;
+}
+
+.ps-modal-close:hover { color: #f0fdf4; }
+
+.ps-modal-body {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.ps-modal-note {
+  font-size: 12px;
+  color: #6b7280;
+  line-height: 1.6;
+  margin: 0;
+}
+
+.ps-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ps-field label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #9ca3af;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.ps-optional {
+  font-weight: 400;
+  text-transform: none;
+  color: #4b5563;
+}
+
+.ps-field input {
+  background: #080c0a;
+  border: 1px solid #1f2d22;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 13px;
+  color: #f0fdf4;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.ps-field input:focus {
+  border-color: #22c55e;
+}
+
+.ps-field input[aria-invalid="true"] {
+  border-color: #ef4444;
+}
+
+.ps-field-err {
+  font-size: 11px;
+  color: #fca5a5;
+}
+
+.ps-modal-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 16px 20px;
+  border-top: 1px solid #1a3a22;
+}
+
+.ps-modal-skip {
+  background: none;
+  border: 1px solid #1f2d22;
+  border-radius: 6px;
+  padding: 9px 16px;
+  font-family: inherit;
+  font-size: 13px;
+  color: #6b7280;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.ps-modal-skip:hover {
+  border-color: #374151;
+  color: #9ca3af;
+}
+
+.ps-modal-confirm {
+  background: #22c55e;
+  border: none;
+  border-radius: 6px;
+  padding: 9px 20px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  color: #040706;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.ps-modal-confirm:hover:not(:disabled) { background: #4ade80; }
+.ps-modal-confirm:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── Responsive ──────────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .ps-grid {
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  .ps-root { padding: 24px 12px 60px; }
+
+  .ps-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  .ps-confirm-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 14px;
+  }
+
+  .ps-confirm-btn {
+    width: 100%;
+    text-align: center;
+  }
+}
+
+@media (max-width: 400px) {
+  .ps-grid {
+    grid-template-columns: 1fr;
+  }
+}

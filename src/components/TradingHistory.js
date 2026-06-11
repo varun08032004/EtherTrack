@@ -1,44 +1,49 @@
+// TradingHistory.jsx — EtherTrack (PRODUCTION-HARDENED)
+// ─────────────────────────────────────────────────────────────────────────────
+// FIXES APPLIED:
+//
+// [FIX-1]  ETH_INR hardcoded constant REMOVED from INR calculations.
+//          All INR values now use stored priceINR / buyer_pays_inr directly
+//          from the trade record — the values trades.js correctly stores as
+//          price_per_credit_inr and buyer_pays_inr. Historical trades made
+//          when ETH was at a different rate now show the correct INR value.
+
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { usePortfolio } from '../context/PortfolioContext';
 
-const ETH_INR = 280000;
 const itemsPerPage = 10;
 
 const TradingHistory = () => {
   const navigate = useNavigate();
   const { tradeHistory, loading } = usePortfolio();
 
-  const [currentPage,   setCurrentPage]   = useState(1);
-  const [filterType,    setFilterType]    = useState('all');
-  const [filterStatus,  setFilterStatus]  = useState('all');
-  const [search,        setSearch]        = useState('');
+  const [currentPage,  setCurrentPage]  = useState(1);
+  const [filterType,   setFilterType]   = useState('all');
+  const [filterStatus, setFilterStatus] = useState('all');
+  const [search,       setSearch]       = useState('');
 
-  // ── Normalise raw tradeHistory entries into display rows ──────
-  const rows = tradeHistory.map(t => {
-    const priceEth   = t.amount > 0 ? parseFloat(t.totalEth || 0) / t.amount : 0;
-    const priceInr   = priceEth * ETH_INR;
-    const totalInr   = parseFloat(t.totalEth || 0) * ETH_INR;
-    return {
-      id:        t.id       || t.txHash?.slice(0, 10) || '—',
-      market:    t.projectName || t.tokenId ? `Token #${t.tokenId}` : '—',
-      type:      t.type     || 'Buy',
-      size:      t.amount   || 0,
-      priceInr:  priceInr,
-      totalInr:  totalInr,
-      totalEth:  parseFloat(t.totalEth || 0),
-      time:      t.time     || '—',
-      status:    t.isAMM ? 'AMM' : (t.status || 'Confirmed'),
-      txHash:    t.txHash   || null,
-    };
-  });
+  // ── [FIX-1] Use stored INR values — not recalculated from ETH_INR ─────────
+  const rows = tradeHistory.map(t => ({
+    id:       t.id       || t.txHash?.slice(0, 10) || '—',
+    market:   t.projectName || (t.tokenId ? `Token #${t.tokenId}` : '—'),
+    type:     t.type     || 'Buy',
+    size:     t.amount   || 0,
+    // Use stored INR price — not derived from ETH at current rate
+    priceInr: parseFloat(t.priceINR || t.price_per_credit_inr || 0),
+    totalInr: parseFloat(t.totalINR || t.buyer_pays_inr || 0),
+    totalEth: parseFloat(t.totalEth || 0),
+    time:     t.time     || '—',
+    status:   t.isAMM ? 'AMM' : (t.status || 'Confirmed'),
+    txHash:   t.txHash   || null,
+  }));
 
-  // ── Summary stats ─────────────────────────────────────────────
+  // ── Summary stats ─────────────────────────────────────────────────────────
   const totalVol   = rows.reduce((a, t) => a + t.totalInr, 0);
   const totalBuys  = rows.filter(t => t.type === 'Buy').reduce((a, t)  => a + t.totalInr, 0);
   const totalSells = rows.filter(t => t.type === 'Sell').reduce((a, t) => a + t.totalInr, 0);
 
-  // ── Filtering ─────────────────────────────────────────────────
+  // ── Filtering ─────────────────────────────────────────────────────────────
   const filtered = rows.filter(t => {
     const matchType   = filterType   === 'all' || t.type.toLowerCase()   === filterType;
     const matchStatus = filterStatus === 'all' || t.status.toLowerCase() === filterStatus.toLowerCase();
@@ -64,6 +69,7 @@ const TradingHistory = () => {
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href = url; a.download = 'trading_history.csv'; a.click();
+    URL.revokeObjectURL(url);
   };
 
   const statusClass = s => {
@@ -79,89 +85,45 @@ const TradingHistory = () => {
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap');
         .et-th { min-height:100vh; background:#080c0a; font-family:'DM Mono',monospace; position:relative; }
-        .et-th::before {
-          content:''; position:fixed; inset:0; z-index:0;
-          background-image:linear-gradient(rgba(34,197,94,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(34,197,94,0.03) 1px,transparent 1px);
-          background-size:40px 40px; pointer-events:none;
-        }
+        .et-th::before { content:''; position:fixed; inset:0; z-index:0; background-image:linear-gradient(rgba(34,197,94,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(34,197,94,0.03) 1px,transparent 1px); background-size:40px 40px; pointer-events:none; }
         .et-th-wrap { position:relative; z-index:1; max-width:1200px; margin:0 auto; padding:40px 24px; }
         .et-th-label { font-size:10px; color:#4ade8066; letter-spacing:.15em; margin-bottom:8px; }
         .et-th-title { font-size:26px; font-weight:700; color:#f0fdf4; margin-bottom:28px; }
         .et-th-title span { color:#22c55e; }
-
         .et-th-stats { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:24px; animation:fadeUp .4s ease both; }
         .et-th-stat { background:#0a0f0c; border:1px solid #0f2a1a; border-radius:10px; padding:16px 18px; }
         .et-th-stat-label { font-size:10px; color:#4ade8055; letter-spacing:.12em; margin-bottom:8px; }
         .et-th-stat-val   { font-size:18px; font-weight:700; color:#f0fdf4; }
         .et-th-stat-sub   { font-size:10px; color:#22c55e88; margin-top:3px; }
-
         .et-th-card { background:#0a0f0c; border:1px solid #0f2a1a; border-radius:10px; padding:24px; animation:fadeUp .4s ease .1s both; }
         .et-th-card-title { font-size:11px; color:#4ade8088; letter-spacing:.14em; margin-bottom:20px; }
-
         .et-th-filters { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:20px; align-items:flex-end; }
         .et-th-filter-group { display:flex; flex-direction:column; gap:5px; }
         .et-th-filter-label { font-size:9px; color:#4ade8044; letter-spacing:.12em; }
-        .et-th-input, .et-th-select {
-          padding:8px 12px; border-radius:6px;
-          background:#060a07; border:1px solid #0f2a1a;
-          color:#e2e8e4; font-family:'DM Mono',monospace; font-size:11px;
-          outline:none; transition:border-color .2s;
-        }
+        .et-th-input, .et-th-select { padding:8px 12px; border-radius:6px; background:#060a07; border:1px solid #0f2a1a; color:#e2e8e4; font-family:'DM Mono',monospace; font-size:11px; outline:none; transition:border-color .2s; }
         .et-th-input:focus, .et-th-select:focus { border-color:#22c55e44; }
         .et-th-input::placeholder { color:#4ade8033; }
-
-        .et-th-export-btn {
-          padding:8px 16px; border-radius:6px;
-          border:1px solid #0f2a1a; background:#060a07;
-          color:#4ade8088; cursor:pointer; font-family:'DM Mono',monospace;
-          font-size:11px; letter-spacing:.08em; transition:all .2s; align-self:flex-end;
-        }
+        .et-th-export-btn { padding:8px 16px; border-radius:6px; border:1px solid #0f2a1a; background:#060a07; color:#4ade8088; cursor:pointer; font-family:'DM Mono',monospace; font-size:11px; letter-spacing:.08em; transition:all .2s; align-self:flex-end; }
         .et-th-export-btn:hover { border-color:#22c55e44; color:#22c55e; background:#0d2e1f; }
-
-        .et-th-head {
-          display:grid; grid-template-columns:110px 1fr 60px 60px 100px 100px 80px 90px;
-          padding:0 12px 10px; border-bottom:1px solid #0f2a1a;
-          font-size:9px; color:#4ade8044; letter-spacing:.12em;
-        }
-        .et-th-row {
-          display:grid; grid-template-columns:110px 1fr 60px 60px 100px 100px 80px 90px;
-          padding:12px; border-bottom:1px solid #0f2a1a22;
-          font-size:11px; align-items:center;
-          transition:background .15s; border-radius:4px; cursor:pointer;
-        }
+        .et-th-head { display:grid; grid-template-columns:110px 1fr 60px 60px 100px 100px 80px 90px; padding:0 12px 10px; border-bottom:1px solid #0f2a1a; font-size:9px; color:#4ade8044; letter-spacing:.12em; }
+        .et-th-row { display:grid; grid-template-columns:110px 1fr 60px 60px 100px 100px 80px 90px; padding:12px; border-bottom:1px solid #0f2a1a22; font-size:11px; align-items:center; transition:background .15s; border-radius:4px; cursor:pointer; }
         .et-th-row:hover { background:#0f1a1244; }
         .et-th-row:last-child { border-bottom:none; }
-
         .et-th-type-buy  { color:#22c55e; }
         .et-th-type-sell { color:#f87171; }
-
-        .et-th-status {
-          font-size:9px; padding:3px 8px; border-radius:4px;
-          display:inline-block; letter-spacing:.06em;
-        }
+        .et-th-status { font-size:9px; padding:3px 8px; border-radius:4px; display:inline-block; letter-spacing:.06em; }
         .et-th-status.confirmed { background:#0d2e1f; color:#22c55e; border:1px solid #16a34a44; }
         .et-th-status.pending   { background:#1c1a00; color:#facc15; border:1px solid #ca8a0444; }
         .et-th-status.failed    { background:#450a0a; color:#f87171; border:1px solid #dc262644; }
-
         .et-th-pagination { display:flex; align-items:center; justify-content:center; gap:8px; margin-top:20px; }
-        .et-th-page-btn {
-          padding:6px 14px; border-radius:5px;
-          border:1px solid #0f2a1a; background:#060a07;
-          color:#4ade8088; cursor:pointer; font-family:'DM Mono',monospace;
-          font-size:10px; transition:all .2s;
-        }
+        .et-th-page-btn { padding:6px 14px; border-radius:5px; border:1px solid #0f2a1a; background:#060a07; color:#4ade8088; cursor:pointer; font-family:'DM Mono',monospace; font-size:10px; transition:all .2s; }
         .et-th-page-btn:hover:not(:disabled) { border-color:#22c55e44; color:#22c55e; }
         .et-th-page-btn:disabled { opacity:.3; cursor:not-allowed; }
         .et-th-page-btn.active   { background:#0d2e1f; border-color:#22c55e; color:#22c55e; }
-        .et-th-page-info { font-size:10px; color:#4ade8044; letter-spacing:.08em; padding:0 4px; }
-
         .et-th-empty { padding:40px; text-align:center; color:#4ade8033; font-size:12px; letter-spacing:.08em; }
-
         .et-th-skeleton { height:14px; background:#0f2a1a55; border-radius:4px; animation:pulse 1.5s ease infinite; }
-
         @keyframes fadeUp { from{opacity:0;transform:translateY(12px);} to{opacity:1;transform:translateY(0);} }
         @keyframes pulse  { 0%,100%{opacity:.4;} 50%{opacity:.9;} }
-
         @media(max-width:900px) {
           .et-th-stats { grid-template-columns:1fr 1fr; }
           .et-th-head, .et-th-row { grid-template-columns:100px 1fr 55px 55px 90px 90px; }
@@ -175,21 +137,17 @@ const TradingHistory = () => {
           <div className="et-th-label">TRANSACTION RECORDS</div>
           <div className="et-th-title">Trading <span>History</span></div>
 
-          {/* Stats */}
           <div className="et-th-stats">
             {[
-              { label: 'TOTAL VOLUME',  val: fmt(totalVol),        sub: 'all transactions'  },
-              { label: 'TOTAL BOUGHT',  val: fmt(totalBuys),       sub: 'credits purchased' },
-              { label: 'TOTAL SOLD',    val: fmt(totalSells),      sub: 'credits sold'      },
-              { label: 'TOTAL TRADES',  val: rows.length,          sub: 'transactions'      },
+              { label: 'TOTAL VOLUME', val: fmt(totalVol),   sub: 'all transactions'  },
+              { label: 'TOTAL BOUGHT', val: fmt(totalBuys),  sub: 'credits purchased' },
+              { label: 'TOTAL SOLD',   val: fmt(totalSells), sub: 'credits sold'      },
+              { label: 'TOTAL TRADES', val: rows.length,     sub: 'transactions'      },
             ].map(({ label, val, sub }) => (
               <div key={label} className="et-th-stat">
                 <div className="et-th-stat-label">{label}</div>
                 <div className="et-th-stat-val">
-                  {loading?.trades
-                    ? <div className="et-th-skeleton" style={{ width: 80 }}/>
-                    : val
-                  }
+                  {loading?.trades ? <div className="et-th-skeleton" style={{ width: 80 }}/> : val}
                 </div>
                 <div className="et-th-stat-sub">{sub}</div>
               </div>
@@ -202,17 +160,15 @@ const TradingHistory = () => {
               {rows.length > 0 && <span style={{ color: '#22c55e88', marginLeft: 8 }}>· {rows.length} TOTAL</span>}
             </div>
 
-            {/* Filters */}
             <div className="et-th-filters">
               <div className="et-th-filter-group">
                 <span className="et-th-filter-label">SEARCH</span>
                 <input className="et-th-input" placeholder="TXN ID or project..."
-                  value={search} onChange={e => { setSearch(e.target.value); setCurrentPage(1); }} />
+                  value={search} onChange={e => { setSearch(e.target.value); setCurrentPage(1); }}/>
               </div>
               <div className="et-th-filter-group">
                 <span className="et-th-filter-label">TYPE</span>
-                <select className="et-th-select" value={filterType}
-                  onChange={e => { setFilterType(e.target.value); setCurrentPage(1); }}>
+                <select className="et-th-select" value={filterType} onChange={e => { setFilterType(e.target.value); setCurrentPage(1); }}>
                   <option value="all">All Types</option>
                   <option value="buy">Buy</option>
                   <option value="sell">Sell</option>
@@ -220,8 +176,7 @@ const TradingHistory = () => {
               </div>
               <div className="et-th-filter-group">
                 <span className="et-th-filter-label">STATUS</span>
-                <select className="et-th-select" value={filterStatus}
-                  onChange={e => { setFilterStatus(e.target.value); setCurrentPage(1); }}>
+                <select className="et-th-select" value={filterStatus} onChange={e => { setFilterStatus(e.target.value); setCurrentPage(1); }}>
                   <option value="all">All Status</option>
                   <option value="confirmed">Confirmed</option>
                   <option value="pending">Pending</option>
@@ -232,16 +187,9 @@ const TradingHistory = () => {
               <button className="et-th-export-btn" onClick={handleExport}>EXPORT CSV</button>
             </div>
 
-            {/* Table */}
             <div className="et-th-head">
-              <span>TXN ID</span>
-              <span>PROJECT</span>
-              <span>TYPE</span>
-              <span>SIZE</span>
-              <span>PRICE</span>
-              <span>TOTAL (INR)</span>
-              <span>ETH</span>
-              <span>STATUS</span>
+              <span>TXN ID</span><span>PROJECT</span><span>TYPE</span><span>SIZE</span>
+              <span>PRICE</span><span>TOTAL (INR)</span><span>ETH</span><span>STATUS</span>
             </div>
 
             {loading?.trades ? (
@@ -257,9 +205,7 @@ const TradingHistory = () => {
               </div>
             ) : (
               currentEntries.map((t, i) => (
-                <div
-                  key={t.id + i}
-                  className="et-th-row"
+                <div key={t.id + i} className="et-th-row"
                   onClick={() => t.txHash && navigate(`/transaction-status?hash=${t.txHash}`)}
                   title={t.txHash ? 'Click to view on-chain details' : ''}
                 >
@@ -268,33 +214,26 @@ const TradingHistory = () => {
                   <span className={`et-th-type-${t.type.toLowerCase()}`}>{t.type}</span>
                   <span>{t.size}</span>
                   <span>{t.priceInr > 0 ? fmt(t.priceInr) : '—'}</span>
-                  <span style={{ fontWeight: 700 }}>{fmt(t.totalInr)}</span>
-                  <span style={{ color: '#60a5fa88', fontSize: 10 }}>{fmtEth(t.totalEth)}</span>
-                  <span>
-                    <span className={`et-th-status ${statusClass(t.status)}`}>{t.status}</span>
-                  </span>
+                  <span style={{ fontWeight: 700 }}>{t.totalInr > 0 ? fmt(t.totalInr) : '—'}</span>
+                  <span style={{ color: '#60a5fa88', fontSize: 10 }}>{t.totalEth > 0 ? fmtEth(t.totalEth) : '—'}</span>
+                  <span><span className={`et-th-status ${statusClass(t.status)}`}>{t.status}</span></span>
                 </div>
               ))
             )}
 
-            {/* Pagination */}
             {totalPages > 1 && (
               <div className="et-th-pagination">
-                <button className="et-th-page-btn" disabled={currentPage === 1}
-                  onClick={() => setCurrentPage(p => p - 1)}>← PREV</button>
+                <button className="et-th-page-btn" disabled={currentPage === 1} onClick={() => setCurrentPage(p => p - 1)}>← PREV</button>
                 {[...Array(totalPages)].map((_, i) => (
-                  <button key={i} className={`et-th-page-btn${currentPage === i+1 ? ' active' : ''}`}
-                    onClick={() => setCurrentPage(i + 1)}>{i + 1}</button>
+                  <button key={i} className={`et-th-page-btn${currentPage === i + 1 ? ' active' : ''}`} onClick={() => setCurrentPage(i + 1)}>{i + 1}</button>
                 ))}
-                <button className="et-th-page-btn" disabled={currentPage === totalPages}
-                  onClick={() => setCurrentPage(p => p + 1)}>NEXT →</button>
+                <button className="et-th-page-btn" disabled={currentPage === totalPages} onClick={() => setCurrentPage(p => p + 1)}>NEXT →</button>
               </div>
             )}
 
-            {/* Footer info */}
             {rows.length > 0 && (
               <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid #0f2a1a22', fontSize: 9, color: '#4ade8033', textAlign: 'center', letterSpacing: '.08em' }}>
-                Click any row to view on-chain transaction details · Data from PortfolioContext
+                Click any row to view on-chain transaction details · INR values reflect price at time of trade
               </div>
             )}
           </div>

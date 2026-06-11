@@ -1,603 +1,827 @@
-// src/components/SubscriptionBilling.jsx — EtherTrack Subscription & Billing Tab
-// Drop this into your existing TeamManagement tabs, or use as standalone route
+// src/components/SubscriptionBilling.jsx - 28/05/2026
+// [v2] Changes:
+// [SB-1] authAPI added to import — needed for instant me() refresh after payment
+// [SB-2] onPlanActivated made async — calls authAPI.me() after payment so
+//        PlanGate and Header locks lift immediately without page reload
+// [SB-3] Debug console.logs removed from refreshBalance, handleWalletPay,
+//        handleConfirmPay — production cleanup
 
-import React, { useState } from 'react';
+import React, {
+  useState, useEffect, useContext, useRef, useCallback,
+  useMemo,
+} from 'react';
+import { createPortal } from 'react-dom';
+import { walletAPI, subscriptionAPI, authAPI } from '../services/api';
+import { AuthContext } from '../App';
+import { useNotifications } from '../context/NotificationContext';
+import {
+  PLANS, FEATURE_ROWS, PLAN_FEATURES_MATRIX, FAQS,
+  GSTIN_REGEX, PAN_REGEX,
+} from '../constants/plans';
+import styles from './SubscriptionBilling.module.css';
 
-// ── Static data ─────────────────────────────────────────────────────────────
-
-const PLANS = [
-  {
-    key: 'free',
-    label: 'Free',
-    price: 0,
-    period: null,
-    tagline: 'Explore EtherTrack',
-    audience: 'Students, individuals, explorers',
-    color: '#86efac',
-    bg: '#0a1a0e',
-    border: '#22c55e22',
-    seats: 1,
-    gasFee: '1%',
-    features: {
-      emissions: { val: '3 sources', ok: true },
-      portfolio: { val: 'View only', ok: false },
-      marketplace_buy: { val: false, ok: false },
-      marketplace_sell: { val: false, ok: false },
-      exports: { val: false, ok: false },
-      reports: { val: false, ok: false },
-      team: { val: false, ok: false },
-      verifier: { val: false, ok: false },
-      api: { val: false, ok: false },
-      support: { val: 'Community', ok: true },
-    },
-  },
-  {
-    key: 'starter',
-    label: 'Starter',
-    price: 1999,
-    period: 'mo',
-    tagline: 'For MSMEs & NGOs',
-    audience: 'Unlisted SMEs, NGOs, CA consultants',
-    color: '#60a5fa',
-    bg: '#060e18',
-    border: '#60a5fa22',
-    seats: 3,
-    gasFee: '1%',
-    features: {
-      emissions: { val: 'Unlimited sources', ok: true },
-      portfolio: { val: 'Up to 10 credits', ok: true },
-      marketplace_buy: { val: 'Buy credits', ok: true },
-      marketplace_sell: { val: false, ok: false },
-      exports: { val: 'CSV only', ok: true },
-      reports: { val: false, ok: false },
-      team: { val: false, ok: false },
-      verifier: { val: false, ok: false },
-      api: { val: false, ok: false },
-      support: { val: 'Email support', ok: true },
-    },
-  },
-  {
-    key: 'growth',
-    label: 'Growth',
-    price: 5999,
-    period: 'mo',
-    tagline: 'Most popular',
-    audience: 'Growing businesses, active traders',
-    color: '#22c55e',
-    bg: '#0a1a0e',
-    border: '#22c55e44',
-    seats: 10,
-    gasFee: '0.75%',
-    popular: true,
-    features: {
-      emissions: { val: 'Unlimited sources', ok: true },
-      portfolio: { val: 'Up to 100 credits', ok: true },
-      marketplace_buy: { val: 'Buy credits', ok: true },
-      marketplace_sell: { val: 'Sell credits', ok: true },
-      exports: { val: 'CSV + PDF', ok: true },
-      reports: { val: 'Basic MIS reports', ok: true },
-      team: { val: 'Viewer + Manager roles', ok: true },
-      verifier: { val: false, ok: false },
-      api: { val: false, ok: false },
-      support: { val: 'Priority email', ok: true },
-    },
-  },
-  {
-    key: 'corporate',
-    label: 'Corporate',
-    price: 18999,
-    period: 'mo',
-    tagline: 'For listed companies',
-    audience: 'BRSR filers, ESG teams, listed cos.',
-    color: '#f97316',
-    bg: '#1a0a00',
-    border: '#f9731633',
-    seats: 50,
-    gasFee: '0.6%',
-    features: {
-      emissions: { val: 'Unlimited sources', ok: true },
-      portfolio: { val: 'Unlimited credits', ok: true },
-      marketplace_buy: { val: 'Buy credits', ok: true },
-      marketplace_sell: { val: 'Sell credits', ok: true },
-      exports: { val: 'CSV + PDF + Excel', ok: true },
-      reports: { val: 'BRSR / CDP / TCFD', ok: true },
-      team: { val: 'Full RBAC (all roles)', ok: true },
-      verifier: { val: 'BV, DNV, EY, Deloitte…', ok: true },
-      api: { val: false, ok: false },
-      support: { val: 'Dedicated manager', ok: true },
-    },
-  },
-  {
-    key: 'enterprise',
-    label: 'Enterprise',
-    price: null,
-    period: null,
-    tagline: 'Custom pricing',
-    audience: 'Conglomerates, brokers, consultancies',
-    color: '#a78bfa',
-    bg: '#120a28',
-    border: '#a78bfa33',
-    seats: null,
-    gasFee: '0.5% + vol. discount',
-    features: {
-      emissions: { val: 'Unlimited sources', ok: true },
-      portfolio: { val: 'Unlimited credits', ok: true },
-      marketplace_buy: { val: 'Buy credits', ok: true },
-      marketplace_sell: { val: 'Sell + bulk list', ok: true },
-      exports: { val: 'All formats + white-label', ok: true },
-      reports: { val: 'All + custom templates', ok: true },
-      team: { val: 'Unlimited seats + SSO', ok: true },
-      verifier: { val: 'Custom integrations', ok: true },
-      api: { val: 'REST API + webhooks', ok: true },
-      support: { val: 'SLA + dedicated team', ok: true },
-    },
-  },
+// ── Constants ────────────────────────────────────────────────────
+const INVOICE_ALLOW_ORIGINS = [
+  window.location.origin,
+  'https://invoices.ethertrack.in',
+  'https://storage.googleapis.com',
 ];
 
-const FEATURE_ROWS = [
-  { key: 'emissions',        label: 'Emissions tracking' },
-  { key: 'portfolio',        label: 'Portfolio management' },
-  { key: 'marketplace_buy',  label: 'Marketplace — buy' },
-  { key: 'marketplace_sell', label: 'Marketplace — sell' },
-  { key: 'exports',          label: 'Data exports' },
-  { key: 'reports',          label: 'Compliance reports' },
-  { key: 'team',             label: 'Team management' },
-  { key: 'verifier',         label: 'Verifier badge' },
-  { key: 'api',              label: 'API / webhooks' },
-  { key: 'support',          label: 'Support' },
-];
+const RAZORPAY_KEY_ID = process.env.REACT_APP_RAZORPAY_KEY_ID || '';
 
-const GAS_FEE_CONTEXT = [
-  { range: '₹0 – ₹1L / txn', tier1: '₹0 – ₹1,000', tier2: '₹0 – ₹750', tier3: '₹0 – ₹600', tier4: '₹0 – ₹500' },
-  { range: '₹5L / txn', tier1: '₹5,000', tier2: '₹3,750', tier3: '₹3,000', tier4: '₹2,500' },
-  { range: '₹25L / txn', tier1: '₹25,000', tier2: '₹18,750', tier3: '₹15,000', tier4: '₹12,500' },
-];
+// ── Utilities ────────────────────────────────────────────────────
+const fmtINR = n =>
+  new Intl.NumberFormat('en-IN', {
+    style:                 'currency',
+    currency:              'INR',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(parseFloat(n || 0));
 
-// ── Component ────────────────────────────────────────────────────────────────
+const toPaise   = n  => Math.round((parseFloat(n) || 0) * 100);
+const daysUntil = d  => d ? Math.ceil((new Date(d) - new Date()) / 86_400_000) : null;
+const newKey    = () => `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
-export default function SubscriptionBilling({ currentPlan = 'growth', orgName = 'Acme Corp' }) {
-  const [billingCycle, setBillingCycle] = useState('monthly'); // monthly | annual
-  const [hoveredPlan, setHoveredPlan] = useState(null);
-  const [showMatrix, setShowMatrix] = useState(false);
-  const [showGasCalc, setShowGasCalc] = useState(false);
-  const [toast, setToast] = useState(null);
+const isSafeInvoiceUrl = url => {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    return INVOICE_ALLOW_ORIGINS.some(o => u.origin === new URL(o).origin);
+  } catch { return false; }
+};
 
-  const showToast = (msg, type = 'success') => {
-    setToast({ msg, type });
-    setTimeout(() => setToast(null), 3500);
-  };
+// ── cx helper — joins CSS module classes ─────────────────────────
+const cx = (...args) =>
+  args.flat().filter(Boolean).map(c => styles[c] ?? c).join(' ');
 
-  const annualDiscount = 0.17; // 17% off = ~2 months free
-  const getPrice = (plan) => {
-    if (!plan.price) return null;
-    if (billingCycle === 'annual') return Math.round(plan.price * (1 - annualDiscount));
-    return plan.price;
-  };
+// ── Razorpay SDK loader — deduped promise cache ───────────────────
+let _rzpPromise = null;
+const loadRazorpay = () => {
+  if (_rzpPromise) return _rzpPromise;
+  _rzpPromise = new Promise(resolve => {
+    if (window.Razorpay) return resolve(true);
+    const s = document.createElement('script');
+    s.src     = 'https://checkout.razorpay.com/v1/checkout.js';
+    s.onload  = () => resolve(true);
+    s.onerror = () => { _rzpPromise = null; resolve(false); };
+    document.body.appendChild(s);
+  });
+  return _rzpPromise;
+};
 
-  const CSS = `
-    @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Syne:wght@700;800&display=swap');
-    *{box-sizing:border-box;}
-    .sb{min-height:100vh;background:#040706;font-family:'DM Mono',monospace;color:#f0fdf4;padding:32px 24px 80px;}
-    .sbw{max-width:1140px;margin:0 auto;}
+// ── Mobile check ─────────────────────────────────────────────────
+const checkMobile = () => /android|iphone|ipad|ipod/i.test(navigator.userAgent);
 
-    .sb-hdr{margin-bottom:28px;}
-    .sb-hdr-label{font-size:9px;color:#86efac44;letter-spacing:.2em;margin-bottom:6px;}
-    .sb-hdr-title{font-family:'Syne',sans-serif;font-size:28px;font-weight:800;color:#f0fdf4;margin:0;}
-    .sb-hdr-title span{color:#22c55e;}
-    .sb-hdr-sub{font-size:10px;color:#86efac33;letter-spacing:.08em;margin-top:4px;}
+// ── Validation helpers ───────────────────────────────────────────
+const validateGstin = v => !v || GSTIN_REGEX.test(v);
+const validatePan   = v => !v || PAN_REGEX.test(v);
 
-    .sb-current-banner{
-      display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;
-      background:#070c09;border:1px solid #22c55e22;border-radius:10px;
-      padding:14px 20px;margin-bottom:24px;
+// ── Portal wrapper ───────────────────────────────────────────────
+const Portal = ({ children }) => {
+  const el = useRef(document.createElement('div'));
+  useEffect(() => {
+    document.body.appendChild(el.current);
+    return () => document.body.removeChild(el.current);
+  }, []);
+  return createPortal(children, el.current);
+};
+
+// ── Skeleton card ────────────────────────────────────────────────
+const PlanSkeleton = () => (
+  <div className={cx('planCard', 'skeleton')} aria-hidden="true">
+    <div className={cx('skLine', 'skShort')} />
+    <div className={cx('skLine', 'skTitle')} />
+    <div className={cx('skLine', 'skMed')} />
+    <div className={cx('skLine', 'skFull')} />
+    <div className={cx('skLine', 'skFull')} />
+    <div className={cx('skLine', 'skMed')} />
+  </div>
+);
+
+// ═══════════════════════════════════════════════════════════════
+export default function SubscriptionBilling({
+  currentPlan = 'free',
+  orgName     = '',
+}) {
+  const { dbUser, setDbUser }  = useContext(AuthContext);
+  const { addNotification }    = useNotifications();
+
+  // ── State ───────────────────────────────────────────────────
+  const [billingCycle,   setBillingCycle]   = useState('monthly');
+  const [walletBalance,  setWalletBalance]  = useState(null);
+  const [prices,         setPrices]         = useState(null);
+  const [priceError,     setPriceError]     = useState(false);
+  const [priceLoading,   setPriceLoading]   = useState(true);
+
+  const [payModal,       setPayModal]       = useState(null);
+  const [payMethod,      setPayMethod]      = useState('wallet');
+  const [paying,         setPaying]         = useState(false);
+  const [modalErr,       setModalErr]       = useState('');
+
+  const [gstin,          setGstin]          = useState('');
+  const [pan,            setPan]            = useState('');
+  const [gstinErr,       setGstinErr]       = useState('');
+  const [panErr,         setPanErr]         = useState('');
+
+  const [showMatrix,     setShowMatrix]     = useState(false);
+  const [showGas,        setShowGas]        = useState(false);
+  const [showHistory,    setShowHistory]    = useState(false);
+  const [payHistory,     setPayHistory]     = useState([]);
+  const [historyError,   setHistoryError]   = useState('');
+  const [historyCursor,  setHistoryCursor]  = useState(null);
+  const [historyMore,    setHistoryMore]    = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  const [openFaq,        setOpenFaq]        = useState(null);
+  const [toast,          setToast]          = useState(null);
+
+  const toastTimer     = useRef(null);
+  const idempotencyKey = useRef(newKey());
+  const mainRef        = useRef(null);
+  const modalRef       = useRef(null);
+  const notifFiredRef  = useRef(false);
+  const isMobile       = useMemo(checkMobile, []);
+
+  // ── Derived ─────────────────────────────────────────────────
+  const renewalDate    = dbUser?.subscription_renewal_date || null;
+  const daysLeft       = daysUntil(renewalDate);
+  const activePlan     = dbUser?.subscription_plan || currentPlan;
+  const activePlanData = PLANS.find(p => p.key === activePlan) || PLANS[0];
+  const activePlanIdx  = PLANS.findIndex(p => p.key === activePlan);
+  const needsGstFields = payModal && ['corporate', 'enterprise'].includes(payModal.plan.key);
+
+  // ── Price fetch with retry ───────────────────────────────────
+  const fetchPrices = useCallback(() => {
+    setPriceLoading(true);
+    setPriceError(false);
+    subscriptionAPI.getPrices()
+      .then(d => setPrices(d?.prices || null))
+      .catch(() => setPriceError(true))
+      .finally(() => setPriceLoading(false));
+  }, []);
+
+  useEffect(() => { fetchPrices(); }, [fetchPrices]);
+
+  // ── Wallet balance ───────────────────────────────────────────
+  // [SB-3] Removed debug console.logs
+  const refreshBalance = useCallback(() => {
+    walletAPI.getBalance()
+      .then(d => {
+        const raw = d?.balance ?? d?.data?.balance ?? d?.inr_balance ?? 0;
+        setWalletBalance(parseFloat(raw) || 0);
+      })
+      .catch(() => setWalletBalance(0));
+  }, []);
+
+  useEffect(() => { refreshBalance(); }, [refreshBalance]);
+
+  // ── Focus trap via inert on main (modal is in Portal) ────────
+  useEffect(() => {
+    if (!payModal) return;
+    mainRef.current?.setAttribute('inert', '');
+    const firstBtn = modalRef.current?.querySelector(
+      'button:not([disabled]), [tabindex="0"]'
+    );
+    setTimeout(() => firstBtn?.focus(), 60);
+    return () => mainRef.current?.removeAttribute('inert');
+  }, [payModal]);
+
+  // ── Toast cleanup on unmount ─────────────────────────────────
+  useEffect(() => () => clearTimeout(toastTimer.current), []);
+
+  // ── Expiry notifications (once per mount) ───────────────────
+  useEffect(() => {
+    if (daysLeft === null || notifFiredRef.current) return;
+    notifFiredRef.current = true;
+    if      (daysLeft <= 0)   addNotification({ type: 'SYSTEM', title: 'Subscription Expired',            message: `Your ${activePlan} plan has expired. Renew now.`,                                    link: '/billing' });
+    else if (daysLeft === 1)  addNotification({ type: 'SYSTEM', title: 'Subscription Expires Tomorrow',   message: `Your ${activePlan} plan expires tomorrow. Renew to avoid interruption.`,             link: '/billing' });
+    else if (daysLeft <= 7)   addNotification({ type: 'SYSTEM', title: `Expiring in ${daysLeft} days`,    message: `Your ${activePlan} plan expires on ${new Date(renewalDate).toLocaleDateString('en-IN')}.`, link: '/billing' });
+    else if (daysLeft <= 30)  addNotification({ type: 'SYSTEM', title: 'Renewal reminder',                message: `Your ${activePlan} plan renews on ${new Date(renewalDate).toLocaleDateString('en-IN')}.`,  link: '/billing' });
+  }, [daysLeft]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Helpers ──────────────────────────────────────────────────
+  const showToast = useCallback((msg, type = 'success', invoiceUrl = null) => {
+    clearTimeout(toastTimer.current);
+    setToast({ msg, type, invoiceUrl: isSafeInvoiceUrl(invoiceUrl) ? invoiceUrl : null });
+    toastTimer.current = setTimeout(() => setToast(null), 6000);
+  }, []);
+
+  const getPrice = useCallback((plan) => {
+    if (!prices || !plan) return null;
+    const p = prices[plan.key];
+    if (!p) return null;
+    return billingCycle === 'annual' ? p.annual : p.monthly;
+  }, [prices, billingCycle]);
+
+  const annualSaving = useCallback((plan) => {
+    if (!prices) return null;
+    const p = prices[plan.key];
+    if (!p?.monthly || !p?.annual) return null;
+    const saving = (p.monthly * 12) - p.annual;
+    return saving > 0 ? saving : null;
+  }, [prices]);
+
+  // ── Open modal ───────────────────────────────────────────────
+  const openPayModal = useCallback((plan, method = 'wallet') => {
+    idempotencyKey.current = newKey();
+    setPayModal({ plan });
+    setPayMethod(method);
+    setModalErr('');
+    setGstin(''); setPan('');
+    setGstinErr(''); setPanErr('');
+    refreshBalance();
+  }, [refreshBalance]);
+
+  // ── Context update after activation ─────────────────────────
+  // [SB-2] Made async — instantly re-fetches /me after payment so
+  // PlanGate and Header lock icons update without requiring a page reload.
+  // Falls back to the optimistic update if the fetch fails.
+  const onPlanActivated = useCallback(async (plan, result) => {
+    // Optimistic update — lifts locks immediately in the UI
+    setDbUser?.(prev => prev ? {
+      ...prev,
+      subscription_plan:         plan.key,
+      plan_selected:             true,
+      subscription_renewal_date: result?.renewalDate || prev.subscription_renewal_date,
+      subscription_cycle:        billingCycle,
+    } : prev);
+    refreshBalance();
+    // Instant server re-fetch — ensures dbUser matches DB exactly
+    try {
+      const me = await authAPI.me();
+      if (me?.id) setDbUser?.(prev => prev ? { ...prev, ...me } : me);
+    } catch { /* silent — optimistic update already applied above */ }
+  }, [billingCycle, refreshBalance, setDbUser]);
+
+  // ── Validate GST fields ──────────────────────────────────────
+  const validateGstFields = useCallback(() => {
+    let ok = true;
+    if (gstin && !validateGstin(gstin)) { setGstinErr('Invalid GSTIN format'); ok = false; }
+    else setGstinErr('');
+    if (pan && !validatePan(pan)) { setPanErr('Invalid PAN format'); ok = false; }
+    else setPanErr('');
+    return ok;
+  }, [gstin, pan]);
+
+  // ── WALLET PAY ───────────────────────────────────────────────
+  // [SB-3] Removed debug console.logs
+  const handleWalletPay = useCallback(async () => {
+    if (!validateGstFields()) return;
+    const plan  = payModal.plan;
+    const price = getPrice(plan);
+
+    if (!idempotencyKey.current || idempotencyKey.current.length < 8) {
+      idempotencyKey.current = newKey();
     }
-    .sb-current-left{display:flex;align-items:center;gap:12px;}
-    .sb-current-dot{width:8px;height:8px;border-radius:50%;background:#22c55e;flex-shrink:0;}
-    .sb-current-label{font-size:9px;color:#86efac44;letter-spacing:.12em;margin-bottom:2px;}
-    .sb-current-name{font-size:13px;color:#f0fdf4;font-weight:600;}
-    .sb-current-meta{font-size:10px;color:#86efac44;margin-left:8px;}
-    .sb-renewal{font-size:10px;color:#86efac33;text-align:right;}
 
-    .sb-cycle-toggle{
-      display:flex;align-items:center;gap:0;
-      background:#070c09;border:1px solid #0d1f11;border-radius:8px;
-      overflow:hidden;margin-bottom:24px;width:fit-content;
+    if (toPaise(walletBalance) < toPaise(price)) {
+      setModalErr('Insufficient wallet balance. Please top up first.');
+      return;
     }
-    .sb-cycle-btn{
-      padding:8px 20px;font-family:'DM Mono',monospace;font-size:10px;
-      letter-spacing:.1em;font-weight:700;border:none;cursor:pointer;
-      background:transparent;color:#86efac44;transition:all .2s;
+    setPaying(true); setModalErr('');
+    try {
+      const result = await subscriptionAPI.payWithWallet(
+        plan.key, billingCycle, idempotencyKey.current,
+        { gstin: gstin || undefined, pan: pan || undefined }
+      );
+      if (result?.ok) {
+        onPlanActivated(plan, result);
+        addNotification({ type: 'WALLET', title: `${plan.label} Plan Activated`, message: `${fmtINR(price)} debited. ${plan.label} plan active.`, link: '/billing' });
+        showToast(`${plan.label} plan activated!`, 'success', result?.invoiceUrl);
+        setPayModal(null);
+      } else {
+        setModalErr(result?.error || 'Activation failed. Please try again.');
+        idempotencyKey.current = newKey();
+      }
+    } catch (e) {
+      setModalErr(e?.error || e?.message || 'Wallet payment failed.');
+      idempotencyKey.current = newKey();
+    } finally {
+      setPaying(false);
     }
-    .sb-cycle-btn.on{background:#0a1a0e;color:#22c55e;}
-    .sb-cycle-badge{
-      font-size:8px;padding:2px 6px;border-radius:3px;
-      background:#22c55e22;color:#22c55e;margin-left:6px;letter-spacing:.06em;
-    }
+  }, [payModal, getPrice, walletBalance, billingCycle, gstin, pan,
+      validateGstFields, onPlanActivated, addNotification, showToast]);
 
-    .sb-plans-grid{
-      display:grid;
-      grid-template-columns:repeat(5,1fr);
-      gap:10px;margin-bottom:32px;
-    }
-    .sb-plan-card{
-      background:#070c09;border:1px solid #0d1f11;
-      border-radius:14px;padding:20px 16px;
-      display:flex;flex-direction:column;gap:0;
-      position:relative;transition:border-color .25s,transform .2s;
-      cursor:default;
-    }
-    .sb-plan-card:hover{transform:translateY(-2px);}
-    .sb-plan-card.current{border-color:#22c55e44;}
-    .sb-plan-card.popular-card{border-color:#22c55e66;}
+  // ── RAZORPAY PAY ─────────────────────────────────────────────
+  const handleRazorpayPay = useCallback(async () => {
+    if (!validateGstFields()) return;
+    const plan = payModal.plan;
+    setPaying(true); setModalErr('');
+    try {
+      const loaded = await loadRazorpay();
+      if (!loaded) throw new Error('Razorpay failed to load. Please refresh.');
 
-    .sb-popular-badge{
-      position:absolute;top:-10px;left:50%;transform:translateX(-50%);
-      background:#14532d;border:1px solid #22c55e33;border-radius:4px;
-      font-size:8px;color:#22c55e;letter-spacing:.1em;padding:3px 10px;
-      white-space:nowrap;font-weight:700;
-    }
-    .sb-current-badge{
-      position:absolute;top:-10px;left:50%;transform:translateX(-50%);
-      background:#0a1628;border:1px solid #60a5fa22;border-radius:4px;
-      font-size:8px;color:#60a5fa88;letter-spacing:.1em;padding:3px 10px;
-      white-space:nowrap;
-    }
+      const order = await subscriptionAPI.createOrder(
+        plan.key, billingCycle, idempotencyKey.current
+      );
+      if (!order?.orderId) throw new Error('Could not create payment order. Try again.');
 
-    .sb-plan-tier{font-size:9px;letter-spacing:.15em;font-weight:700;margin-bottom:8px;}
-    .sb-plan-name{font-family:'Syne',sans-serif;font-size:18px;font-weight:800;color:#f0fdf4;margin-bottom:2px;}
-    .sb-plan-tagline{font-size:9px;color:#86efac33;letter-spacing:.06em;margin-bottom:12px;}
-    .sb-plan-audience{font-size:10px;color:#86efac44;line-height:1.6;margin-bottom:14px;min-height:32px;}
+      const options = {
+        key:         RAZORPAY_KEY_ID,
+        amount:      order.amount,
+        currency:    'INR',
+        name:        'EtherTrack',
+        description: `${plan.label} Plan — ${billingCycle}`,
+        order_id:    order.orderId,
+        prefill:     { name: dbUser?.full_name || '', email: dbUser?.email || '' },
+        notes:       { gstin: gstin || '', pan: pan || '' },
+        theme:       { color: plan.color },
+        modal: { ondismiss: () => setPaying(false) },
+        handler: async (response) => {
+          try {
+            const result = await subscriptionAPI.verifyAndActivate(
+              plan.key, billingCycle, response,
+              { gstin: gstin || undefined, pan: pan || undefined }
+            );
+            if (result?.ok) {
+              onPlanActivated(plan, result);
+              addNotification({ type: 'WALLET', title: `${plan.label} Plan Activated`, message: `Payment confirmed.`, link: '/billing' });
+              showToast(`${plan.label} plan activated!`, 'success', result?.invoiceUrl);
+              setPayModal(null);
+            } else {
+              setModalErr('Payment confirmed but activation failed. Contact support@ethertrack.in.');
+            }
+          } catch (e) {
+            setModalErr(e?.error || 'Verification failed. Contact support@ethertrack.in.');
+          } finally {
+            setPaying(false);
+          }
+        },
+      };
+      const rzp = new window.Razorpay(options);
+      rzp.on('payment.failed', r => {
+        setPaying(false);
+        setModalErr(r.error?.description || 'Payment failed. Please try again.');
+        idempotencyKey.current = newKey();
+      });
+      rzp.open();
+    } catch (e) {
+      setPaying(false);
+      setModalErr(e?.message || 'Payment initiation failed.');
+      idempotencyKey.current = newKey();
+    }
+  }, [payModal, billingCycle, gstin, pan, validateGstFields,
+      dbUser, onPlanActivated, addNotification, showToast]);
 
-    .sb-plan-price-row{margin-bottom:4px;}
-    .sb-plan-price{font-family:'Syne',sans-serif;font-size:24px;font-weight:800;color:#f0fdf4;}
-    .sb-plan-price-period{font-size:10px;color:#86efac44;margin-left:4px;}
-    .sb-plan-price-annual{font-size:9px;color:#86efac33;margin-bottom:12px;}
+  // ── METAMASK PAY ─────────────────────────────────────────────
+  const handleMetaMaskPay = useCallback(async () => {
+    if (!validateGstFields()) return;
+    const plan = payModal.plan;
+    setPaying(true); setModalErr('');
+    try {
+      if (isMobile && !window.ethereum) {
+        sessionStorage.setItem('et_pending_intent', JSON.stringify({
+          planKey:        plan.key,
+          billingCycle,
+          idempotencyKey: idempotencyKey.current,
+          gstin:          gstin || '',
+          pan:            pan   || '',
+        }));
+        const dappUrl = encodeURIComponent(window.location.href);
+        window.location.href = `metamask://dapp/${dappUrl}`;
+        setPaying(false);
+        return;
+      }
+      if (!window.ethereum) {
+        throw new Error('MetaMask not detected. Please install MetaMask or use the mobile app.');
+      }
 
-    .sb-gas-chip{
-      display:flex;align-items:center;gap:6px;
-      padding:5px 8px;border-radius:5px;
-      background:#050809;border:1px solid #0d1f11;
-      font-size:9px;color:#86efac44;margin-bottom:12px;
-    }
-    .sb-gas-val{font-weight:700;margin-left:auto;}
+      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      const account  = accounts?.[0];
+      if (!account) throw new Error('No MetaMask account connected.');
 
-    .sb-seats-row{font-size:9px;color:#86efac44;margin-bottom:14px;display:flex;align-items:center;gap:5px;}
+      const registeredWallet = dbUser?.wallet_address;
+      if (registeredWallet && account.toLowerCase() !== registeredWallet.toLowerCase()) {
+        throw new Error(
+          `Connected wallet (${account.slice(0,6)}…${account.slice(-4)}) does not match ` +
+          `your registered address (${registeredWallet.slice(0,6)}…${registeredWallet.slice(-4)}). ` +
+          `Please switch wallets in MetaMask.`
+        );
+      }
 
-    .sb-divider{border:none;border-top:1px solid #0d1f11;margin:12px 0;}
+      const ts      = Date.now();
+      const message = `EtherTrack:${plan.key}:${billingCycle}:${idempotencyKey.current}:${ts}`;
+      const signature = await window.ethereum.request({
+        method: 'personal_sign',
+        params: [message, account],
+      });
 
-    .sb-feat-list{display:flex;flex-direction:column;gap:6px;flex:1;margin-bottom:14px;}
-    .sb-feat{display:flex;align-items:flex-start;gap:6px;font-size:10px;line-height:1.4;}
-    .sb-feat-icon{font-size:11px;flex-shrink:0;margin-top:1px;}
-    .sb-feat-text{color:#86efac66;}
-    .sb-feat-text.ok{color:#d1fae5;}
-    .sb-feat-text.no{color:#86efac22;}
+      const result = await subscriptionAPI.payWithMetaMask(
+        plan.key, billingCycle, account, signature, message,
+        { gstin: gstin || undefined, pan: pan || undefined }
+      );
+      if (result?.ok) {
+        onPlanActivated(plan, result);
+        addNotification({ type: 'WALLET', title: `${plan.label} Plan Activated via MetaMask`, message: `Signature confirmed.`, link: '/billing' });
+        showToast(`${plan.label} activated via MetaMask!`, 'success', result?.invoiceUrl);
+        setPayModal(null);
+      } else {
+        setModalErr(result?.error || 'Activation failed after signature. Contact support.');
+        idempotencyKey.current = newKey();
+      }
+    } catch (e) {
+      if (e.code === 4001) setModalErr('MetaMask signature rejected by user.');
+      else setModalErr(e?.message || 'MetaMask payment failed.');
+      idempotencyKey.current = newKey();
+    } finally {
+      setPaying(false);
+    }
+  }, [payModal, billingCycle, isMobile, gstin, pan, dbUser,
+      validateGstFields, onPlanActivated, addNotification, showToast]);
 
-    .sb-plan-cta{
-      width:100%;padding:10px 0;border-radius:8px;border:none;
-      font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.1em;
-      font-weight:700;cursor:pointer;transition:all .2s;
-    }
-    .sb-plan-cta.current-cta{
-      background:#0a1a0e;border:1px solid #22c55e22;color:#22c55e66;
-      cursor:default;
-    }
-    .sb-plan-cta.upgrade-cta{
-      background:linear-gradient(135deg,#14532d,#166534);color:#d1fae5;
-    }
-    .sb-plan-cta.upgrade-cta:hover{background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;}
-    .sb-plan-cta.downgrade-cta{
-      background:#060a07;border:1px solid #0d1f11;color:#86efac33;
-    }
-    .sb-plan-cta.downgrade-cta:hover{border-color:#22c55e22;color:#86efac66;}
-    .sb-plan-cta.contact-cta{
-      background:#0d0a1a;border:1px solid #a78bfa33;color:#a78bfa88;
-    }
-    .sb-plan-cta.contact-cta:hover{border-color:#a78bfa66;color:#a78bfa;}
+  // ── Confirm pay ──────────────────────────────────────────────
+  // [SB-3] Removed debug console.logs, cleaned up deps
+  const handleConfirmPay = useCallback(() => {
+    if (payMethod === 'wallet')   handleWalletPay();
+    if (payMethod === 'razorpay') handleRazorpayPay();
+    if (payMethod === 'metamask') handleMetaMaskPay();
+  }, [payMethod, handleWalletPay, handleRazorpayPay, handleMetaMaskPay]);
 
-    .sb-section-hdr{
-      display:flex;align-items:center;justify-content:space-between;
-      margin-bottom:16px;flex-wrap:wrap;gap:10px;
+  // ── Payment history ──────────────────────────────────────────
+  const loadHistory = useCallback(async (cursor = null) => {
+    if (showHistory && !cursor) { setShowHistory(false); return; }
+    setHistoryLoading(true);
+    setHistoryError('');
+    try {
+      const d = await subscriptionAPI.getHistory({ limit: 20, cursor });
+      if (cursor) {
+        setPayHistory(prev => [...prev, ...(d?.history || [])]);
+      } else {
+        setPayHistory(d?.history || []);
+      }
+      setHistoryCursor(d?.nextCursor || null);
+      setHistoryMore(!!d?.nextCursor);
+      setShowHistory(true);
+    } catch (e) {
+      setHistoryError(e?.message || 'Failed to load payment history. Please retry.');
+    } finally {
+      setHistoryLoading(false);
     }
-    .sb-section-title{font-size:9px;color:#86efac44;letter-spacing:.15em;display:flex;align-items:center;gap:8px;}
-    .sb-section-title::before{content:'';width:14px;height:1px;background:#22c55e;}
-    .sb-toggle-btn{
-      padding:6px 14px;border-radius:6px;border:1px solid #0d1f11;
-      background:#060a07;font-family:'DM Mono',monospace;font-size:9px;
-      letter-spacing:.08em;color:#86efac33;cursor:pointer;transition:all .2s;
-    }
-    .sb-toggle-btn:hover{border-color:#22c55e22;color:#22c55e66;}
+  }, [showHistory]);
 
-    .sb-matrix-wrap{
-      background:#070c09;border:1px solid #0d1f11;border-radius:12px;
-      overflow:auto;margin-bottom:24px;
-    }
-    .sb-matrix-table{width:100%;border-collapse:collapse;font-size:10px;min-width:700px;}
-    .sb-matrix-table th{
-      padding:10px 14px;text-align:left;font-weight:500;font-size:9px;
-      color:#86efac44;background:#050809;border-bottom:1px solid #0d1f11;
-      letter-spacing:.1em;white-space:nowrap;
-    }
-    .sb-matrix-table th:not(:first-child){text-align:center;}
-    .sb-matrix-table td{
-      padding:10px 14px;border-bottom:1px solid #0d1f1166;
-      color:#86efac66;vertical-align:middle;
-    }
-    .sb-matrix-table td:not(:first-child){text-align:center;}
-    .sb-matrix-table tr:last-child td{border-bottom:none;}
-    .sb-matrix-table tr:hover td{background:#050809;}
-    .sb-matrix-table td:first-child{color:#d1fae5;font-weight:500;}
-    .sb-check{color:#22c55e;font-size:13px;}
-    .sb-cross{color:#86efac11;font-size:13px;}
-    .sb-partial{
-      font-size:9px;font-weight:700;padding:2px 7px;border-radius:3px;
-      display:inline-block;white-space:nowrap;
-    }
+  // ── Expiry banner config ─────────────────────────────────────
+  const expiryBanner = useMemo(() => {
+    if (daysLeft === null) return null;
+    if (daysLeft <= 0)  return { cls: 'expiryUrgent', icon: '🔴', title: 'SUBSCRIPTION EXPIRED',        sub: 'Renew now to restore full access.',                                                 color: '#f87171', days: 'Expired' };
+    if (daysLeft <= 1)  return { cls: 'expiryUrgent', icon: '⚠️', title: 'EXPIRES TOMORROW',             sub: 'Renew now to avoid interruption.',                                                  color: '#f87171', days: '1 day'   };
+    if (daysLeft <= 7)  return { cls: 'expiryWarn',   icon: '⏰', title: `EXPIRES IN ${daysLeft} DAYS`, sub: `Renew before ${new Date(renewalDate).toLocaleDateString('en-IN')}.`,               color: '#fbbf24', days: `${daysLeft}d` };
+    if (daysLeft <= 30) return { cls: 'expiryNotice', icon: '📅', title: 'RENEWAL REMINDER',             sub: `Renews on ${new Date(renewalDate).toLocaleDateString('en-IN')}.`,                 color: '#4ade80', days: `${daysLeft}d` };
+    return null;
+  }, [daysLeft, renewalDate]);
 
-    .sb-gas-section{
-      background:#070c09;border:1px solid #0d1f11;border-radius:12px;
-      padding:20px;margin-bottom:24px;
-    }
-    .sb-gas-intro{font-size:10px;color:#86efac44;line-height:1.8;margin-bottom:16px;}
-    .sb-gas-tiers{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;}
-    .sb-gas-tier-card{
-      border-radius:8px;padding:14px;border:1px solid #0d1f11;
-      background:#050809;text-align:center;
-    }
-    .sb-gas-tier-name{font-size:9px;letter-spacing:.1em;font-weight:700;margin-bottom:6px;}
-    .sb-gas-tier-pct{font-family:'Syne',sans-serif;font-size:22px;font-weight:800;color:#f0fdf4;margin-bottom:2px;}
-    .sb-gas-tier-note{font-size:9px;color:#86efac33;line-height:1.5;}
-    .sb-gas-table-wrap{overflow-x:auto;}
-    .sb-gas-table{width:100%;border-collapse:collapse;font-size:10px;}
-    .sb-gas-table th{
-      padding:8px 12px;text-align:left;font-size:9px;color:#86efac44;
-      letter-spacing:.1em;border-bottom:1px solid #0d1f11;background:#050809;
-    }
-    .sb-gas-table td{
-      padding:8px 12px;border-bottom:1px solid #0d1f1144;color:#86efac66;
-    }
-    .sb-gas-table td:first-child{color:#d1fae5;}
-    .sb-gas-table tr:last-child td{border-bottom:none;}
+  // ── confirmDisabled ──────────────────────────────────────────
+  const confirmDisabled = useMemo(() => {
+    if (paying || !prices || !payModal) return true;
+    const price = getPrice(payModal.plan);
+    if (payMethod === 'wallet'   && toPaise(walletBalance) < toPaise(price)) return true;
+    if (payMethod === 'metamask' && !dbUser?.wallet_address && !isMobile)    return true;
+    return false;
+  }, [paying, prices, payModal, payMethod, walletBalance, dbUser, isMobile, getPrice]);
 
-    .sb-faq{background:#070c09;border:1px solid #0d1f11;border-radius:12px;overflow:hidden;margin-bottom:24px;}
-    .sb-faq-item{border-bottom:1px solid #0d1f11;}
-    .sb-faq-item:last-child{border-bottom:none;}
-    .sb-faq-q{
-      width:100%;text-align:left;padding:14px 20px;
-      background:transparent;border:none;font-family:'DM Mono',monospace;
-      font-size:11px;color:#d1fae5;cursor:pointer;display:flex;
-      align-items:center;justify-content:space-between;
-    }
-    .sb-faq-q:hover{background:#050809;}
-    .sb-faq-q-icon{font-size:14px;color:#22c55e;flex-shrink:0;transition:transform .2s;}
-    .sb-faq-q-icon.open{transform:rotate(45deg);}
-    .sb-faq-a{font-size:10px;color:#86efac44;line-height:1.9;padding:0 20px 14px;}
+  // ── Proration notice for downgrade ───────────────────────────
+  const prorationNotice = useMemo(() => {
+    if (!payModal || !renewalDate) return null;
+    const planIdx = PLANS.findIndex(p => p.key === payModal.plan.key);
+    if (planIdx >= activePlanIdx) return null;
+    const daysRemaining = daysUntil(renewalDate);
+    if (!daysRemaining || daysRemaining <= 0) return null;
+    return `Downgrade takes effect on ${new Date(renewalDate).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}. You keep ${activePlanData.label} access for ${daysRemaining} more day${daysRemaining !== 1 ? 's' : ''}.`;
+  }, [payModal, renewalDate, activePlanIdx, activePlanData]);
 
-    .sb-toast{
-      position:fixed;bottom:24px;right:24px;z-index:9999;
-      background:#070c09;border-radius:8px;padding:12px 20px;
-      font-size:11px;font-family:'DM Mono',monospace;letter-spacing:.06em;
-      box-shadow:0 8px 32px rgba(0,0,0,.8);animation:sbFadeIn .25s ease;
-    }
-    @keyframes sbFadeIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
-
-    @media(max-width:900px){
-      .sb-plans-grid{grid-template-columns:repeat(2,1fr);}
-      .sb-gas-tiers{grid-template-columns:repeat(2,1fr);}
-    }
-    @media(max-width:560px){
-      .sb-plans-grid{grid-template-columns:1fr;}
-      .sb-gas-tiers{grid-template-columns:1fr 1fr;}
-    }
-  `;
-
-  const currentPlanData = PLANS.find(p => p.key === currentPlan);
-  const currentPlanIndex = PLANS.findIndex(p => p.key === currentPlan);
-
-  const getCtaLabel = (plan, idx) => {
-    if (plan.key === currentPlan) return '✓ CURRENT PLAN';
-    if (plan.key === 'enterprise') return 'CONTACT SALES →';
-    if (idx > currentPlanIndex) return 'UPGRADE →';
-    return 'DOWNGRADE';
-  };
-
-  const getCtaClass = (plan, idx) => {
-    if (plan.key === currentPlan) return 'current-cta';
-    if (plan.key === 'enterprise') return 'contact-cta';
-    if (idx > currentPlanIndex) return 'upgrade-cta';
-    return 'downgrade-cta';
-  };
-
-  const [openFaq, setOpenFaq] = useState(null);
-  const FAQS = [
-    {
-      q: 'Can I switch plans anytime?',
-      a: 'Yes. Upgrades are effective immediately and prorated for the remaining billing period. Downgrades take effect at the end of your current billing cycle so you keep access to your current features until then.',
-    },
-    {
-      q: 'What is the marketplace gas fee?',
-      a: 'Every credit transaction on the EtherTrack marketplace incurs a gas fee — charged to the seller at the time of a completed sale. The fee rate depends on your plan: 1% on Free/Starter, 0.75% on Growth, 0.6% on Corporate, and 0.5% (or lower with volume) on Enterprise.',
-    },
-    {
-      q: 'Is GST included in the listed prices?',
-      a: 'No. All listed prices are exclusive of GST. 18% GST will be added at checkout as per Indian tax regulations. A GST invoice will be issued to your registered GSTIN every billing cycle.',
-    },
-    {
-      q: 'What happens to my data if I cancel?',
-      a: 'Your emissions data, portfolio records, and transaction history are retained for 90 days after cancellation. You can export everything as CSV or PDF before or during that window. After 90 days, data is permanently deleted.',
-    },
-    {
-      q: 'Does the annual plan auto-renew?',
-      a: 'Yes, annual plans auto-renew 7 days before the end of the billing year. You will receive an email reminder 30 days in advance. You can cancel or switch plans at any time from this billing settings page.',
-    },
-    {
-      q: 'Can I get a custom Enterprise quote?',
-      a: 'Absolutely. Enterprise pricing is negotiated based on seat count, expected monthly GMV on the marketplace (which drives gas fee volume discounts), and required integrations. Contact hello@ethertrack.in for a custom proposal.',
-    },
-  ];
-
+  // ═══════════════════════════════════════════════════════════
   return (
     <>
-      <style>{CSS}</style>
-      <div className="sb">
-        <div className="sbw">
+      <div ref={mainRef} className={styles.root}>
+        <div className={styles.inner}>
 
-          {/* Header */}
-          <div className="sb-hdr">
-            <div className="sb-hdr-label">SUBSCRIPTION · BILLING · MARKETPLACE FEES</div>
-            <h1 className="sb-hdr-title">Plans &amp; <span>Billing</span></h1>
-            <div className="sb-hdr-sub">All prices in INR · Exclusive of 18% GST · Indian market</div>
+          {/* ── Expiry banner ── */}
+          {expiryBanner && (
+            <div className={cx('expiryBanner', expiryBanner.cls)} role="alert">
+              <span className={styles.expiryIcon}>{expiryBanner.icon}</span>
+              <div className={styles.expiryBody}>
+                <div className={styles.expiryTitle} style={{ color: expiryBanner.color }}>
+                  {expiryBanner.title}
+                </div>
+                <div className={styles.expirySub} style={{ color: expiryBanner.color + 'aa' }}>
+                  {expiryBanner.sub}
+                </div>
+              </div>
+              <div className={styles.expiryDays} style={{ color: expiryBanner.color }}>
+                {expiryBanner.days}
+              </div>
+            </div>
+          )}
+
+          {/* ── Page header ── */}
+          <div className={styles.pageHdr}>
+            <div className={styles.pageEyebrow}>SUBSCRIPTION · BILLING · MARKETPLACE FEES</div>
+            <h1 className={styles.pageTitle}>
+              Plans <span className={styles.pageTitleAccent}>&amp;</span> Billing
+            </h1>
+            <p className={styles.pageSub}>
+              All prices in INR · Exclusive of 18% GST · GST invoice issued on payment ·
+              Free tier: trade freely, unlock emissions &amp; portfolio from Starter
+            </p>
           </div>
 
-          {/* Current plan banner */}
-          <div className="sb-current-banner">
-            <div className="sb-current-left">
-              <div className="sb-current-dot" />
+          {/* ── Balance chips ── */}
+          <div className={styles.chipsRow}>
+            <div className={styles.chip}>
+              <span className={styles.chipLabel}>💰 INR WALLET</span>
+              <span className={styles.chipVal}>
+                {walletBalance === null ? '—' : fmtINR(walletBalance)}
+              </span>
+              <button
+                className={styles.chipBtn}
+                onClick={() => window.location.href = '/wallet'}
+                aria-label="Top up INR wallet"
+              >
+                TOP UP →
+              </button>
+            </div>
+            {dbUser?.wallet_address && (
+              <div className={styles.chip}>
+                <span className={styles.chipLabel}>🦊 METAMASK</span>
+                <span className={cx('chipVal')}>
+                  {dbUser.wallet_address.slice(0, 6)}…{dbUser.wallet_address.slice(-4)}
+                </span>
+              </div>
+            )}
+          </div>
+
+          {/* ── Current plan banner ── */}
+          <div className={styles.currentBanner} style={{ borderColor: activePlanData.border }}>
+            <div className={styles.currentLeft}>
+              <div className={styles.currentDot} style={{ background: activePlanData.color }} />
               <div>
-                <div className="sb-current-label">YOUR CURRENT PLAN</div>
-                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-                  <span className="sb-current-name" style={{ color: currentPlanData.color }}>
-                    {currentPlanData.label}
+                <div className={styles.currentLabel}>YOUR CURRENT PLAN</div>
+                <div>
+                  <span className={styles.currentName} style={{ color: activePlanData.color }}>
+                    {activePlanData.label}
                   </span>
-                  <span className="sb-current-meta">
-                    {orgName} · {currentPlanData.seats ? `${currentPlanData.seats} seats` : 'Unlimited seats'} · Gas fee {currentPlanData.gasFee}
+                  <span className={styles.currentMeta}>
+                    {orgName || dbUser?.company_name || ''}{orgName || dbUser?.company_name ? ' · ' : ''}
+                    {activePlanData.seats ? `${activePlanData.seats} seat${activePlanData.seats > 1 ? 's' : ''}` : 'Unlimited seats'}
+                    {' · '} Gas {activePlanData.gasFee}
                   </span>
                 </div>
               </div>
             </div>
-            <div className="sb-renewal">
-              Next renewal: <strong style={{ color: '#d1fae5' }}>15 Jun 2025</strong><br />
-              <span style={{ fontSize: 9, color: '#86efac22' }}>Auto-renews · Cancel anytime</span>
+            <div className={styles.renewalInfo}>
+              {renewalDate ? (
+                <>
+                  <strong style={{ color: '#d1fae5' }}>
+                    {new Date(renewalDate).toLocaleDateString('en-IN', {
+                      day: '2-digit', month: 'short', year: 'numeric',
+                    })}
+                  </strong>
+                  <br />
+                  <span style={{ color: daysLeft <= 7 ? '#f87171' : undefined }}>
+                    {daysLeft > 0 ? `${daysLeft} days remaining` : 'Expired'}
+                  </span>
+                </>
+              ) : (
+                <span>No renewal date set</span>
+              )}
             </div>
           </div>
 
-          {/* Billing cycle toggle */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 24, flexWrap: 'wrap' }}>
-            <div className="sb-cycle-toggle">
+          {/* ── Free tier notice ── */}
+          {activePlan === 'free' && (
+            <div className={styles.freeNotice} role="note">
+              <span className={styles.freeNoticeIcon}>🔓</span>
+              <div>
+                <strong style={{ color: '#4ade80' }}>Free tier:</strong>
+                {' '}You can browse and trade carbon credits freely.{' '}
+                <span style={{ color: 'rgba(240,253,244,0.5)' }}>
+                  Emissions Tracker and Portfolio are locked — upgrade to Starter or above to unlock.
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* ── Billing cycle toggle ── */}
+          <div className={styles.cycleRow}>
+            <div className={styles.cycleToggle} role="group" aria-label="Billing cycle">
               <button
-                className={`sb-cycle-btn${billingCycle === 'monthly' ? ' on' : ''}`}
+                className={cx('cycleBtn', billingCycle === 'monthly' && 'cycleBtnOn')}
                 onClick={() => setBillingCycle('monthly')}
+                aria-pressed={billingCycle === 'monthly'}
               >
                 MONTHLY
               </button>
               <button
-                className={`sb-cycle-btn${billingCycle === 'annual' ? ' on' : ''}`}
+                className={cx('cycleBtn', billingCycle === 'annual' && 'cycleBtnOn')}
                 onClick={() => setBillingCycle('annual')}
+                aria-pressed={billingCycle === 'annual'}
               >
-                ANNUAL
-                <span className="sb-cycle-badge">SAVE 17%</span>
+                ANNUAL <span className={styles.cycleBadge}>SAVE 17%</span>
               </button>
             </div>
             {billingCycle === 'annual' && (
-              <span style={{ fontSize: 10, color: '#22c55e88', letterSpacing: '.06em' }}>
-                ≈ 2 months free · Billed as single annual invoice
-              </span>
+              <span className={styles.cycleNote}>≈ 2 months free · Single annual invoice</span>
             )}
           </div>
 
-          {/* Plan cards */}
-          <div className="sb-plans-grid">
-            {PLANS.map((plan, idx) => {
-              const price = getPrice(plan);
-              const isCurrent = plan.key === currentPlan;
-              return (
-                <div
-                  key={plan.key}
-                  className={`sb-plan-card${isCurrent ? ' current' : ''}${plan.popular ? ' popular-card' : ''}`}
-                  style={{ borderColor: hoveredPlan === plan.key ? plan.border.replace('22', '66') : (isCurrent ? '#22c55e44' : plan.popular ? '#22c55e44' : undefined) }}
-                  onMouseEnter={() => setHoveredPlan(plan.key)}
-                  onMouseLeave={() => setHoveredPlan(null)}
-                >
-                  {plan.popular && !isCurrent && <div className="sb-popular-badge">★ MOST POPULAR</div>}
-                  {isCurrent && <div className="sb-current-badge">✓ YOUR PLAN</div>}
+          {/* ── Price error state ── */}
+          {priceError && (
+            <div className={styles.priceError} role="alert">
+              <span>⚠ Could not load pricing.</span>
+              <button className={styles.retryBtn} onClick={fetchPrices}>Retry →</button>
+            </div>
+          )}
 
-                  <div className="sb-plan-tier" style={{ color: plan.color }}>
-                    {plan.label.toUpperCase()}
-                  </div>
-                  <div className="sb-plan-name">{plan.label}</div>
-                  <div className="sb-plan-tagline" style={{ color: plan.color + '88' }}>{plan.tagline}</div>
-                  <div className="sb-plan-audience">{plan.audience}</div>
+          {/* ── Plan cards grid ── */}
+          <div className={styles.plansGrid} role="list" aria-label="Available plans">
+            {priceLoading ? (
+              PLANS.map(p => <PlanSkeleton key={p.key} />)
+            ) : (
+              PLANS.map((plan, idx) => {
+                const price     = getPrice(plan);
+                const saving    = annualSaving(plan);
+                const isCurrent = plan.key === activePlan;
+                const canWallet = walletBalance !== null && price !== null &&
+                                  toPaise(walletBalance) >= toPaise(price);
+                const isUpgrade = idx > activePlanIdx;
 
-                  <div className="sb-plan-price-row">
-                    {price !== null ? (
-                      <>
-                        <span className="sb-plan-price">₹{price.toLocaleString('en-IN')}</span>
-                        <span className="sb-plan-price-period">/ {plan.period}</span>
-                      </>
-                    ) : (
-                      <span className="sb-plan-price" style={{ fontSize: 18 }}>Custom</span>
+                return (
+                  <div
+                    key={plan.key}
+                    className={cx(
+                      'planCard',
+                      isCurrent      && 'planCurrent',
+                      plan.highlight && 'planPopular',
                     )}
-                  </div>
-                  <div className="sb-plan-price-annual">
-                    {billingCycle === 'annual' && price
-                      ? `₹${(price * 12).toLocaleString('en-IN')} / year`
-                      : plan.price
-                        ? `₹${(getPrice(plan) ?? plan.price).toLocaleString('en-IN')}/mo billed annually`
-                        : 'Negotiated annually'
-                    }
-                  </div>
-
-                  {/* Gas fee chip */}
-                  <div className="sb-gas-chip" style={{ borderColor: plan.border }}>
-                    <span style={{ color: '#86efac33' }}>⛽ Marketplace gas</span>
-                    <span className="sb-gas-val" style={{ color: plan.color }}>{plan.gasFee}</span>
-                  </div>
-
-                  <div className="sb-seats-row" style={{ color: plan.color + '66' }}>
-                    👥 {plan.seats ? `Up to ${plan.seats} seat${plan.seats > 1 ? 's' : ''}` : 'Unlimited seats'}
-                  </div>
-
-                  <hr className="sb-divider" />
-
-                  <div className="sb-feat-list">
-                    {FEATURE_ROWS.map(row => {
-                      const feat = plan.features[row.key];
-                      return (
-                        <div key={row.key} className="sb-feat">
-                          <span className="sb-feat-icon">
-                            {feat.ok ? <span style={{ color: '#22c55e' }}>✓</span> : <span style={{ color: '#86efac11' }}>—</span>}
-                          </span>
-                          <span className={`sb-feat-text${feat.ok ? ' ok' : ' no'}`}>
-                            {feat.val !== false ? feat.val : row.label}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  <button
-                    className={`sb-plan-cta ${getCtaClass(plan, idx)}`}
-                    onClick={() => {
-                      if (plan.key === currentPlan) return;
-                      if (plan.key === 'enterprise') {
-                        window.location.href = 'mailto:hello@ethertrack.in?subject=Enterprise Plan Enquiry';
-                        return;
+                    role="listitem"
+                    style={{
+                      '--plan-color':  plan.color,
+                      '--plan-border': plan.border,
+                      '--plan-bg':     plan.bg,
+                    }}
+                    tabIndex={isCurrent ? -1 : 0}
+                    aria-label={`${plan.label} plan${isCurrent ? ', your current plan' : ''}`}
+                    onKeyDown={e => {
+                      if (!isCurrent && plan.key !== 'corporate' &&
+                          (e.key === 'Enter' || e.key === ' ')) {
+                        e.preventDefault();
+                        openPayModal(plan, 'wallet');
                       }
-                      showToast(
-                        idx > currentPlanIndex
-                          ? `↑ Upgrade to ${plan.label} — billing integration coming soon`
-                          : `↓ Downgrade request noted — contact support`,
-                        idx > currentPlanIndex ? 'success' : 'info'
-                      );
                     }}
                   >
-                    {getCtaLabel(plan, idx)}
-                  </button>
-                </div>
-              );
-            })}
+                    {plan.highlight && !isCurrent && (
+                      <div className={cx('planBadge', 'badgePopular')}>★ MOST POPULAR</div>
+                    )}
+                    {isCurrent && (
+                      <div className={cx('planBadge', 'badgeCurrent')}>✓ YOUR PLAN</div>
+                    )}
+
+                    <div className={styles.planTier} style={{ color: plan.color }}>
+                      {plan.label.toUpperCase()}
+                    </div>
+                    <div className={styles.planName}>{plan.label}</div>
+                    <div className={styles.planTagline} style={{ color: plan.dimColor }}>
+                      {plan.tagline}
+                    </div>
+                    <div className={styles.planAudience}>{plan.audience}</div>
+
+                    {/* Price */}
+                    <div>
+                      {price !== null ? (
+                        <>
+                          <span className={styles.planPrice}>
+                            {price === 0 ? '₹0' : `₹${price.toLocaleString('en-IN')}`}
+                          </span>
+                          <span className={styles.planPeriod}>
+                            {price === 0 ? ' forever' : billingCycle === 'annual' ? ' /yr' : ' /mo'}
+                          </span>
+                        </>
+                      ) : (
+                        <span className={styles.planPrice} style={{ fontSize: 18 }}>Contact Sales</span>
+                      )}
+                    </div>
+                    {price !== null && price > 0 && (
+                      <div className={styles.planGstNote}>+ 18% GST</div>
+                    )}
+                    {saving && (
+                      <div className={styles.planSaving} style={{ color: plan.color }}>
+                        Save {fmtINR(saving)}/yr vs monthly
+                      </div>
+                    )}
+
+                    {/* Chips */}
+                    <div className={styles.planChipRow}>
+                      <div className={styles.planChip} style={{ borderColor: plan.border }}>
+                        <span style={{ color: 'rgba(240,253,244,0.3)' }}>⛽</span>
+                        <span style={{ color: plan.color }}>{plan.gasFee}</span>
+                      </div>
+                      <div className={styles.planChip} style={{ borderColor: plan.border }}>
+                        <span style={{ color: 'rgba(240,253,244,0.3)' }}>👥</span>
+                        <span style={{ color: plan.color }}>
+                          {plan.seats ? `${plan.seats} seat${plan.seats > 1 ? 's' : ''}` : '∞'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <hr className={styles.planDivider} />
+
+                    {/* Feature list */}
+                    <div className={styles.featList}>
+                      {plan.locked?.map(item => (
+                        <div key={item} className={cx('feat', 'featLocked')}>
+                          <span>🔒</span>
+                          <span>{item}</span>
+                        </div>
+                      ))}
+                      {plan.unlocked?.map(item => (
+                        <div key={item} className={cx('feat', 'featOk')}>
+                          <span style={{ color: plan.color }}>✓</span>
+                          <span>{item}</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Primary CTA */}
+                    <button
+                      className={cx(
+                        'planCta',
+                        isCurrent                  ? 'ctaCurrent'  :
+                        plan.key === 'corporate'   ? 'ctaContact'  :
+                        isUpgrade                  ? 'ctaUpgrade'  : 'ctaDowngrade',
+                      )}
+                      disabled={isCurrent}
+                      aria-disabled={isCurrent}
+                      onClick={() => {
+                        if (isCurrent) return;
+                        if (plan.key === 'corporate') {
+                          window.location.href = 'https://mail.google.com/mail/?view=cm&to=support@ethertrack.in&su=Corporate+Plan+Enquiry';
+                          return;
+                        }
+                        openPayModal(plan, 'wallet');
+                      }}
+                    >
+                      {isCurrent                  ? '✓ CURRENT PLAN'  :
+                       plan.key === 'corporate'   ? 'CONTACT SALES →' :
+                       isUpgrade                  ? 'UPGRADE →'       : 'DOWNGRADE'}
+                    </button>
+
+                    {/* Quick-pay row — only for paid plans with actual price */}
+                    {!isCurrent && plan.key !== 'corporate' && price !== null && price > 0 && (
+                      <div
+                        className={styles.quickpay}
+                        role="group"
+                        aria-label={`Quick pay for ${plan.label} plan`}
+                      >
+                        <button
+                          className={styles.qpBtn}
+                          disabled={!canWallet || !prices}
+                          aria-label={
+                            canWallet
+                              ? `Pay ${plan.label} from wallet (${fmtINR(price)})`
+                              : 'Insufficient wallet balance'
+                          }
+                          onClick={() => canWallet && openPayModal(plan, 'wallet')}
+                          tabIndex={-1}
+                        >
+                          💰 {canWallet ? `₹${price?.toLocaleString('en-IN')}` : 'LOW BAL'}
+                        </button>
+                        <button
+                          className={styles.qpBtn}
+                          onClick={() => openPayModal(plan, 'metamask')}
+                          tabIndex={-1}
+                          aria-label={`Pay ${plan.label} via MetaMask`}
+                        >
+                          🦊 {isMobile ? 'APP' : 'MM'}
+                        </button>
+                        <button
+                          className={styles.qpBtn}
+                          onClick={() => openPayModal(plan, 'razorpay')}
+                          tabIndex={-1}
+                          aria-label={`Pay ${plan.label} via Card or UPI`}
+                        >
+                          💳 UPI
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
           </div>
 
-          {/* Full feature matrix */}
-          <div className="sb-section-hdr">
-            <div className="sb-section-title">FULL FEATURE MATRIX</div>
-            <button className="sb-toggle-btn" onClick={() => setShowMatrix(v => !v)}>
+          {/* ── Feature matrix ── */}
+          <div className={styles.sectionHdr}>
+            <div className={styles.sectionTitle}>FULL FEATURE MATRIX</div>
+            <button
+              className={styles.toggleBtn}
+              onClick={() => setShowMatrix(v => !v)}
+              aria-expanded={showMatrix}
+            >
               {showMatrix ? '▲ HIDE' : '▼ EXPAND'}
             </button>
           </div>
-
           {showMatrix && (
-            <div className="sb-matrix-wrap">
-              <table className="sb-matrix-table">
+            <div className={styles.matrixWrap}>
+              <table className={styles.matrix} aria-label="Plan feature comparison">
                 <thead>
                   <tr>
                     <th style={{ width: '22%' }}>Feature</th>
@@ -613,24 +837,24 @@ export default function SubscriptionBilling({ currentPlan = 'growth', orgName = 
                     <tr key={row.key}>
                       <td>{row.label}</td>
                       {PLANS.map(plan => {
-                        const feat = plan.features[row.key];
+                        const feat = PLAN_FEATURES_MATRIX[plan.key]?.[row.key];
                         return (
                           <td key={plan.key}>
-                            {feat.ok && feat.val !== true ? (
+                            {feat?.ok && feat?.val !== true ? (
                               <span
-                                className="sb-partial"
+                                className={styles.matrixPill}
                                 style={{
                                   background: plan.bg,
-                                  color: plan.color,
-                                  border: `1px solid ${plan.border}`,
+                                  color:      plan.color,
+                                  border:     `1px solid ${plan.border}`,
                                 }}
                               >
                                 {feat.val}
                               </span>
-                            ) : feat.ok ? (
-                              <span className="sb-check">✓</span>
+                            ) : feat?.ok ? (
+                              <span className={styles.matrixCheck} aria-label="Included">✓</span>
                             ) : (
-                              <span className="sb-cross">—</span>
+                              <span className={styles.matrixCross} aria-label="Not included">—</span>
                             )}
                           </td>
                         );
@@ -641,8 +865,11 @@ export default function SubscriptionBilling({ currentPlan = 'growth', orgName = 
                     <td>Seats</td>
                     {PLANS.map(p => (
                       <td key={p.key}>
-                        <span className="sb-partial" style={{ background: p.bg, color: p.color, border: `1px solid ${p.border}` }}>
-                          {p.seats ? p.seats : '∞'}
+                        <span
+                          className={styles.matrixPill}
+                          style={{ background: p.bg, color: p.color, border: `1px solid ${p.border}` }}
+                        >
+                          {p.seats || '∞'}
                         </span>
                       </td>
                     ))}
@@ -651,7 +878,10 @@ export default function SubscriptionBilling({ currentPlan = 'growth', orgName = 
                     <td>Gas fee</td>
                     {PLANS.map(p => (
                       <td key={p.key}>
-                        <span className="sb-partial" style={{ background: p.bg, color: p.color, border: `1px solid ${p.border}` }}>
+                        <span
+                          className={styles.matrixPill}
+                          style={{ background: p.bg, color: p.color, border: `1px solid ${p.border}` }}
+                        >
                           {p.gasFee}
                         </span>
                       </td>
@@ -662,121 +892,404 @@ export default function SubscriptionBilling({ currentPlan = 'growth', orgName = 
             </div>
           )}
 
-          {/* Gas fee calculator section */}
-          <div className="sb-section-hdr" style={{ marginTop: 8 }}>
-            <div className="sb-section-title">MARKETPLACE GAS FEE GUIDE</div>
-            <button className="sb-toggle-btn" onClick={() => setShowGasCalc(v => !v)}>
-              {showGasCalc ? '▲ HIDE' : '▼ EXPAND'}
+          {/* ── Payment history ── */}
+          <div className={styles.sectionHdr} style={{ marginTop: 8 }}>
+            <div className={styles.sectionTitle}>PAYMENT HISTORY</div>
+            <button
+              className={styles.toggleBtn}
+              onClick={() => loadHistory(null)}
+              aria-expanded={showHistory}
+              aria-busy={historyLoading}
+            >
+              {historyLoading ? '⟳ LOADING…' : showHistory ? '▲ HIDE' : '▼ LOAD'}
             </button>
           </div>
-
-          {showGasCalc && (
-            <div className="sb-gas-section">
-              <div className="sb-gas-intro">
-                Gas fees apply to every completed buy/sell transaction on the EtherTrack carbon credit marketplace.
-                The fee is charged to the <strong style={{ color: '#d1fae5' }}>seller</strong> at settlement.
-                Higher-tier plans earn lower fee rates — at ₹25L/txn, Corporate saves ₹10,000 per trade vs Free/Starter.
-                Enterprise plans can negotiate volume-based discounts below 0.5% for high-GMV months.
-              </div>
-
-              <div className="sb-gas-tiers">
-                {[
-                  { label: 'Free / Starter', pct: '1%', color: '#f87171', bg: '#1a0707', border: '#f8717133', note: 'Standard rate' },
-                  { label: 'Growth', pct: '0.75%', color: '#fbbf24', bg: '#1a1000', border: '#fbbf2433', note: 'Save 25% vs standard' },
-                  { label: 'Corporate', pct: '0.6%', color: '#22c55e', bg: '#0a1a0e', border: '#22c55e33', note: 'Save 40% vs standard' },
-                  { label: 'Enterprise', pct: '0.5%+', color: '#a78bfa', bg: '#120a28', border: '#a78bfa33', note: 'Negotiated volume rate' },
-                ].map(t => (
-                  <div key={t.label} className="sb-gas-tier-card" style={{ borderColor: t.border, background: t.bg }}>
-                    <div className="sb-gas-tier-name" style={{ color: t.color }}>{t.label.toUpperCase()}</div>
-                    <div className="sb-gas-tier-pct">{t.pct}</div>
-                    <div className="sb-gas-tier-note">{t.note}</div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="sb-gas-table-wrap">
-                <table className="sb-gas-table">
-                  <thead>
+          {historyError && (
+            <div className={styles.historyErr} role="alert">
+              ⚠ {historyError}
+              <button className={styles.retryBtn} onClick={() => loadHistory(null)}>Retry →</button>
+            </div>
+          )}
+          {showHistory && (
+            <>
+              <table className={styles.historyTable} aria-label="Payment history">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Plan</th>
+                    <th>Cycle</th>
+                    <th>Amount</th>
+                    <th>Method</th>
+                    <th>Status</th>
+                    <th>Invoice</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {payHistory.length === 0 && !historyLoading && (
                     <tr>
-                      <th>Transaction value</th>
-                      <th style={{ color: '#f87171' }}>Free / Starter (1%)</th>
-                      <th style={{ color: '#fbbf24' }}>Growth (0.75%)</th>
-                      <th style={{ color: '#22c55e' }}>Corporate (0.6%)</th>
-                      <th style={{ color: '#a78bfa' }}>Enterprise (0.5%)</th>
+                      <td colSpan={7} className={styles.historyEmpty}>No payments yet</td>
                     </tr>
-                  </thead>
-                  <tbody>
-                    {[
-                      ['₹1,00,000', '₹1,000', '₹750', '₹600', '₹500'],
-                      ['₹5,00,000', '₹5,000', '₹3,750', '₹3,000', '₹2,500'],
-                      ['₹25,00,000', '₹25,000', '₹18,750', '₹15,000', '₹12,500'],
-                      ['₹1,00,00,000', '₹1,00,000', '₹75,000', '₹60,000', '₹50,000'],
-                    ].map(([val, ...fees]) => (
-                      <tr key={val}>
-                        <td>{val}</td>
-                        {fees.map((f, i) => <td key={i} style={{ color: ['#f87171', '#fbbf24', '#22c55e', '#a78bfa'][i] + 'bb' }}>{f}</td>)}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                  )}
+                  {payHistory.map(row => (
+                    <tr key={row.id}>
+                      <td>{new Date(row.created_at).toLocaleDateString('en-IN')}</td>
+                      <td style={{ color: PLANS.find(p => p.key === row.plan)?.color || '#d1fae5' }}>
+                        {row.plan}
+                      </td>
+                      <td>{row.cycle}</td>
+                      <td>{fmtINR(row.amount)}</td>
+                      <td>{row.pay_method}</td>
+                      <td style={{ color: row.status === 'success' ? '#22c55e' : '#f87171' }}>
+                        {row.status}
+                      </td>
+                      <td>
+                        {isSafeInvoiceUrl(row.invoice_url) ? (
+                          <a
+                            href={row.invoice_url}
+                            className={styles.invoiceLink}
+                            target="_blank"
+                            rel="noreferrer"
+                            aria-label={`Download invoice for ${row.plan} plan`}
+                          >
+                            ↓ PDF
+                          </a>
+                        ) : (
+                          <span className={styles.noInvoice}>—</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {historyMore && (
+                <button
+                  className={styles.loadMore}
+                  onClick={() => loadHistory(historyCursor)}
+                  aria-busy={historyLoading}
+                  disabled={historyLoading}
+                >
+                  {historyLoading ? '⟳ Loading…' : 'Load more →'}
+                </button>
+              )}
+            </>
+          )}
+
+          {/* ── Gas fee guide ── */}
+          <div className={styles.sectionHdr} style={{ marginTop: 8 }}>
+            <div className={styles.sectionTitle}>MARKETPLACE GAS FEE GUIDE</div>
+            <button
+              className={styles.toggleBtn}
+              onClick={() => setShowGas(v => !v)}
+              aria-expanded={showGas}
+            >
+              {showGas ? '▲ HIDE' : '▼ EXPAND'}
+            </button>
+          </div>
+          {showGas && (
+            <div className={styles.gasGrid}>
+              {[
+                { label: 'Free',      pct: '1.5%',  color: '#f87171', bg: 'rgba(248,113,113,0.06)', border: 'rgba(248,113,113,0.2)', note: 'Standard rate'     },
+                { label: 'Starter',   pct: '1%',    color: '#60a5fa', bg: 'rgba(96,165,250,0.06)',  border: 'rgba(96,165,250,0.2)',  note: 'Save 33% vs Free' },
+                { label: 'Growth',    pct: '0.75%', color: '#fbbf24', bg: 'rgba(251,191,36,0.06)',  border: 'rgba(251,191,36,0.2)',  note: 'Save 50% vs Free' },
+                { label: 'Corporate', pct: '0.5%',  color: '#f59e0b', bg: 'rgba(245,158,11,0.06)',  border: 'rgba(245,158,11,0.2)',  note: 'Negotiated'       },
+              ].map(t => (
+                <div
+                  key={t.label}
+                  className={styles.gasCard}
+                  style={{ background: t.bg, borderColor: t.border }}
+                >
+                  <div className={styles.gasLabel} style={{ color: t.color }}>{t.label.toUpperCase()}</div>
+                  <div className={styles.gasPct}   style={{ color: '#f0fdf4' }}>{t.pct}</div>
+                  <div className={styles.gasNote}>{t.note}</div>
+                </div>
+              ))}
             </div>
           )}
 
-          {/* FAQ */}
-          <div className="sb-section-hdr" style={{ marginTop: 8 }}>
-            <div className="sb-section-title">BILLING FAQ</div>
+          {/* ── FAQ ── */}
+          <div className={styles.sectionHdr} style={{ marginTop: 8 }}>
+            <div className={styles.sectionTitle}>BILLING FAQ</div>
           </div>
-          <div className="sb-faq">
-            {FAQS.map((faq, i) => (
-              <div key={i} className="sb-faq-item">
-                <button className="sb-faq-q" onClick={() => setOpenFaq(openFaq === i ? null : i)}>
+          <div className={styles.faq} role="list">
+            {FAQS.map(faq => (
+              <div key={faq.key} className={styles.faqItem} role="listitem">
+                <button
+                  className={styles.faqQ}
+                  onClick={() => setOpenFaq(openFaq === faq.key ? null : faq.key)}
+                  aria-expanded={openFaq === faq.key}
+                  aria-controls={`faq-ans-${faq.key}`}
+                >
                   <span>{faq.q}</span>
-                  <span className={`sb-faq-q-icon${openFaq === i ? ' open' : ''}`}>+</span>
+                  <span className={cx('faqIcon', openFaq === faq.key && 'faqIconOpen')}>+</span>
                 </button>
-                {openFaq === i && <div className="sb-faq-a">{faq.a}</div>}
+                {openFaq === faq.key && (
+                  <div
+                    id={`faq-ans-${faq.key}`}
+                    className={styles.faqA}
+                    role="region"
+                  >
+                    {faq.a}
+                  </div>
+                )}
               </div>
             ))}
           </div>
 
-          {/* Enterprise CTA banner */}
-          <div style={{
-            background: '#0d0a1a', border: '1px solid #a78bfa22', borderRadius: 12,
-            padding: '20px 24px', display: 'flex', alignItems: 'center',
-            justifyContent: 'space-between', flexWrap: 'wrap', gap: 14,
-          }}>
+          {/* ── Corporate CTA ── */}
+          <div className={styles.entCta}>
             <div>
-              <div style={{ fontSize: 12, color: '#a78bfa', fontWeight: 700, marginBottom: 4 }}>
-                Need a custom plan for your conglomerate or brokerage?
-              </div>
-              <div style={{ fontSize: 10, color: '#86efac33', lineHeight: 1.8 }}>
-                Volume gas fee discounts · Unlimited seats · White-label reports · REST API · SLA guarantee
+              <div className={styles.entTitle}>Need Corporate or a custom plan?</div>
+              <div className={styles.entSub}>
+                Full Scope 3 · BRSR/CDP/TCFD · Verifier integration · Multi-entity · Custom seats
               </div>
             </div>
-            <a
-              href="mailto:hello@ethertrack.in?subject=Enterprise Plan Enquiry"
-              style={{
-                padding: '10px 20px', borderRadius: 8, background: '#1a1030',
-                border: '1px solid #a78bfa33', color: '#a78bfa',
-                fontFamily: "'DM Mono',monospace", fontSize: 10,
-                letterSpacing: '.1em', fontWeight: 700, textDecoration: 'none',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              CONTACT SALES →
-            </a>
+           <button
+  className={styles.entBtn}
+  onClick={() => window.location.href = 'https://mail.google.com/mail/?view=cm&to=support@ethertrack.in&su=Corporate+Plan+Enquiry'}
+>
+  CONTACT SALES →
+</button>
           </div>
 
         </div>
       </div>
 
+      {/* ══ Payment modal ══ */}
+      {payModal && (
+        <Portal>
+          <div
+            className={styles.overlay}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="pay-modal-title"
+            onClick={e => e.target === e.currentTarget && !paying && setPayModal(null)}
+          >
+            <div className={styles.modal} ref={modalRef}>
+
+              {/* Modal header */}
+              <div className={styles.modalHdr}>
+                <span className={styles.modalTitle} id="pay-modal-title">
+                  CHOOSE PAYMENT METHOD
+                </span>
+                <button
+                  className={styles.modalClose}
+                  onClick={() => !paying && setPayModal(null)}
+                  aria-label="Close payment modal"
+                  disabled={paying}
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className={styles.modalBody}>
+
+                {/* Plan summary */}
+                <div className={styles.modalPlanSummary}>
+                  <div className={styles.modalPlanName} style={{ color: payModal.plan.color }}>
+                    {payModal.plan.label} Plan
+                  </div>
+                  <div className={styles.modalPlanPrice}>
+                    {prices
+                      ? `${fmtINR(getPrice(payModal.plan))} / ${billingCycle === 'annual' ? 'year' : 'month'} + 18% GST`
+                      : 'Loading…'
+                    }
+                  </div>
+                </div>
+
+                {/* Proration notice */}
+                {prorationNotice && (
+                  <div className={styles.prorationNotice} role="note">
+                    ℹ {prorationNotice}
+                  </div>
+                )}
+
+                {/* Wallet method */}
+                <button
+                  className={cx('methodCard', payMethod === 'wallet' && 'methodCardSel')}
+                  onClick={() => setPayMethod('wallet')}
+                  aria-pressed={payMethod === 'wallet'}
+                >
+                  <span className={styles.methodIcon}>💰</span>
+                  <div className={styles.methodInfo}>
+                    <div className={styles.methodName}>INR Wallet</div>
+                    <div className={styles.methodDesc}>Instant · No redirect · Deducted server-side</div>
+                  </div>
+                  <span className={cx(
+                    'methodBadge',
+                    toPaise(walletBalance) >= toPaise(getPrice(payModal.plan) || 0) ? 'badgeOk' : 'badgeWarn'
+                  )}>
+                    {toPaise(walletBalance) >= toPaise(getPrice(payModal.plan) || 0) ? 'SUFFICIENT' : 'LOW BAL'}
+                  </span>
+                </button>
+                {payMethod === 'wallet' && (
+                  <div className={styles.walletDetail}>
+                    <span>Wallet balance</span>
+                    <strong>{fmtINR(walletBalance)}</strong>
+                  </div>
+                )}
+                {payMethod === 'wallet' &&
+                  toPaise(walletBalance) < toPaise(getPrice(payModal.plan) || 0) && (
+                  <div className={styles.insufficient}>
+                    ⚠ Insufficient balance.{' '}
+                    <span
+                      className={styles.insufLink}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => window.location.href = '/wallet'}
+                      onKeyDown={e => e.key === 'Enter' && (window.location.href = '/wallet')}
+                    >
+                      Top up →
+                    </span>
+                  </div>
+                )}
+
+                {/* MetaMask method */}
+                <button
+                  className={cx('methodCard', payMethod === 'metamask' && 'methodCardSel')}
+                  onClick={() => setPayMethod('metamask')}
+                  style={{ marginTop: 8 }}
+                  aria-pressed={payMethod === 'metamask'}
+                >
+                  <span className={styles.methodIcon}>🦊</span>
+                  <div className={styles.methodInfo}>
+                    <div className={styles.methodName}>{isMobile ? 'MetaMask App' : 'MetaMask'}</div>
+                    <div className={styles.methodDesc}>
+                      {isMobile
+                        ? 'Opens MetaMask mobile app · On-chain verification'
+                        : 'Sign with connected wallet · Plan key signed — no price in message'}
+                    </div>
+                  </div>
+                  {dbUser?.wallet_address
+                    ? <span className={cx('methodBadge', 'badgeOk')}>
+                        {dbUser.wallet_address.slice(0, 6)}…
+                      </span>
+                    : <span className={cx('methodBadge', 'badgeWarn')}>NOT BOUND</span>
+                  }
+                </button>
+
+                {/* Razorpay method */}
+                <button
+                  className={cx('methodCard', payMethod === 'razorpay' && 'methodCardSel')}
+                  onClick={() => setPayMethod('razorpay')}
+                  style={{ marginTop: 8 }}
+                  aria-pressed={payMethod === 'razorpay'}
+                >
+                  <span className={styles.methodIcon}>💳</span>
+                  <div className={styles.methodInfo}>
+                    <div className={styles.methodName}>Card / UPI / Net Banking</div>
+                    <div className={styles.methodDesc}>Powered by Razorpay · 256-bit encrypted · All Indian banks</div>
+                  </div>
+                  <span className={cx('methodBadge', 'badgeOk')}>RAZORPAY</span>
+                </button>
+
+                {/* GST fields — corporate only */}
+                {needsGstFields && (
+                  <div className={styles.gstSection}>
+                    <div className={styles.gstTitle}>
+                      GST DETAILS{' '}
+                      <span style={{ color: 'rgba(240,253,244,0.25)' }}>(optional — for B2B ITC)</span>
+                    </div>
+
+                    <div className={styles.field}>
+                      <label className={styles.fieldLabel} htmlFor="sb-gstin">GSTIN</label>
+                      <input
+                        id="sb-gstin"
+                        type="text"
+                        value={gstin}
+                        onChange={e => { setGstin(e.target.value.toUpperCase()); setGstinErr(''); }}
+                        onBlur={() => gstin && !validateGstin(gstin) && setGstinErr('Invalid GSTIN format (15-char)')}
+                        placeholder="22AAAAA0000A1Z5"
+                        maxLength={15}
+                        autoComplete="off"
+                        aria-describedby={gstinErr ? 'gstin-err' : undefined}
+                        aria-invalid={!!gstinErr}
+                        className={cx('fieldInput', gstinErr && 'fieldInputErr')}
+                      />
+                      {gstinErr && <div id="gstin-err" className={styles.fieldErr} role="alert">{gstinErr}</div>}
+                    </div>
+
+                    <div className={styles.field}>
+                      <label className={styles.fieldLabel} htmlFor="sb-pan">PAN</label>
+                      <input
+                        id="sb-pan"
+                        type="text"
+                        value={pan}
+                        onChange={e => { setPan(e.target.value.toUpperCase()); setPanErr(''); }}
+                        onBlur={() => pan && !validatePan(pan) && setPanErr('Invalid PAN format (10-char)')}
+                        placeholder="AAAAA0000A"
+                        maxLength={10}
+                        autoComplete="off"
+                        aria-describedby={panErr ? 'pan-err' : undefined}
+                        aria-invalid={!!panErr}
+                        className={cx('fieldInput', panErr && 'fieldInputErr')}
+                      />
+                      {panErr && <div id="pan-err" className={styles.fieldErr} role="alert">{panErr}</div>}
+                    </div>
+
+                    <div className={styles.gstNote}>
+                      GSTIN and PAN are printed on your GST-compliant tax invoice and required
+                      for input tax credit (ITC) claims under CGST rules.
+                    </div>
+                  </div>
+                )}
+
+                {modalErr && (
+                  <div className={styles.modalErr} role="alert">⚠ {modalErr}</div>
+                )}
+              </div>
+
+              {/* Modal footer */}
+              <div className={styles.modalFoot}>
+                <button
+                  className={styles.cancelBtn}
+                  onClick={() => setPayModal(null)}
+                  disabled={paying}
+                >
+                  CANCEL
+                </button>
+                <button
+                  className={styles.confirmBtn}
+                  onClick={handleConfirmPay}
+                  disabled={confirmDisabled}
+                  aria-busy={paying}
+                >
+                  {paying
+                    ? '⟳ PROCESSING…'
+                    : `PAY ${
+                        payMethod === 'wallet'   ? 'FROM WALLET' :
+                        payMethod === 'metamask' ? 'VIA METAMASK' : 'VIA RAZORPAY'
+                      } →`
+                  }
+                </button>
+              </div>
+
+            </div>
+          </div>
+        </Portal>
+      )}
+
+      {/* ── Toast ── */}
       {toast && (
-        <div className="sb-toast" style={{
-          border: `1px solid ${toast.type === 'error' ? '#f8717122' : '#22c55e22'}`,
-          color: toast.type === 'error' ? '#f8717199' : '#22c55e88',
-        }}>
-          {toast.msg}
-        </div>
+        <Portal>
+          <div
+            className={cx('toast', toast.type === 'success' ? 'toastSuccess' : 'toastError')}
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            <div className={styles.toastMsg}>{toast.msg}</div>
+            {toast.invoiceUrl && (
+              <a
+                href={toast.invoiceUrl}
+                className={styles.toastInvoice}
+                target="_blank"
+                rel="noreferrer"
+              >
+                📄 Download GST invoice →
+              </a>
+            )}
+          </div>
+        </Portal>
       )}
     </>
   );

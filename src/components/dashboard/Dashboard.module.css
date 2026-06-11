@@ -1,0 +1,590 @@
+/*
+ * Dashboard.module.css
+ *
+ * Replaces the runtime CSS injection (injectDashboardCSS).
+ * Using CSS Modules:
+ *   - No 'unsafe-inline' required in CSP style-src
+ *   - HMR-safe (Webpack / CRA handles it correctly)
+ *   - Locally scoped class names prevent collisions
+ *
+ * Import: import styles from './Dashboard.module.css'
+ * Usage:  className={styles.d}
+ */
+
+/* ── Reset ──────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+/* ── Root layout ─────────────────────────────────────────────────────────── */
+.d {
+  min-height: 100vh;
+  background: #060a07;
+  font-family: 'DM Mono', monospace;
+  position: relative;
+  overflow-x: hidden;
+}
+.d::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  background-image:
+    linear-gradient(rgba(34,197,94,.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34,197,94,.04) 1px, transparent 1px);
+  background-size: 40px 40px;
+  pointer-events: none;
+}
+.d::after {
+  content: '';
+  position: fixed;
+  top: -200px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 900px;
+  height: 450px;
+  background: radial-gradient(ellipse, rgba(34,197,94,.05) 0%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+.dw {
+  position: relative;
+  z-index: 1;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 24px 24px 60px;
+}
+
+/* ── Ticker ───────────────────────────────────────────────────────────────── */
+.tickerWrap {
+  overflow: hidden;
+  background: #0a0f0c;
+  border: 1px solid #0f2a1a;
+  border-radius: 8px;
+  margin-bottom: 24px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+}
+.tickerLive {
+  padding: 0 14px;
+  font-size: 11px;
+  color: #22c55e;
+  letter-spacing: .1em;
+  border-right: 1px solid #0f2a1a;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+.tickerTrack {
+  display: flex;
+  gap: 40px;
+  white-space: nowrap;
+  will-change: transform;
+}
+.tickerItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+
+/* ── Topbar ───────────────────────────────────────────────────────────────── */
+.topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 24px;
+  gap: 16px;
+  animation: fu .5s ease both;
+}
+.greeting {
+  font-family: 'Syne', sans-serif;
+  font-size: 28px;
+  font-weight: 800;
+  color: #f0fdf4;
+  line-height: 1.2;
+  margin-bottom: 4px;
+}
+.greeting span { color: #22c55e; }
+.sub {
+  font-size: 11px;
+  color: #86efacaa;
+  letter-spacing: .08em;
+}
+.clockVal {
+  font-family: 'Syne', sans-serif;
+  font-size: 26px;
+  font-weight: 700;
+  color: #22c55e;
+  letter-spacing: .04em;
+  text-align: right;
+}
+.clockDate {
+  font-size: 11px;
+  color: #86efacaa;
+  letter-spacing: .08em;
+  text-align: right;
+  margin-top: 3px;
+}
+.refreshBtn {
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid #22c55e33;
+  background: transparent;
+  color: #22c55e88;
+  cursor: pointer;
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  letter-spacing: .08em;
+  transition: all .2s;
+  margin-top: 8px;
+  display: block;
+}
+.refreshBtn:not(:disabled):hover  { border-color: #22c55e66; color: #22c55e; background: #0d2e1f33; }
+.refreshBtn:not(:disabled):active { transform: scale(0.97); }
+.refreshBtn:focus-visible          { outline: 2px solid #22c55e55; }
+.refreshBtn:disabled               { opacity: .4; cursor: not-allowed; }
+
+/* ── Banners ─────────────────────────────────────────────────────────────── */
+.kycSuccessBanner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 18px;
+  border-radius: 10px;
+  margin-bottom: 20px;
+  border: 1px solid #22c55e33;
+  background: #0d2e1f55;
+  animation: fu .5s ease both;
+  gap: 12px;
+}
+.kycExpiryBanner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 18px;
+  border-radius: 10px;
+  margin-bottom: 16px;
+  gap: 12px;
+  animation: fu .5s ease both;
+}
+.kycExpiryBannerExpiring { border: 1px solid #facc1544; background: #1a150033; color: #facc15; }
+.kycExpiryBannerExpired  { border: 1px solid #f8717144; background: #450a0a33; color: #f87171; }
+.kycRenewBtn {
+  padding: 7px 16px;
+  border-radius: 5px;
+  border: none;
+  cursor: pointer;
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  background: #facc15;
+  color: #080c0a;
+  flex-shrink: 0;
+}
+.kycRenewBtn:focus-visible { outline: 2px solid #facc1588; }
+.kycBanner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 18px;
+  border-radius: 10px;
+  margin-bottom: 20px;
+  border: 1px solid #facc1533;
+  background: #1a150033;
+  animation: fu .5s ease .05s both;
+  gap: 12px;
+}
+.kycBtn {
+  padding: 7px 16px;
+  border-radius: 5px;
+  border: none;
+  cursor: pointer;
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  background: #facc15;
+  color: #080c0a;
+  flex-shrink: 0;
+}
+.dismissBtn {
+  background: transparent;
+  border: none;
+  color: #22c55e66;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0;
+}
+.dismissBtn:focus-visible { outline: 2px solid #22c55e44; }
+.pendingBanner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  border: 1px solid #60a5fa33;
+  background: #0a162855;
+  font-size: 12px;
+  color: #60a5fa;
+  animation: fu .4s ease both;
+}
+.alertStrip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  border-radius: 7px;
+  margin-bottom: 12px;
+  border: 1px solid #f9731633;
+  background: #1a0d0033;
+  font-size: 11px;
+  color: #f97316;
+  letter-spacing: .06em;
+}
+.alertViewBtn {
+  margin-left: auto;
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid #f9731633;
+  background: transparent;
+  color: #f97316;
+  cursor: pointer;
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  letter-spacing: .06em;
+}
+
+/* ── Grid ─────────────────────────────────────────────────────────────────── */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 14px;
+}
+.c3  { grid-column: span 3;  }
+.c4  { grid-column: span 4;  }
+.c6  { grid-column: span 6;  }
+.c8  { grid-column: span 8;  }
+.c12 { grid-column: span 12; }
+
+/* ── Cards ────────────────────────────────────────────────────────────────── */
+.card {
+  background: #0a0f0c;
+  border: 1px solid #0f2a1a;
+  border-radius: 12px;
+  padding: 18px;
+  position: relative;
+  overflow: hidden;
+  transition: border-color .2s;
+  animation: fu .45s ease both;
+}
+.card:hover { border-color: #22c55e22; }
+.cardAccent {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: 12px 12px 0 0;
+}
+.clabel {
+  font-size: 11px;
+  letter-spacing: .12em;
+  margin-bottom: 10px;
+  color: #86efac99;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.cval {
+  font-family: 'Syne', sans-serif;
+  font-size: 26px;
+  font-weight: 800;
+  line-height: 1;
+}
+.csub   { font-size: 11px; color: #86efaccc; margin-top: 4px; letter-spacing: .05em; }
+.cchg   { font-size: 11px; margin-top: 6px; }
+.pnlPos { color: #22c55e; }
+.pnlNeg { color: #f87171; }
+.lastRefreshed { font-size: 11px; color: #86efac33; margin-top: 6px; }
+
+/* ── Buttons (shared) ────────────────────────────────────────────────────── */
+.depositBtn {
+  width: 100%;
+  padding: 7px 12px;
+  border-radius: 5px;
+  border: 1px solid #4ade8033;
+  background: transparent;
+  color: #4ade80;
+  cursor: pointer;
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  letter-spacing: .08em;
+  transition: all .2s;
+}
+.depositBtn:hover { background: #0d2e1f44; border-color: #4ade8066; }
+.depositBtn:focus-visible { outline: 2px solid #4ade8044; }
+
+.connectWalletBtn {
+  padding: 7px 18px;
+  border-radius: 6px;
+  border: 1px solid #60a5fa44;
+  background: #0a1628;
+  color: #60a5fa;
+  cursor: pointer;
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  letter-spacing: .1em;
+  width: 100%;
+}
+.connectWalletBtn:focus-visible { outline: 2px solid #60a5fa44; }
+
+.btnGhost {
+  width: 100%;
+  padding: 9px;
+  border-radius: 6px;
+  border: 1px solid #22c55e22;
+  background: transparent;
+  color: #22c55e66;
+  cursor: pointer;
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  letter-spacing: .08em;
+  transition: all .2s;
+  margin-top: 10px;
+}
+.btnGhost:hover  { border-color: #22c55e55; color: #22c55e; background: #0d2e1f22; }
+.btnGhost:active { transform: scale(0.98); }
+.btnGhost:focus-visible { outline: 2px solid #22c55e44; }
+
+.retryBtn {
+  padding: 5px 14px;
+  border-radius: 5px;
+  border: 1px solid #f8717133;
+  background: transparent;
+  color: #f87171;
+  cursor: pointer;
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  letter-spacing: .08em;
+}
+
+.listCreditsBtn {
+  padding: 9px 24px;
+  border-radius: 7px;
+  border: none;
+  background: #22c55e;
+  color: #060a07;
+  cursor: pointer;
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  letter-spacing: .1em;
+  font-weight: 700;
+}
+
+/* ── Market rows ─────────────────────────────────────────────────────────── */
+.mrowHd {
+  display: grid;
+  grid-template-columns: 2fr 60px 90px 80px 80px;
+  gap: 8px;
+  padding: 0 0 8px;
+  border-bottom: 1px solid #0f2a1a;
+  font-size: 11px;
+  color: #86efac99;
+  letter-spacing: .1em;
+}
+.mrow {
+  display: grid;
+  grid-template-columns: 2fr 60px 90px 80px 80px;
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid #0f2a1a14;
+  align-items: center;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: all .15s;
+}
+.mrow:hover     { background: #0f1a1222; padding-left: 6px; }
+.mrow:focus-visible { outline: 2px solid #22c55e44; outline-offset: 2px; }
+.mrow:last-child { border-bottom: none; }
+
+/* ── Actions grid ─────────────────────────────────────────────────────────── */
+.actionsGrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.actionBtn {
+  padding: 14px 8px;
+  border-radius: 8px;
+  border: 1px solid #0f2a1a;
+  background: transparent;
+  cursor: pointer;
+  text-align: center;
+  transition: all .2s;
+  font-family: 'DM Mono', monospace;
+  position: relative;
+}
+.actionBtn:hover  { transform: translateY(-2px); border-color: #22c55e22; }
+.actionBtn:active { transform: scale(0.97); }
+.actionBtn:focus-visible { outline: 2px solid #22c55e44; }
+.actionIcon  { font-size: 20px; margin-bottom: 5px; }
+.actionLabel { font-size: 11px; letter-spacing: .08em; }
+.actionBadge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: #f97316;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 10px;
+  padding: 1px 5px;
+  min-width: 16px;
+  text-align: center;
+  line-height: 14px;
+}
+
+/* ── Vol bar ─────────────────────────────────────────────────────────────── */
+.volBar  { height: 3px; background: #0f2a1a; border-radius: 2px; overflow: hidden; margin-top: 4px; }
+.volFill { height: 100%; border-radius: 2px; transition: width .8s ease; }
+
+/* ── Net row ──────────────────────────────────────────────────────────────── */
+.netRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px solid #0f2a1a14;
+  font-size: 11px;
+}
+.netRow:last-child { border-bottom: none; }
+
+/* ── News ─────────────────────────────────────────────────────────────────── */
+.newsItem {
+  display: flex;
+  gap: 10px;
+  padding: 11px 0;
+  border-bottom: 1px solid #0f2a1a14;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: all .15s;
+}
+.newsItem:hover      { background: #0f1a1211; padding-left: 6px; }
+.newsItem:focus-visible { outline: 2px solid #22c55e44; outline-offset: 2px; }
+.newsItem:last-child { border-bottom: none; }
+.newsTag {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 3px;
+  letter-spacing: .08em;
+  white-space: nowrap;
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 2px;
+}
+.newsTitle  { font-size: 12px; color: #f0fdf4; line-height: 1.5; }
+.newsSource { font-size: 11px; color: #86efacaa; margin-top: 3px; }
+.newsSrcLink {
+  font-size: 11px;
+  color: #86efac44;
+  text-decoration: none;
+  padding: 3px 8px;
+  border: 1px solid #0f2a1a;
+  border-radius: 4px;
+  letter-spacing: .06em;
+  transition: color .2s;
+}
+.newsSrcLink:hover,
+.newsSrcLink:focus-visible { color: #86efac; outline: 2px solid #22c55e44; }
+
+/* ── Trade rows ───────────────────────────────────────────────────────────── */
+.tradeRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 9px 0;
+  border-bottom: 1px solid #0f2a1a14;
+}
+.tradeRow:last-child { border-bottom: none; }
+
+/* ── Misc ─────────────────────────────────────────────────────────────────── */
+.liveBadge  { font-size: 11px; color: #22c55e; display: flex; align-items: center; gap: 4px; }
+.ldot       { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: #22c55e; margin-right: 5px; animation: lp 1.5s infinite; }
+.rateStaleWarn { font-size: 11px; color: #facc15; letter-spacing: .04em; margin-top: 4px; padding: 4px 8px; background: #1a150033; border-radius: 4px; border: 1px solid #facc1522; }
+.shimmer    { background: linear-gradient(90deg, #0f2a1a 25%, #0d2e1f 50%, #0f2a1a 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 4px; }
+.spin       { animation: spin .8s linear infinite; display: inline-block; }
+
+/* Screen-reader only utility */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0,0,0,0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Session modal ────────────────────────────────────────────────────────── */
+.sessionModalOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(6,10,7,.92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.sessionModalBox {
+  background: #0a0f0c;
+  border: 1px solid #22c55e33;
+  border-radius: 14px;
+  padding: 36px 40px;
+  text-align: center;
+  max-width: 380px;
+}
+.sessionLoginBtn {
+  padding: 10px 28px;
+  border-radius: 8px;
+  border: none;
+  background: #22c55e;
+  color: #060a07;
+  cursor: pointer;
+  font-family: 'DM Mono', monospace;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .1em;
+}
+
+/* ── Error boundary ───────────────────────────────────────────────────────── */
+.ebWrap  { min-height: 100vh; background: #060a07; display: flex; align-items: center; justify-content: center; font-family: 'DM Mono', monospace; }
+.ebInner { text-align: center; max-width: 400px; padding: 32px; }
+.ebBtn   { padding: 10px 28px; border-radius: 8px; border: none; background: #22c55e; color: #060a07; cursor: pointer; font-family: 'DM Mono', monospace; font-size: 12px; font-weight: 700; letter-spacing: .1em; }
+.ebStack { margin-top: 16px; font-size: 10px; color: #f8717188; text-align: left; overflow: auto; max-height: 120px; }
+
+/* ── Footer ───────────────────────────────────────────────────────────────── */
+.dashFooter { margin-top: 32px; padding-top: 20px; border-top: 1px solid #0f2a1a; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; font-size: 11px; color: #86efaccc; letter-spacing: .08em; }
+
+/* ── Animations ───────────────────────────────────────────────────────────── */
+@keyframes fu      { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes lp      { 0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(34,197,94,.4); } 50% { opacity: .6; box-shadow: 0 0 0 4px rgba(34,197,94,0); } }
+@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+@keyframes spin    { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+/* ── Responsive ───────────────────────────────────────────────────────────── */
+@media (max-width: 1024px) {
+  .c3 { grid-column: span 6; }
+  .c4 { grid-column: span 6; }
+  .c8 { grid-column: span 12; }
+}
+@media (max-width: 640px) {
+  .c3, .c4, .c6, .c8    { grid-column: span 12; }
+  .greeting              { font-size: 20px; }
+  .actionsGrid           { grid-template-columns: repeat(2, 1fr); }
+  .clockHide             { display: none !important; }
+  .mobileHide            { display: none !important; }
+  .mrow, .mrowHd         { grid-template-columns: 2fr 60px 90px; }
+}
