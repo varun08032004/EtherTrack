@@ -1,7 +1,8 @@
 // src/components/PlanSelection.jsx — EtherTrack v3 - 28/05/2026
 
+import { createPortal } from 'react-dom';
 import React, {
-  useState, useEffect, useRef, useCallback, useMemo, createPortal,
+  useState, useEffect, useRef, useCallback, useMemo,
 } from 'react';
 import { subscriptionAPI } from '../services/api';
 import { PLANS, GSTIN_REGEX, PAN_REGEX } from '../constants/plans';
