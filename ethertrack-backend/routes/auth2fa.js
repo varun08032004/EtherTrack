@@ -49,26 +49,27 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 const COOKIE_ACCESS = {
   httpOnly: true,
   secure:   IS_PROD,
-  sameSite: 'strict',
+  sameSite: IS_PROD ? 'none' : 'lax',  // 'none' required for cross-origin
   maxAge:   15 * 60 * 1000,
   path:     '/',
 };
 const COOKIE_REFRESH = {
   httpOnly: true,
   secure:   IS_PROD,
-  sameSite: 'strict',
+  sameSite: IS_PROD ? 'none' : 'lax',  // 'none' required for cross-origin
   maxAge:   7 * 24 * 60 * 60 * 1000,
   path:     '/api/auth/refresh',
+};
+
+const clearAuthCookies = (res) => {
+  const opts = { secure: IS_PROD, sameSite: IS_PROD ? 'none' : 'lax' };
+  res.clearCookie('et_access',  { ...opts, path: '/' });
+  res.clearCookie('et_refresh', { ...opts, path: '/api/auth/refresh' });
 };
 
 const setAuthCookies = (res, accessToken, refreshToken) => {
   res.cookie('et_access',  accessToken,  COOKIE_ACCESS);
   res.cookie('et_refresh', refreshToken, COOKIE_REFRESH);
-};
-
-const clearAuthCookies = (res) => {
-  res.clearCookie('et_access',  { path: '/' });
-  res.clearCookie('et_refresh', { path: '/api/auth/refresh' });
 };
 
 // ── POST /api/auth/2fa/setup ──────────────────────────────────────
