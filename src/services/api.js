@@ -1,21 +1,13 @@
 // src/services/api.js — EtherTrack
-// PRODUCTION HARDENED — v9
+// PRODUCTION HARDENED — v10
 // ─────────────────────────────────────────────────────────────────────────────
-// CHANGES vs v8:
+// CHANGES vs v9:
 //
-// [API-PAT]       patAPI added — full PAT profile save/load including
-//                 energy_sources, auditor fields, escert_deficit
-// [API-CCTS]      cctsAPI added — profile, monthly GEI, ACVA, Grid India, forms
-// [API-BRSR]      brsrAPI added — environmental P6-E2/E3/E4, summary, forms
-// [API-AUDIT]     auditAPI added — verifiers, logs, verification statements
-// [API-REPORTS]   reportsAPI added — PDF generation centralised (was inline in component)
-// [API-SBTI]      sbtiAPI added — targets, progress
-// [API-PLAN]      actionPlanAPI added — 5-year plan, MRV calendar
-// [API-SUPPLIER]  supplierAPI added — supplier portal CRUD
-// [API-MULTI]     multiEntityAPI added — entity management, consolidated view
-// [API-NOTIF]     notificationsAPI added — was missing entirely
+// [API-v10] authAPI.resendOtp added — called by Signup.jsx OTP step.
+//           authAPI.login now passes error.code through so Login.jsx can
+//           handle USE_SOCIAL_LOGIN and EMAIL_NOT_VERIFIED codes.
 //
-// All v8 fixes retained.
+// All v9 APIs retained unchanged.
 // ─────────────────────────────────────────────────────────────────────────────
 'use strict';
 
@@ -358,6 +350,9 @@ export const authAPI = {
   register    : (body) => apiFetch('/api/auth/register',     { method: 'POST', body: JSON.stringify(body) }),
   verifyEmail : (body) => apiFetch('/api/auth/verify-email', { method: 'POST', body: JSON.stringify(body) }),
 
+  // [API-v10] resend OTP for unverified accounts — used by Signup.jsx OTP step
+  resendOtp: (body) => apiFetch('/api/auth/resend-otp', { method: 'POST', body: JSON.stringify(body) }),
+
   login: async (body) => {
     const data = await apiFetch('/api/auth/login', { method: 'POST', body: JSON.stringify(body) });
     tokenStorage.clear();
@@ -568,8 +563,7 @@ export const orgAPI = {
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// [API-PAT] PAT SCHEME
-// Full payload including v2 fields: energy_sources, auditor_*, escert_deficit
+// PAT SCHEME
 // ══════════════════════════════════════════════════════════════════════════════
 export const patAPI = {
   getProfile: () =>
@@ -604,7 +598,7 @@ export const patAPI = {
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// [API-CCTS] CCTS COMPLIANCE
+// CCTS COMPLIANCE
 // ══════════════════════════════════════════════════════════════════════════════
 export const cctsAPI = {
   getProfile:  ()     => apiFetch('/api/ccts/profile'),
@@ -635,8 +629,7 @@ export const cctsAPI = {
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// [API-BRSR] BRSR ENVIRONMENTAL
-// P6-E2 (energy), P6-E3 (water), P6-E4 (waste)
+// BRSR ENVIRONMENTAL
 // ══════════════════════════════════════════════════════════════════════════════
 export const brsrAPI = {
   getEnvironmental:  (year)        => apiFetch(`/api/brsr/environmental${qs({ year })}`),
@@ -655,7 +648,7 @@ export const brsrAPI = {
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// [API-AUDIT] AUDIT TRAIL
+// AUDIT TRAIL
 // ══════════════════════════════════════════════════════════════════════════════
 export const auditAPI = {
   getVerifiers:    (year)       => apiFetch(`/api/audit/verifiers${qs({ year })}`),
@@ -677,9 +670,7 @@ export const auditAPI = {
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// [API-REPORTS] REPORTS — PDF generation
-// Returns raw fetch Response so caller can stream blob + read headers
-// (X-Audit-Hash, Content-Disposition)
+// REPORTS
 // ══════════════════════════════════════════════════════════════════════════════
 export const reportsAPI = {
   generate: async (payload) => {
@@ -711,7 +702,7 @@ export const reportsAPI = {
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// [API-SBTI] SBTi TARGETS
+// SBTi TARGETS
 // ══════════════════════════════════════════════════════════════════════════════
 export const sbtiAPI = {
   getTargets:  ()     => apiFetch('/api/sbti/targets'),
@@ -723,7 +714,7 @@ export const sbtiAPI = {
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// [API-PLAN] 5-YEAR ACTION PLAN
+// 5-YEAR ACTION PLAN
 // ══════════════════════════════════════════════════════════════════════════════
 export const actionPlanAPI = {
   getPlan:  ()     => apiFetch('/api/action-plan'),
@@ -740,7 +731,7 @@ export const actionPlanAPI = {
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// [API-SUPPLIER] SUPPLIER PORTAL
+// SUPPLIER PORTAL
 // ══════════════════════════════════════════════════════════════════════════════
 export const supplierAPI = {
   getSuppliers:     (p = {})    => apiFetch(`/api/suppliers${qs(p)}`),
@@ -758,7 +749,7 @@ export const supplierAPI = {
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// [API-MULTI] MULTI-ENTITY
+// MULTI-ENTITY
 // ══════════════════════════════════════════════════════════════════════════════
 export const multiEntityAPI = {
   getEntities:      ()           => apiFetch('/api/multi-entity/entities'),
@@ -775,7 +766,7 @@ export const multiEntityAPI = {
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// [API-NOTIF] NOTIFICATIONS
+// NOTIFICATIONS
 // ══════════════════════════════════════════════════════════════════════════════
 export const notificationsAPI = {
   getAll:      (p = {}) => apiFetch(`/api/notifications${qs(p)}`),

@@ -1,6 +1,6 @@
 // routes/auth.js — EtherTrack
 // ─────────────────────────────────────────────────────────────────
-// SECURITY FIXES APPLIED (v2):
+// SECURITY FIXES APPLIED (v3):
 //
 // [FIX-1]  /verify-email — rate limited (5 attempts / 10 min / email),
 //          otp_attempts counter, OTP invalidated after 5 failures.
@@ -39,6 +39,13 @@
 // [FIX-IPv6] makeEmailLimiter keyGenerator now uses ipKeyGenerator(req)
 //          instead of req.ip directly — fixes ERR_ERL_KEY_GEN_IPV6 warning
 //          from express-rate-limit v7+.
+//
+// [FIX-13] /login — provider guard added. Firebase/OAuth users (password_hash
+//          starts with 'firebase:') are rejected with USE_SOCIAL_LOGIN code
+//          instead of silently failing bcrypt.compare.
+//          email_verified check restored with EMAIL_NOT_VERIFIED code so
+//          frontend can show a specific actionable message.
+//          provider column added to SELECT.
 // ─────────────────────────────────────────────────────────────────
 
 'use strict';
@@ -49,7 +56,6 @@ const multer  = require('multer');
 const path    = require('path');
 const fs      = require('fs');
 const crypto  = require('crypto');
-// FIX-IPv6: import ipKeyGenerator alongside rateLimit
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const { body, validationResult } = require('express-validator');
 
@@ -74,7 +80,7 @@ const twoFA = require('./auth2fa');
 const { setAuthCookies, clearAuthCookies } = require('./auth2fa');
 router.use('/2fa', twoFA);
 
-// ── HTML escape helper (for user-supplied strings in emails) ──────
+// ── HTML escape helper ────────────────────────────────────────────
 const escHtml = (s) =>
   String(s)
     .replace(/&/g, '&amp;')
@@ -84,7 +90,6 @@ const escHtml = (s) =>
     .replace(/'/g, '&#x27;');
 
 // ── Refresh token hashing ─────────────────────────────────────────
-// [FIX-2] Store SHA-256 hash in DB so a DB dump cannot be replayed.
 const hashToken = (t) => crypto.createHash('sha256').update(t).digest('hex');
 
 // ── Avatar upload config ──────────────────────────────────────────
@@ -96,7 +101,6 @@ const avatarStorage = multer.diskStorage({
     fs.mkdirSync(dir, { recursive: true });
     cb(null, dir);
   },
-  // [FIX-8] derive extension from verified MIME type, not user-supplied filename
   filename: (req, file, cb) => {
     const ext = MIME_TO_EXT[file.mimetype] || '.jpg';
     cb(null, `avatar_${req.user.id}_${Date.now()}${ext}`);
@@ -133,9 +137,6 @@ const logActivity = async (userId, action, meta = {}, ipHint = null) => {
 };
 
 // ── Per-email rate limiter factory ────────────────────────────────
-// FIX-IPv6: fall back to ipKeyGenerator(req) — never req.ip directly.
-//           express-rate-limit v7+ throws ERR_ERL_KEY_GEN_IPV6 if it
-//           detects raw req.ip in a custom keyGenerator.
 const makeEmailLimiter = (max, windowMs) =>
   rateLimit({
     windowMs,
@@ -149,7 +150,6 @@ const makeEmailLimiter = (max, windowMs) =>
 /* ─────────────────────────────────────────────────────────────────
    REGISTER
 ───────────────────────────────────────────────────────────────── */
-// Rate limiting is applied globally in server.js (/api/auth/register → 10/hr)
 router.post('/register', [
   body('email').isEmail().normalizeEmail(),
   body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
@@ -163,10 +163,9 @@ router.post('/register', [
     const existing = await safeQuery('SELECT id FROM users WHERE email=$1', [email]);
     if (existing.rows.length) return res.status(409).json({ error: 'Email already registered' });
 
-    const ROUNDS      = parseInt(process.env.BCRYPT_ROUNDS) || 12;
+    const ROUNDS       = parseInt(process.env.BCRYPT_ROUNDS) || 12;
     const passwordHash = await bcrypt.hash(password, ROUNDS);
     const otp          = generateOTP();
-    // [FIX-1] Store OTP as bcrypt hash (cost 8 — fast enough for short-lived OTP)
     const otpHash      = await bcrypt.hash(otp, 8);
     const otpExpires   = new Date(Date.now() + 10 * 60 * 1000);
 
@@ -178,7 +177,6 @@ router.post('/register', [
       [email, passwordHash, fullName, companyName || null, otpHash, otpExpires]
     );
 
-    // Fire-and-forget — log failures but don't block response
     sendVerificationEmail(email, otp, fullName).catch(e =>
       console.error('[register] verification email failed:', e.message)
     );
@@ -195,10 +193,10 @@ router.post('/register', [
 });
 
 /* ─────────────────────────────────────────────────────────────────
-   RESEND OTP  [FIX-5] — new endpoint
+   RESEND OTP
 ───────────────────────────────────────────────────────────────── */
 router.post('/resend-otp',
-  makeEmailLimiter(3, 60 * 60 * 1000), // 3 per hour per email
+  makeEmailLimiter(3, 60 * 60 * 1000),
   [body('email').isEmail().normalizeEmail()],
   async (req, res) => {
     const errors = validationResult(req);
@@ -209,15 +207,14 @@ router.post('/resend-otp',
       const { rows } = await safeQuery(
         'SELECT id, full_name, email_verified FROM users WHERE email=$1', [email]
       );
-      // Always return success to prevent email enumeration
       if (!rows.length || rows[0].email_verified) {
         return res.json({ message: 'If that email is unverified, a new OTP has been sent.' });
       }
 
-      const user     = rows[0];
-      const otp      = generateOTP();
-      const otpHash  = await bcrypt.hash(otp, 8);
-      const expires  = new Date(Date.now() + 10 * 60 * 1000);
+      const user    = rows[0];
+      const otp     = generateOTP();
+      const otpHash = await bcrypt.hash(otp, 8);
+      const expires = new Date(Date.now() + 10 * 60 * 1000);
 
       await safeQuery(
         `UPDATE users
@@ -242,7 +239,6 @@ router.post('/resend-otp',
    VERIFY EMAIL
 ───────────────────────────────────────────────────────────────── */
 router.post('/verify-email',
-  // [FIX-1] 5 attempts per 10 min per email — prevents OTP brute force
   makeEmailLimiter(5, 10 * 60 * 1000),
   [
     body('email').isEmail().normalizeEmail(),
@@ -263,7 +259,6 @@ router.post('/verify-email',
 
       const user = rows[0];
 
-      // [FIX-1] Lockout after 5 failed attempts
       if ((user.otp_attempts || 0) >= 5) {
         await safeQuery(
           'UPDATE users SET email_otp=NULL, email_otp_expires=NULL WHERE id=$1',
@@ -281,7 +276,6 @@ router.post('/verify-email',
         return res.status(400).json({ error: 'OTP expired. Please request a new one.' });
       }
 
-      // [FIX-1] Compare against stored hash
       const otpValid = await bcrypt.compare(otp, user.email_otp);
       if (!otpValid) {
         await safeQuery(
@@ -304,7 +298,6 @@ router.post('/verify-email',
       );
 
       const tokens = generateTokens(user.id);
-      // [FIX-2] Store hash of refresh token
       await safeQuery(
         `INSERT INTO refresh_tokens (user_id, token, expires_at)
          VALUES ($1, $2, NOW()+INTERVAL '7 days')`,
@@ -312,7 +305,6 @@ router.post('/verify-email',
       );
 
       setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
-      // [FIX-3] Do NOT return tokens in body — cookies are the sole transport
       res.json({ message: 'Email verified. You are now logged in.' });
     } catch (e) {
       console.error('[verify-email]', e.message);
@@ -323,7 +315,7 @@ router.post('/verify-email',
 
 /* ─────────────────────────────────────────────────────────────────
    LOGIN — with 2FA support
-   Rate limiting applied globally in server.js (20 / 15 min)
+   [FIX-13] Provider guard + proper error codes
 ───────────────────────────────────────────────────────────────── */
 router.post('/login', [
   body('email').isEmail().normalizeEmail(),
@@ -338,19 +330,34 @@ router.post('/login', [
       `SELECT id, email, password_hash, full_name, company_name, role,
               wallet_address, kyc_status, kyc_verified, email_verified, is_active,
               subscription_plan, plan_selected, subscription_renewal_date,
-              subscription_cycle, inr_balance, two_fa_enabled
+              subscription_cycle, inr_balance, two_fa_enabled, provider
        FROM users WHERE email=$1`,
       [email]
     );
 
-    // Generic message prevents email enumeration
     if (!rows.length) return res.status(401).json({ error: 'Invalid credentials' });
     const user = rows[0];
+
     if (!user.is_active) return res.status(403).json({ error: 'Account disabled' });
+
+    // [FIX-13] Firebase/OAuth users have no bcrypt hash — cannot use password login
+    if (!user.password_hash || user.password_hash.startsWith('firebase:')) {
+      return res.status(401).json({
+        error: 'This account was created with Google or Facebook. Please use the social login button.',
+        code:  'USE_SOCIAL_LOGIN',
+      });
+    }
 
     const match = await bcrypt.compare(password, user.password_hash);
     if (!match) return res.status(401).json({ error: 'Invalid credentials' });
-    if (!user.email_verified) return res.status(403).json({ error: 'Email not verified' });
+
+    // [FIX-13] Restored with actionable error code
+    if (!user.email_verified) {
+      return res.status(403).json({
+        error: 'Email not verified. Check your inbox for the verification code.',
+        code:  'EMAIL_NOT_VERIFIED',
+      });
+    }
 
     await safeQuery('UPDATE users SET last_login=NOW() WHERE id=$1', [user.id]);
 
@@ -365,7 +372,6 @@ router.post('/login', [
     }
 
     const tokens = generateTokens(user.id);
-    // [FIX-2] Store hash
     await safeQuery(
       `INSERT INTO refresh_tokens (user_id, token, expires_at)
        VALUES ($1, $2, NOW()+INTERVAL '7 days')`,
@@ -380,7 +386,6 @@ router.post('/login', [
     ).catch(() => {});
 
     setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
-    // [FIX-3] No tokens in response body
     res.json({
       user: {
         id:                        user.id,
@@ -394,7 +399,6 @@ router.post('/login', [
         plan_selected:             !!user.plan_selected,
         subscription_renewal_date: user.subscription_renewal_date || null,
         subscription_cycle:        user.subscription_cycle        || 'monthly',
-        // [FIX] Return as string — never parseFloat financial data
         inr_balance:               (user.inr_balance || '0').toString(),
       },
     });
@@ -423,7 +427,6 @@ router.post('/refresh', async (req, res) => {
       return res.status(401).json({ error: 'Invalid or expired refresh token' });
     }
 
-    // [FIX-2] Look up by hash
     const { rows } = await safeQuery(
       `SELECT id FROM refresh_tokens
        WHERE token=$1 AND user_id=$2 AND expires_at>NOW() AND revoked=FALSE`,
@@ -434,7 +437,6 @@ router.post('/refresh', async (req, res) => {
       return res.status(401).json({ error: 'Refresh token revoked or expired' });
     }
 
-    // Rotate: revoke old, issue new
     await safeQuery(
       'UPDATE refresh_tokens SET revoked=TRUE WHERE token=$1',
       [hashToken(refreshToken)]
@@ -448,7 +450,6 @@ router.post('/refresh', async (req, res) => {
     );
 
     setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
-    // [FIX-3] No tokens in body
     res.json({ message: 'Tokens refreshed' });
   } catch (e) {
     console.error('[refresh]', e.message);
@@ -458,13 +459,11 @@ router.post('/refresh', async (req, res) => {
 
 /* ─────────────────────────────────────────────────────────────────
    LOGOUT
-   [FIX-7] optionalAuth — expired access token can still log out
 ───────────────────────────────────────────────────────────────── */
 router.post('/logout', optionalAuth, async (req, res) => {
   try {
     const refreshToken = req.cookies?.et_refresh || req.body?.refreshToken;
     if (refreshToken) {
-      // [FIX-2] revoke by hash
       await safeQuery(
         `UPDATE refresh_tokens SET revoked=TRUE
          WHERE token=$1 ${req.user ? 'AND user_id=$2' : ''}`,
@@ -486,9 +485,9 @@ router.post('/logout', optionalAuth, async (req, res) => {
    FIREBASE SYNC
 ───────────────────────────────────────────────────────────────── */
 router.post('/firebase-sync', async (req, res) => {
-
   console.log('[firebase-sync] auth header:', req.headers.authorization?.substring(0, 50) || 'MISSING');
   console.log('[firebase-sync] origin:', req.headers.origin);
+
   const idToken = req.headers.authorization?.startsWith('Bearer ')
     ? req.headers.authorization.split(' ')[1]
     : null;
@@ -497,7 +496,6 @@ router.post('/firebase-sync', async (req, res) => {
 
   let decoded;
   try {
-    // Circuit breaker: 5s timeout on Firebase verification
     decoded = await Promise.race([
       admin.auth().verifyIdToken(idToken),
       new Promise((_, reject) =>
@@ -519,8 +517,7 @@ router.post('/firebase-sync', async (req, res) => {
 
   if (!email) return res.status(400).json({ error: 'Token has no email claim' });
 
-  // [FIX-4] Sanitize fullName — strip HTML, limit length
-  const rawName = req.body?.fullName || decoded.name || email.split('@')[0];
+  const rawName  = req.body?.fullName || decoded.name || email.split('@')[0];
   const fullName = rawName.replace(/[<>"'&]/g, '').trim().slice(0, 100);
 
   try {
@@ -560,7 +557,6 @@ router.post('/firebase-sync', async (req, res) => {
       }
 
       const tokens = generateTokens(user.id);
-      // [FIX-2] Store hash
       await client.query(
         `INSERT INTO refresh_tokens (user_id, token, expires_at)
          VALUES ($1, $2, NOW() + INTERVAL '7 days')`,
@@ -571,7 +567,6 @@ router.post('/firebase-sync', async (req, res) => {
     });
 
     setAuthCookies(res, result.tokens.accessToken, result.tokens.refreshToken);
-    // [FIX-3] No tokens in body
     res.json({
       user: {
         id:                        result.user.id,
@@ -638,14 +633,12 @@ router.get('/me', authenticate, async (req, res) => {
 
 /* ─────────────────────────────────────────────────────────────────
    UPDATE PROFILE
-   [FIX-6] Email change triggers re-verification
 ───────────────────────────────────────────────────────────────── */
 router.patch('/profile', authenticate, [
   body('full_name').optional().trim().notEmpty().withMessage('Name cannot be empty'),
   body('email').optional().isEmail().normalizeEmail(),
   body('phone').optional().matches(/^\+?[\d\s\-()\u2013]{7,16}$/).withMessage('Invalid phone number'),
   body('bio').optional().isLength({ max: 280 }).withMessage('Bio must be under 280 characters'),
-  // [FIX] avatar_url must be an HTTPS URL on your own domain or empty
   body('avatar_url').optional().custom((val) => {
     if (!val) return true;
     try {
@@ -685,7 +678,6 @@ router.patch('/profile', authenticate, [
         bio          = COALESCE($5, bio),
         timezone     = COALESCE($6, timezone),
         avatar_url   = COALESCE($7, avatar_url),
-        -- [FIX-6] Re-verification required on email change
         email_verified = CASE WHEN $2 IS NOT NULL AND $2 != email THEN FALSE ELSE email_verified END,
         updated_at   = NOW()
        WHERE id = $8
@@ -696,7 +688,6 @@ router.patch('/profile', authenticate, [
        bio || null, timezone || null, avatar_url || null, req.user.id]
     );
 
-    // [FIX-6] Send re-verification OTP to new email
     if (emailChanging) {
       const otp     = generateOTP();
       const otpHash = await bcrypt.hash(otp, 8);
@@ -755,7 +746,6 @@ router.post('/upload-avatar', authenticate, avatarUpload.single('avatar'), async
     res.json({ avatar_url: avatarUrl });
   } catch (e) {
     console.error('[upload-avatar]', e.message);
-    // [FIX-9] Never leak e.message to client in production
     res.status(500).json({
       error: process.env.NODE_ENV === 'production' ? 'Avatar upload failed' : e.message,
     });
@@ -789,7 +779,6 @@ router.post('/change-password', authenticate, [
       'UPDATE users SET password_hash=$1, updated_at=NOW() WHERE id=$2',
       [newHash, req.user.id]
     );
-    // Revoke all sessions on password change
     await safeQuery('UPDATE refresh_tokens SET revoked=TRUE WHERE user_id=$1', [req.user.id]);
     await safeQuery('DELETE FROM user_sessions WHERE user_id=$1', [req.user.id]);
     await logActivity(req.user.id, 'PASSWORD_CHANGED', {}, req.ip);
@@ -839,7 +828,6 @@ router.get('/sessions', authenticate, async (req, res) => {
 });
 
 router.delete('/sessions/:id', authenticate, async (req, res) => {
-  // Validate session id is numeric
   const sessionId = parseInt(req.params.id, 10);
   if (isNaN(sessionId)) return res.status(400).json({ error: 'Invalid session id' });
 
@@ -857,7 +845,7 @@ router.delete('/sessions/:id', authenticate, async (req, res) => {
 });
 
 /* ─────────────────────────────────────────────────────────────────
-   ACTIVITY LOG  (with pagination)
+   ACTIVITY LOG
 ───────────────────────────────────────────────────────────────── */
 router.get('/activity-log', authenticate, async (req, res) => {
   const limit  = Math.min(parseInt(req.query.limit  || '20', 10), 100);

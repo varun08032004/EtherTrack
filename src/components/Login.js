@@ -1,15 +1,12 @@
 /**
- * Login.jsx — EtherTrack
- * FIX: Email/password login now calls backend directly (no Firebase for email auth)
- * Firebase is only used for Google/Facebook OAuth
+ * Login.jsx — EtherTrack v2
+ * FIX: Email/password login calls backend directly (no Firebase for email auth)
+ * FIX: getFriendlyError handles USE_SOCIAL_LOGIN and EMAIL_NOT_VERIFIED codes
  */
 
 import React, { useState, useContext } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import {
-  sendPasswordResetEmail,
-  signInWithPopup,
-} from "firebase/auth";
+import { sendPasswordResetEmail, signInWithPopup } from "firebase/auth";
 import { FaEye, FaEyeSlash, FaGoogle, FaFacebook } from "react-icons/fa";
 import { AuthContext } from "../App";
 import { auth, googleProvider, facebookProvider } from "../firebaseConfigure";
@@ -20,18 +17,36 @@ let Sentry = null;
 try { Sentry = require("@sentry/react"); } catch {}
 
 const getFriendlyError = (err) => {
-  if (err?.error === "Invalid credentials" || err?.status === 401) return "Incorrect email or password.";
-  if (err?.error === "Email not verified"  || err?.status === 403) return "Please verify your email before logging in. Check your inbox.";
-  if (err?.error === "Account disabled")   return "This account has been disabled. Contact support.";
+  // Backend error codes — check these first
   switch (err?.code) {
-    case "auth/account-exists-with-different-credential":
-      return "An account already exists with this email. Try a different sign-in method.";
-    case "auth/popup-closed-by-user":
-      return null;
-    case "auth/popup-blocked":
-      return "Popup blocked. Please allow popups for this site.";
+    case 'USE_SOCIAL_LOGIN':
+      return 'This account was created with Google or Facebook. Please use the social login button below.';
+    case 'EMAIL_NOT_VERIFIED':
+      return 'Email not verified. Check your inbox for the 6-digit code, or sign up again to resend it.';
     default:
-      return err?.error || err?.message || "Login failed. Please try again.";
+      break;
+  }
+  // HTTP status fallbacks
+  if (err?.status === 401) return 'Incorrect email or password.';
+  if (err?.status === 403) {
+    if (err?.error?.toLowerCase().includes('verified')) {
+      return 'Email not verified. Check your inbox for the 6-digit code, or sign up again to resend it.';
+    }
+    if (err?.error?.toLowerCase().includes('disabled')) {
+      return 'This account has been disabled. Contact support.';
+    }
+    return err?.error || 'Account access denied. Contact support.';
+  }
+  // Firebase codes (social login errors)
+  switch (err?.code) {
+    case 'auth/account-exists-with-different-credential':
+      return 'An account already exists with this email. Try a different sign-in method.';
+    case 'auth/popup-closed-by-user':
+      return null;
+    case 'auth/popup-blocked':
+      return 'Popup blocked. Please allow popups for this site.';
+    default:
+      return err?.error || err?.message || 'Login failed. Please try again.';
   }
 };
 
@@ -76,11 +91,10 @@ const Login = () => {
         return;
       }
 
-      // Backend set httpOnly cookies — now set local React state
       const result = await handleLogin({
         email:  trimmedEmail,
         dbUser: data?.user || null,
-      }, null); // null = no Firebase user for email/password
+      }, null);
 
       showToast("✅ Welcome back!", "success");
       navigate(resolveRedirect(result), { replace: true });
@@ -96,7 +110,7 @@ const Login = () => {
   const handleSocialLogin = async (provider, providerLabel) => {
     startLoading(providerLabel.toLowerCase());
     try {
-      const cred = await signInWithPopup(auth, provider);
+      const cred   = await signInWithPopup(auth, provider);
       const result = await handleLogin({ email: cred.user.email }, cred.user);
       showToast("✅ Welcome back!", "success");
       navigate(resolveRedirect(result), { replace: true });
