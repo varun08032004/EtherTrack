@@ -245,7 +245,7 @@ contract AuditTrail is Ownable, Pausable, ReentrancyGuard {
     {
         uint256 count = actions.length;
         require(count > 0,   "Empty batch");
-        require(count <= 50, "Batch too large — max 50");
+        require(count <= 50, "Batch too large - max 50");
         require(
             count == messages.length &&
             count == metaJsons.length &&

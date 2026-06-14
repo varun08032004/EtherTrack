@@ -205,15 +205,20 @@ router.post('/submit', authenticate, async (req, res) => {
 
     // Insert new submission
     const { rows: [sub] } = await client.query(
-      `INSERT INTO kyc_submissions
-         (user_id, full_name, id_type, phone, kyc_data_hash,
-          aadhaar_hash, pan_hash, doc_ipfs_hash, status, kyc_tier, idempotency_key)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending','phone',$9)
-       RETURNING id, submitted_at`,
-      [req.user.id, fullName.trim(), idType, phone || null, serverHash,
-       canonicalAadhaarHash, canonicalPanHash, docIpfsHash,
-       idempotencyKey || null]
-    );
+  `INSERT INTO kyc_submissions
+     (user_id, full_name, id_type, phone, kyc_data_hash,
+      aadhaar_hash, pan_hash, doc_ipfs_hash, status, kyc_tier, 
+      idempotency_key, consent_given, consent_at)
+   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending','phone',$9,$10,$11)
+   RETURNING id, submitted_at`,
+  [req.user.id, fullName.trim(), idType, phone || null, serverHash,
+   canonicalAadhaarHash, canonicalPanHash, docIpfsHash,
+   idempotencyKey || null,
+   req.body.consentGiven === true,
+   req.body.consentAt ? new Date(req.body.consentAt) : new Date(),
+  ]
+);
+    
 
     // Update user record atomically
     await client.query(

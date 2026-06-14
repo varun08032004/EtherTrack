@@ -47,8 +47,8 @@
       ]
     },
     "C:\\Users\\ASUS\\Desktop\\EtherTrack\\ethertrack-contracts\\contracts\\KYCRegistry.sol": {
-      "lastModificationDate": 1772807508811,
-      "contentHash": "654f311e7c1f3bf3632d4d7e9c0133bb",
+      "lastModificationDate": 1780912585963,
+      "contentHash": "6227561b133dbbaa40e6516146ade232",
       "sourceName": "contracts/KYCRegistry.sol",
       "solcConfig": {
         "version": "0.8.26",
@@ -1075,8 +1075,8 @@
       ]
     },
     "C:\\Users\\ASUS\\Desktop\\EtherTrack\\ethertrack-contracts\\contracts\\AuditTrail.sol": {
-      "lastModificationDate": 1780732226596,
-      "contentHash": "e85b1e0ce67e571c788c957f983eb2d1",
+      "lastModificationDate": 1781421146967,
+      "contentHash": "c8373c2a06dc72f5002058108164da35",
       "sourceName": "contracts/AuditTrail.sol",
       "solcConfig": {
         "version": "0.8.26",
@@ -1105,7 +1105,8 @@
       },
       "imports": [
         "@openzeppelin/contracts/access/Ownable.sol",
-        "@openzeppelin/contracts/utils/Pausable.sol"
+        "@openzeppelin/contracts/utils/Pausable.sol",
+        "@openzeppelin/contracts/utils/ReentrancyGuard.sol"
       ],
       "versionPragmas": [
         "^0.8.26"

@@ -1,8 +1,8 @@
 // src/components/KYCForm.jsx — EtherTrack KYC v2 · PRODUCTION-HARDENED - 28/05/2026
 // FIX: replaced inline XHR in uploadDocToIPFS with apiFetchMultipartWithProgress
-//      - was reading csrf_token cookie; api.js uses XSRF-TOKEN → header was never sent → 403
-//      - dropped Authorization: Bearer header (route uses cookie session only; mixing
-//        auth schemes caused CSRF middleware rejection on some configurations)
+// FIX: border/borderColor shorthand conflict fixed in DocumentStep
+// FIX: DPDP Act 2023 consent checkbox added to ReviewStep
+// FIX: Debug logs added to handleSendOtp for OTP troubleshooting
 
 import React, {
   useState, useEffect, useRef, useContext, useCallback,
@@ -24,7 +24,7 @@ const STEPS = [
 ];
 
 const ALLOWED_MIME = ['image/jpeg','image/png','image/webp','application/pdf'];
-const MAX_FILE_BYTES = 5 * 1024 * 1024; // 5 MB
+const MAX_FILE_BYTES = 5 * 1024 * 1024;
 
 const ID_TYPES = [
   { value: 'aadhaar',  label: 'Aadhaar Card',     hint: 'XXXX XXXX XXXX', validate: v => /^\d{12}$/.test(v.replace(/\s/g,''))  },
@@ -34,7 +34,6 @@ const ID_TYPES = [
   { value: 'voter',    label: 'Voter ID',          hint: 'ABC1234567',     validate: v => v.trim().length >= 6 },
 ];
 
-// Popular countries first, then alphabetical
 const POPULAR_COUNTRIES = ['IN','US','GB','SG','AE','AU','CA','DE','FR','JP'];
 const ALL_COUNTRIES = getCountries();
 const SORTED_COUNTRIES = [
@@ -56,7 +55,6 @@ class KYCErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { hasError: false, errorId: null }; }
   static getDerivedStateFromError() { return { hasError: true, errorId: crypto.randomUUID() }; }
   componentDidCatch(error, info) {
-    // Log to Sentry without PII
     import('@sentry/react').then(S => S.captureException(error, {
       tags: { component: 'KYCForm' },
       contexts: { react: { componentStack: info.componentStack?.slice(0, 500) } },
@@ -153,7 +151,8 @@ const IdentityStep = memo(({ fullName, setFullName, idType, setIdType, idNumber,
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Step 1: Document upload with real XHR progress
+// Step 1: Document upload
+// FIX: removed borderColor spread — use full border property to avoid React warning
 // ═══════════════════════════════════════════════════════════════════════════════
 const DocumentStep = memo(({ docFile, docPreview, uploadProgress, onFileSelect, errors }) => {
   const inputRef = useRef(null);
@@ -161,7 +160,14 @@ const DocumentStep = memo(({ docFile, docPreview, uploadProgress, onFileSelect, 
     <div style={S.fields}>
       <Field label="Upload Identity Document" error={errors.doc}>
         <div
-          style={{ ...S.uploadBox, ...(errors.doc ? { borderColor:'#dc2626' } : {}), ...(docFile ? { borderColor:'#22c55e33' } : {}) }}
+          style={{
+            ...S.uploadBox,
+            border: errors.doc
+              ? '1px dashed #dc2626'
+              : docFile
+              ? '1px dashed #22c55e33'
+              : '1px dashed #0f2a1a',
+          }}
           onClick={() => inputRef.current?.click()}
           onKeyDown={e => (e.key==='Enter'||e.key===' ') && inputRef.current?.click()}
           role="button"
@@ -212,7 +218,7 @@ const DocumentStep = memo(({ docFile, docPreview, uploadProgress, onFileSelect, 
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Step 2: Phone OTP with international support
+// Step 2: Phone OTP
 // ═══════════════════════════════════════════════════════════════════════════════
 const PhoneStep = memo(({
   countryCode, setCountryCode,
@@ -302,9 +308,13 @@ const PhoneStep = memo(({
 ));
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Step 3: Review
+// Step 3: Review + DPDP Act 2023 Consent
 // ═══════════════════════════════════════════════════════════════════════════════
-const ReviewStep = memo(({ fullName, idType, idNumber, docFile, countryCode, phone, otpVerified, submitError, submitting, submitStep, uploadProgress }) => {
+const ReviewStep = memo(({
+  fullName, idType, idNumber, docFile, countryCode, phone,
+  otpVerified, submitError, submitting, submitStep, uploadProgress,
+  consentGiven, setConsentGiven,
+}) => {
   const callingCode = countryCode ? `+${getCountryCallingCode(countryCode)} ` : '';
   return (
     <div style={S.fields}>
@@ -334,6 +344,48 @@ const ReviewStep = memo(({ fullName, idType, idNumber, docFile, countryCode, pho
           '🚀 Full portfolio access unlocks immediately',
         ].map(t => <div key={t} style={{ fontSize:10, color:'#86efac66', marginBottom:6, lineHeight:1.6 }}>{t}</div>)}
       </div>
+
+      {/* ── DPDP Act 2023 Consent ─────────────────────────────────────── */}
+      <div style={{
+        background: '#0a1a0e',
+        border: consentGiven ? '1px solid #22c55e44' : '1px solid #0f2a1a',
+        borderRadius: 8,
+        padding: '16px',
+        transition: 'border .2s',
+      }}>
+        <div style={{ fontSize:9, color:'#60a5fa88', letterSpacing:'.12em', marginBottom:10 }}>
+          DATA CONSENT — DPDP ACT 2023
+        </div>
+        <label style={{ display:'flex', gap:12, alignItems:'flex-start', cursor:'pointer' }}>
+          <input
+            type="checkbox"
+            checked={consentGiven}
+            onChange={e => setConsentGiven(e.target.checked)}
+            style={{ marginTop:2, width:14, height:14, accentColor:'#22c55e', flexShrink:0, cursor:'pointer' }}
+            aria-required="true"
+            aria-label="I consent to data processing under DPDP Act 2023"
+          />
+          <span style={{ fontSize:10, color:'#86efac88', lineHeight:1.8 }}>
+            I voluntarily consent to EtherTrack collecting, storing, and processing my personal data
+            (name, ID number hash, phone number, and identity document) for KYC verification purposes
+            under the <strong style={{ color:'#86efac' }}>Digital Personal Data Protection Act, 2023</strong>.
+            I understand that:
+            <ul style={{ margin:'8px 0 0 0', paddingLeft:16, color:'#86efac66' }}>
+              <li style={{ marginBottom:4 }}>My raw ID number is never stored — only a cryptographic hash</li>
+              <li style={{ marginBottom:4 }}>My document is encrypted before being stored on IPFS</li>
+              <li style={{ marginBottom:4 }}>I can request deletion of my data under §13 of the DPDP Act</li>
+              <li style={{ marginBottom:4 }}>My data will not be shared with third parties without consent</li>
+              <li>Consent can be withdrawn by contacting <strong style={{ color:'#86efac88' }}>privacy@ethertrack.in</strong></li>
+            </ul>
+          </span>
+        </label>
+      </div>
+
+      {!consentGiven && (
+        <div style={{ fontSize:10, color:'#f87171', textAlign:'center', letterSpacing:'.04em' }}>
+          ⚠ You must provide consent before submitting
+        </div>
+      )}
 
       {submitError && (
         <div style={S.errorBox} role="alert" aria-live="assertive">
@@ -385,19 +437,18 @@ const KYCFormInner = ({ onComplete }) => {
   const { user, dbUser, handleKycComplete } = useContext(AuthContext);
   const { addNotification, NOTIF_TYPES }    = useNotifications();
 
-  // Step
   const [step, setStep] = useState(0);
 
   // Identity
   const [fullName,  setFullName]  = useState(dbUser?.full_name || user?.displayName || '');
   const [idType,    setIdType]    = useState('');
-  const [idNumber,  setIdNumber]  = useState('');  // cleared after submit
+  const [idNumber,  setIdNumber]  = useState('');
 
   // Document
   const [docFile,        setDocFile]        = useState(null);
   const [docPreview,     setDocPreview]     = useState('');
   const [uploadProgress, setUploadProgress] = useState(0);
-  const [docIpfsHash,    setDocIpfsHash]    = useState(null); // stored after upload
+  const [docIpfsHash,    setDocIpfsHash]    = useState(null);
 
   // Phone
   const [countryCode,   setCountryCode]   = useState('IN');
@@ -410,20 +461,21 @@ const KYCFormInner = ({ onComplete }) => {
   const [verifyingOtp,  setVerifyingOtp]  = useState(false);
   const [otpTimer,      setOtpTimer]      = useState(0);
 
+  // Consent
+  const [consentGiven, setConsentGiven] = useState(false);
+
   // Submit
   const [submitting,  setSubmitting]  = useState(false);
   const [submitted,   setSubmitted]   = useState(false);
   const [submitStep,  setSubmitStep]  = useState('');
   const [submitError, setSubmitError] = useState('');
 
-  // Validation
   const [errors, setErrors] = useState({});
 
   const recaptchaRef = useRef(null);
   const timerRef     = useRef(null);
-  const stepRefs     = useRef([]);  // for focus management
+  const stepRefs     = useRef([]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (window.recaptchaVerifier) {
@@ -431,7 +483,6 @@ const KYCFormInner = ({ onComplete }) => {
         window.recaptchaVerifier = null;
       }
       if (timerRef.current) clearInterval(timerRef.current);
-      // Zero sensitive state on unmount
       setIdNumber('');
       setConfirmResult(null);
     };
@@ -464,31 +515,52 @@ const KYCFormInner = ({ onComplete }) => {
     });
   }, []);
 
-  // Build full E.164 phone
   const fullPhone = useMemo(() => {
     if (!phone || !countryCode) return '';
     const parsed = parsePhoneNumberFromString(phone, countryCode);
     return parsed?.format('E.164') || '';
   }, [phone, countryCode]);
 
+  // ── Send OTP — with debug logs to diagnose Firebase issues ───────────────
   const handleSendOtp = useCallback(async () => {
     if (!phone.trim()) { setErrors({ phone: 'Phone number is required.' }); return; }
     if (!fullPhone)    { setErrors({ phone: 'Enter a valid phone number for the selected country.' }); return; }
+
+    // DEBUG — remove after OTP issue resolved
+    console.log('[OTP] fullPhone:', fullPhone);
+    console.log('[OTP] auth object:', auth);
+    console.log('[OTP] recaptcha-container exists:', !!document.getElementById('recaptcha-container'));
+
     setSendingOtp(true); setErrors({});
     try {
       setupRecaptcha();
+
+      // DEBUG
+      console.log('[OTP] recaptchaVerifier:', window.recaptchaVerifier);
+
       const result = await signInWithPhoneNumber(auth, fullPhone, window.recaptchaVerifier);
+
+      // DEBUG
+      console.log('[OTP] signInWithPhoneNumber result:', result);
+
       setConfirmResult(result);
       setOtpSent(true);
       startTimer();
     } catch (err) {
+      // DEBUG
+      console.error('[OTP] Firebase error code:', err.code);
+      console.error('[OTP] Firebase error message:', err.message);
+      console.error('[OTP] Full error:', err);
+
       const MAP = {
         'auth/invalid-phone-number':  'Invalid phone number format.',
         'auth/too-many-requests':     'Too many attempts. Please wait a few minutes.',
         'auth/quota-exceeded':        'SMS quota exceeded. Try again later.',
         'auth/captcha-check-failed':  'reCAPTCHA failed. Please refresh and retry.',
+        'auth/missing-phone-number':  'Phone number is missing.',
+        'auth/internal-error':        'Firebase internal error. Please try again.',
       };
-      setErrors({ phone: MAP[err.code] || 'Failed to send OTP. Please try again.' });
+      setErrors({ phone: MAP[err.code] || `Failed to send OTP: ${err.code || err.message}` });
     } finally { setSendingOtp(false); }
   }, [phone, fullPhone, setupRecaptcha, startTimer]);
 
@@ -499,11 +571,10 @@ const KYCFormInner = ({ onComplete }) => {
     try {
       await confirmResult.confirm(otp);
       setOtpVerified(true);
-      // Zero confirmation result after use
       setConfirmResult(null);
     } catch (err) {
       const MAP = {
-        'auth/code-expired':       'Code expired. Please resend.',
+        'auth/code-expired':              'Code expired. Please resend.',
         'auth/invalid-verification-code': 'Invalid code. Please try again.',
       };
       setErrors({ otp: MAP[err.code] || 'Invalid code. Please try again.' });
@@ -526,7 +597,7 @@ const KYCFormInner = ({ onComplete }) => {
       setErrors({ doc: 'File too large — maximum 5MB.' }); return;
     }
     setDocFile(file);
-    setDocIpfsHash(null); // reset if re-selecting
+    setDocIpfsHash(null);
     setErrors({});
     if (file.type.startsWith('image/')) {
       const reader = new FileReader();
@@ -555,7 +626,6 @@ const KYCFormInner = ({ onComplete }) => {
   const nextStep = useCallback(() => {
     if (validateStep()) {
       setStep(s => s + 1);
-      // Move focus to new step heading
       setTimeout(() => stepRefs.current[step + 1]?.focus(), 100);
     }
   }, [validateStep, step]);
@@ -566,50 +636,41 @@ const KYCFormInner = ({ onComplete }) => {
     setTimeout(() => stepRefs.current[step - 1]?.focus(), 100);
   }, [step]);
 
-  // ── FIXED: use apiFetchMultipartWithProgress instead of raw XHR ──────────
-  // Previously this function built its own XHR and read the CSRF token with
-  //   document.cookie.match(/csrf_token=([^;]+)/)
-  // but the server sets the cookie as XSRF-TOKEN (read in api.js via getCsrfToken).
-  // The name mismatch meant the header was never sent, causing the 403.
-  //
-  // Additionally the Authorization: Bearer header has been removed — the
-  // /api/ipfs/pin-kyc-doc route uses authenticate() which relies on the httpOnly
-  // session cookie, not a Firebase idToken. Mixing auth schemes caused some CSRF
-  // middleware configurations to reject the request.
   const uploadDocToIPFS = useCallback(async (file) => {
     const formData = new FormData();
     formData.append('file', file);
-
     const { promise } = apiFetchMultipartWithProgress(
       '/api/ipfs/pin-kyc-doc',
       formData,
-      {},                                        // no extra headers needed
+      {},
       (pct) => setUploadProgress(pct),
     );
-
     const data = await promise;
     if (!data?.ipfsHash) throw new Error('Invalid IPFS response');
     return data.ipfsHash;
   }, []);
 
+  // ── Submit — gated by DPDP consent ───────────────────────────────────────
   const handleSubmit = useCallback(async () => {
+    if (!consentGiven) {
+      setSubmitError('You must provide consent to process your personal data before submitting.');
+      return;
+    }
+
     setSubmitting(true);
     setSubmitError('');
     setUploadProgress(0);
 
     try {
-      // Upload doc (if not already uploaded — avoid re-upload on retry)
       let hash = docIpfsHash;
       if (!hash) {
         setSubmitStep('Uploading document securely…');
         hash = await uploadDocToIPFS(docFile);
         setDocIpfsHash(hash);
-        // Clear file preview from memory after successful upload
         setDocPreview('');
         setDocFile(null);
       }
 
-      // Submit to backend — server computes hashes, we send raw idNumber over TLS
       setSubmitStep('Submitting KYC for review…');
       const idempotencyKey = `kyc-${user.uid}-${Date.now()}`;
 
@@ -619,9 +680,11 @@ const KYCFormInner = ({ onComplete }) => {
         body: JSON.stringify({
           fullName:     fullName.trim(),
           idType,
-          idNumber:     idNumber.trim(), // server normalizes and hashes
+          idNumber:     idNumber.trim(),
           phone:        fullPhone || null,
           docIpfsHash:  hash,
+          consentGiven: true,
+          consentAt:    new Date().toISOString(),
         }),
       });
 
@@ -630,9 +693,7 @@ const KYCFormInner = ({ onComplete }) => {
         return;
       }
 
-      // Zero sensitive state after successful submission
       setIdNumber('');
-
       setSubmitStep('All done!');
       addNotification({
         type:    NOTIF_TYPES?.KYC || 'KYC',
@@ -655,11 +716,11 @@ const KYCFormInner = ({ onComplete }) => {
       setSubmitting(false);
       setSubmitStep('');
     }
-  }, [docFile, docIpfsHash, fullName, idType, idNumber, fullPhone, uploadDocToIPFS, addNotification, NOTIF_TYPES, user?.uid]);
+  }, [consentGiven, docFile, docIpfsHash, fullName, idType, idNumber, fullPhone, uploadDocToIPFS, addNotification, NOTIF_TYPES, user?.uid]);
 
   const progress = ((step + 1) / STEPS.length) * 100;
 
-  // ── Submitted screen ────────────────────────────────────────────────────
+  // ── Submitted screen ──────────────────────────────────────────────────────
   if (submitted) {
     return (
       <div style={S.page} role="main">
@@ -693,13 +754,12 @@ const KYCFormInner = ({ onComplete }) => {
     );
   }
 
-  // ── Main form ───────────────────────────────────────────────────────────
+  // ── Main form ─────────────────────────────────────────────────────────────
   return (
     <div style={S.page} role="main">
       <div id="recaptcha-container" ref={recaptchaRef} aria-hidden="true" />
 
       <div style={S.card} role="form" aria-label="KYC Verification form">
-        {/* Step header — receives focus on step change for a11y */}
         <div ref={el => stepRefs.current[step] = el} tabIndex={-1} style={{ outline:'none' }}>
           <div style={S.eyebrow}>KYC VERIFICATION · ETHERTRACK</div>
           <h1 style={S.title} id="step-heading">
@@ -711,12 +771,10 @@ const KYCFormInner = ({ onComplete }) => {
           <div style={S.sub} aria-live="polite">Step {step + 1} of {STEPS.length}</div>
         </div>
 
-        {/* Progress bar */}
         <div style={S.progressBg} role="progressbar" aria-valuenow={Math.round(progress)} aria-valuemin={0} aria-valuemax={100} aria-label={`KYC progress: step ${step+1} of ${STEPS.length}`}>
           <div style={{ ...S.progressFill, width:`${progress}%` }} />
         </div>
 
-        {/* Step dots */}
         <nav style={S.stepNav} aria-label="KYC steps">
           {STEPS.map((s, i) => (
             <div key={s.id} style={{ ...S.stepDot, ...(i <= step ? S.stepDotActive : {}) }}
@@ -727,7 +785,6 @@ const KYCFormInner = ({ onComplete }) => {
           ))}
         </nav>
 
-        {/* Step content */}
         {step === 0 && <IdentityStep {...{ fullName, setFullName, idType, setIdType, idNumber, setIdNumber, errors }} />}
         {step === 1 && <DocumentStep {...{ docFile, docPreview, uploadProgress, onFileSelect: handleDocSelect, errors }} />}
         {step === 2 && <PhoneStep {...{
@@ -736,9 +793,12 @@ const KYCFormInner = ({ onComplete }) => {
           sendingOtp, verifyingOtp, otpTimer, errors,
           onSendOtp: handleSendOtp, onVerifyOtp: handleVerifyOtp, onResendOtp: handleResendOtp,
         }} />}
-        {step === 3 && <ReviewStep {...{ fullName, idType, idNumber, docFile, countryCode, phone, otpVerified, submitError, submitting, submitStep, uploadProgress }} />}
+        {step === 3 && <ReviewStep {...{
+          fullName, idType, idNumber, docFile, countryCode, phone,
+          otpVerified, submitError, submitting, submitStep, uploadProgress,
+          consentGiven, setConsentGiven,
+        }} />}
 
-        {/* Navigation */}
         <div style={{ display:'flex', gap:10, marginTop:24 }}>
           {step > 0 && (
             <button style={{ ...S.btnOutline, flex:1 }} onClick={prevStep} disabled={submitting}
@@ -752,9 +812,9 @@ const KYCFormInner = ({ onComplete }) => {
             </button>
           ) : (
             <button
-              style={{ ...S.btn, flex:1, opacity: submitting ? 0.6 : 1 }}
+              style={{ ...S.btn, flex:1, opacity: (submitting || !consentGiven) ? 0.5 : 1 }}
               onClick={handleSubmit}
-              disabled={submitting}
+              disabled={submitting || !consentGiven}
               aria-busy={submitting}
               aria-label={submitting ? submitStep || 'Processing KYC submission' : 'Submit KYC for review'}
             >
@@ -786,7 +846,7 @@ const S = {
   inputErr:     { borderColor:'#dc2626' },
   errMsg:       { fontSize:10, color:'#f87171', letterSpacing:'.04em' },
   hint:         { fontSize:9, color:'#86efac33', marginTop:2, lineHeight:1.6 },
-  uploadBox:    { position:'relative', border:'1px dashed #0f2a1a', borderRadius:8, padding:'28px 16px', textAlign:'center', background:'#060a07', cursor:'pointer', transition:'border-color .2s', display:'flex', flexDirection:'column', alignItems:'center', minHeight:100 },
+  uploadBox:    { position:'relative', borderRadius:8, padding:'28px 16px', textAlign:'center', background:'#060a07', cursor:'pointer', transition:'border .2s', display:'flex', flexDirection:'column', alignItems:'center', minHeight:100 },
   btn:          { padding:'13px', borderRadius:8, border:'none', background:'linear-gradient(135deg,#16a34a,#15803d)', color:'#fff', cursor:'pointer', fontFamily:"'DM Mono',monospace", fontSize:12, fontWeight:700, letterSpacing:'.1em', transition:'opacity .2s' },
   btnOutline:   { padding:'13px', borderRadius:8, border:'1px solid #0f2a1a', background:'transparent', color:'#4ade8077', cursor:'pointer', fontFamily:"'DM Mono',monospace", fontSize:12, letterSpacing:'.08em' },
   verifiedBadge:{ padding:'12px 16px', borderRadius:8, background:'#0d2e1f', border:'1px solid #22c55e33', color:'#22c55e', fontSize:12, textAlign:'center', letterSpacing:'.04em' },

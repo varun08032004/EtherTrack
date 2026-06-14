@@ -1,51 +1,11 @@
 // routes/auth.js — EtherTrack
 // ─────────────────────────────────────────────────────────────────
-// SECURITY FIXES APPLIED (v3):
-//
-// [FIX-1]  /verify-email — rate limited (5 attempts / 10 min / email),
-//          otp_attempts counter, OTP invalidated after 5 failures.
-//          OTP now stored as bcrypt hash (cost 8), compared with bcrypt.compare.
-//
-// [FIX-2]  Refresh tokens stored as SHA-256 hash in DB.
-//          Plain token returned to client, hash stored — DB leak = useless tokens.
-//
-// [FIX-3]  /login, /firebase-sync, /verify-email — accessToken + refreshToken
-//          REMOVED from JSON response body. httpOnly cookies are the sole
-//          transport. Only the user object is returned.
-//
-// [FIX-4]  /firebase-sync — fullName sanitized (strip HTML, max 100 chars).
-//
-// [FIX-5]  POST /resend-otp — new endpoint, rate limited 3× per hour per email.
-//
-// [FIX-6]  PATCH /profile — email change now sets email_verified=FALSE,
-//          generates new OTP, sends re-verification email. Login blocked
-//          until re-verified (existing login check covers this).
-//
-// [FIX-7]  POST /logout — switched to optionalAuth so expired access tokens
-//          can still trigger a logout and cookie clear.
-//
-// [FIX-8]  Avatar filename uses MIME-derived extension, not originalname.
-//
-// [FIX-9]  /upload-avatar — e.message no longer leaked in prod response.
-//
-// [FIX-10] bcryptjs → bcrypt (native, runs in libuv thread, non-blocking).
-//          Falls back to bcryptjs if native bcrypt not installed.
-//
-// [FIX-11] support ticket message sanitized (HTML escaped, max 2000 chars).
-//
-// [FIX-12] Firebase Admin SDK moved to lib/firebaseAdmin.js — fails fast
-//          on missing env vars instead of silently initialising with undefined.
-//
-// [FIX-IPv6] makeEmailLimiter keyGenerator now uses ipKeyGenerator(req)
-//          instead of req.ip directly — fixes ERR_ERL_KEY_GEN_IPV6 warning
-//          from express-rate-limit v7+.
-//
-// [FIX-13] /login — provider guard added. Firebase/OAuth users (password_hash
-//          starts with 'firebase:') are rejected with USE_SOCIAL_LOGIN code
-//          instead of silently failing bcrypt.compare.
-//          email_verified check restored with EMAIL_NOT_VERIFIED code so
-//          frontend can show a specific actionable message.
-//          provider column added to SELECT.
+// SECURITY FIXES APPLIED (v4):
+// [FIX-14] /register — now creates user in Firebase Console too via
+//          admin.auth().createUser(). Firebase failure is non-blocking.
+//          firebase_uid and provider='email' saved to public.users.
+// [FIX-15] /verify-email — marks emailVerified=true in Firebase after
+//          OTP verification succeeds.
 // ─────────────────────────────────────────────────────────────────
 
 'use strict';
@@ -59,7 +19,6 @@ const crypto  = require('crypto');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const { body, validationResult } = require('express-validator');
 
-// [FIX-10] prefer native bcrypt (non-blocking), fall back to bcryptjs
 let bcrypt;
 try {
   bcrypt = require('bcrypt');
@@ -71,16 +30,12 @@ try {
 const { safeQuery, withTransaction } = require('../db/pool');
 const { generateOTP, sendVerificationEmail, sendWelcomeEmail } = require('../services/email');
 const { authenticate, optionalAuth } = require('../middleware/auth');
-
-// [FIX-12] Firebase Admin from dedicated module (fails fast on missing env)
 const admin = require('../lib/firebaseAdmin');
 
-// ── 2FA routes + cookie helpers ───────────────────────────────────
 const twoFA = require('./auth2fa');
 const { setAuthCookies, clearAuthCookies } = require('./auth2fa');
 router.use('/2fa', twoFA);
 
-// ── HTML escape helper ────────────────────────────────────────────
 const escHtml = (s) =>
   String(s)
     .replace(/&/g, '&amp;')
@@ -89,10 +44,8 @@ const escHtml = (s) =>
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#x27;');
 
-// ── Refresh token hashing ─────────────────────────────────────────
 const hashToken = (t) => crypto.createHash('sha256').update(t).digest('hex');
 
-// ── Avatar upload config ──────────────────────────────────────────
 const MIME_TO_EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp' };
 
 const avatarStorage = multer.diskStorage({
@@ -115,7 +68,6 @@ const avatarUpload = multer({
   },
 });
 
-// ── Token generation ──────────────────────────────────────────────
 const generateTokens = (userId) => ({
   accessToken:  jwt.sign({ userId }, process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRES_IN || '15m' }),
@@ -123,7 +75,6 @@ const generateTokens = (userId) => ({
     { expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d' }),
 });
 
-// ── Activity log helper ───────────────────────────────────────────
 const logActivity = async (userId, action, meta = {}, ipHint = null) => {
   try {
     await safeQuery(
@@ -136,7 +87,6 @@ const logActivity = async (userId, action, meta = {}, ipHint = null) => {
   }
 };
 
-// ── Per-email rate limiter factory ────────────────────────────────
 const makeEmailLimiter = (max, windowMs) =>
   rateLimit({
     windowMs,
@@ -169,12 +119,29 @@ router.post('/register', [
     const otpHash      = await bcrypt.hash(otp, 8);
     const otpExpires   = new Date(Date.now() + 10 * 60 * 1000);
 
+    // ── [FIX-14] Create user in Firebase Console ──────────────────
+    let firebaseUid = null;
+    try {
+      const firebaseUser = await admin.auth().createUser({
+        email,
+        password,
+        displayName:   fullName,
+        emailVerified: false,
+      });
+      firebaseUid = firebaseUser.uid;
+      console.log('[register] Firebase user created:', firebaseUid);
+    } catch (firebaseErr) {
+      // Non-blocking — registration continues even if Firebase fails
+      console.warn('[register] Firebase user creation failed:', firebaseErr.message);
+    }
+
     const { rows } = await safeQuery(
       `INSERT INTO users
-         (email, password_hash, full_name, company_name, email_otp, email_otp_expires, otp_attempts)
-       VALUES ($1,$2,$3,$4,$5,$6,0)
+         (email, password_hash, full_name, company_name, email_otp, email_otp_expires,
+          otp_attempts, firebase_uid, provider)
+       VALUES ($1,$2,$3,$4,$5,$6,0,$7,'email')
        RETURNING id, email, full_name, role`,
-      [email, passwordHash, fullName, companyName || null, otpHash, otpExpires]
+      [email, passwordHash, fullName, companyName || null, otpHash, otpExpires, firebaseUid]
     );
 
     sendVerificationEmail(email, otp, fullName).catch(e =>
@@ -251,7 +218,7 @@ router.post('/verify-email',
     const { email, otp } = req.body;
     try {
       const { rows } = await safeQuery(
-        `SELECT id, email_otp, email_otp_expires, full_name, otp_attempts
+        `SELECT id, email_otp, email_otp_expires, full_name, otp_attempts, firebase_uid
          FROM users WHERE email=$1`,
         [email]
       );
@@ -293,6 +260,16 @@ router.post('/verify-email',
         [user.id]
       );
 
+      // ── [FIX-15] Sync email verified status to Firebase ───────────
+      if (user.firebase_uid) {
+        try {
+          await admin.auth().updateUser(user.firebase_uid, { emailVerified: true });
+          console.log('[verify-email] Firebase emailVerified synced:', user.firebase_uid);
+        } catch (firebaseErr) {
+          console.warn('[verify-email] Firebase sync failed:', firebaseErr.message);
+        }
+      }
+
       sendWelcomeEmail(email, user.full_name).catch(e =>
         console.error('[verify-email] welcome email failed:', e.message)
       );
@@ -315,7 +292,6 @@ router.post('/verify-email',
 
 /* ─────────────────────────────────────────────────────────────────
    LOGIN — with 2FA support
-   [FIX-13] Provider guard + proper error codes
 ───────────────────────────────────────────────────────────────── */
 router.post('/login', [
   body('email').isEmail().normalizeEmail(),
@@ -340,7 +316,6 @@ router.post('/login', [
 
     if (!user.is_active) return res.status(403).json({ error: 'Account disabled' });
 
-    // [FIX-13] Firebase/OAuth users have no bcrypt hash — cannot use password login
     if (!user.password_hash || user.password_hash.startsWith('firebase:')) {
       return res.status(401).json({
         error: 'This account was created with Google or Facebook. Please use the social login button.',
@@ -351,7 +326,6 @@ router.post('/login', [
     const match = await bcrypt.compare(password, user.password_hash);
     if (!match) return res.status(401).json({ error: 'Invalid credentials' });
 
-    // [FIX-13] Restored with actionable error code
     if (!user.email_verified) {
       return res.status(403).json({
         error: 'Email not verified. Check your inbox for the verification code.',
@@ -361,7 +335,6 @@ router.post('/login', [
 
     await safeQuery('UPDATE users SET last_login=NOW() WHERE id=$1', [user.id]);
 
-    // ── 2FA check ────────────────────────────────────────────────
     if (user.two_fa_enabled) {
       const tempToken = jwt.sign(
         { userId: user.id, type: '2fa_pending' },
