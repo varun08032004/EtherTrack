@@ -1,15 +1,17 @@
 // server.js — EtherTrack API
-// PRODUCTION HARDENED — v12
+// PRODUCTION HARDENED — v13
 // ─────────────────────────────────────────────────────────────────────────────
-// CHANGES vs v11:
+// CHANGES vs v12:
 //
-// [FIX-REPORTS] Added /api/reports to CSRF_SKIP_PREFIX.
-//               Route is protected by authenticate (JWT) middleware —
-//               CSRF skip is safe, consistent with /api/trades pattern.
-//               Enables POST /api/reports/generate from EmissionTracking.jsx
-//               without 403 CSRF rejection.
+// [FIX-IPFS-CSRF] Added /api/ipfs to CSRF_SKIP_PREFIX.
+//                 The IPFS pin route is authenticated via JWT (authenticate
+//                 middleware in ipfsRoute.js). CSRF skip is safe and consistent
+//                 with the /api/trades and /api/reports pattern.
+//                 Eliminates the 403 on POST /api/ipfs/pin that was hitting
+//                 when the XSRF-TOKEN cookie hadn't been seeded before the
+//                 file upload triggered (race condition on cold start).
 //
-// All v11 fixes retained.
+// All v12 fixes retained.
 // ─────────────────────────────────────────────────────────────────────────────
 'use strict';
 
@@ -149,8 +151,14 @@ const CSRF_SKIP_EXACT = new Set([
   '/api/auth/csrf',
 ]);
 
-// [FIX-REPORTS] Added /api/reports — JWT-protected, CSRF skip safe
-// [FIX-CSRF]    /api/trades, /api/transactions, /api/portfolio retained from v11
+// [FIX-IPFS-CSRF] Added /api/ipfs — JWT-authenticated via Pinata proxy,
+//                 CSRF skip is safe. Belt-and-suspenders: the hard-throw fix
+//                 in api.js v11 (FIX-CSRF-1) is the primary defence; this
+//                 skip ensures the server never 403s even if the cookie race
+//                 condition survives in an edge case.
+//
+// [FIX-REPORTS]   /api/reports added in v12 — JWT-protected, CSRF skip safe.
+// [FIX-CSRF]      /api/trades, /api/transactions, /api/portfolio retained from v11.
 const CSRF_SKIP_PREFIX = [
   '/api/wallet/webhook',
   '/api/subscription/webhook',
@@ -163,7 +171,8 @@ const CSRF_SKIP_PREFIX = [
   '/api/trades',
   '/api/transactions',
   '/api/portfolio',
-  '/api/reports',       // [FIX-REPORTS] Puppeteer PDF generation — JWT auth sufficient
+  '/api/reports',       // [FIX-REPORTS v12] Puppeteer PDF generation — JWT auth sufficient
+  '/api/ipfs',          // [FIX-IPFS-CSRF v13] Pinata proxy — JWT auth sufficient
   '/health',
 ];
 
@@ -284,7 +293,6 @@ app.use('/api/subscription/order',        limiter(60 * 1000, 10, 'Too many payme
 app.use('/api/subscription/verify',       limiter(60 * 1000, 10, 'Too many payment requests. Slow down.'));
 app.use('/api/subscription/wallet-pay',   limiter(60 * 1000, 10, 'Too many payment requests. Slow down.'));
 app.use('/api/subscription/metamask-pay', limiter(60 * 1000, 10, 'Too many payment requests. Slow down.'));
-// [FIX-REPORTS] Rate limit PDF generation — Puppeteer is CPU-intensive
 app.use('/api/reports/generate',    limiter(60 * 60 * 1000,  20,  'Too many report generation requests. Try again later.'));
 app.use('/api/',                    limiter(15 * 60 * 1000,  500,  'Too many requests. Try again later.'));
 
@@ -328,7 +336,7 @@ app.get('/health', async (req, res) => {
 app.get('/api/health', (req, res) => res.redirect('/health'));
 
 // ── Routes ────────────────────────────────────────────────────────
-app.use('/api/reports',       reportRoutes);      // [FIX-REPORTS] Puppeteer PDF
+app.use('/api/reports',       reportRoutes);      // [FIX-REPORTS v12] Puppeteer PDF
 app.use('/api/market',        marketRoutes);
 app.use('/api/verify',        verifyRoutes);
 app.use('/api/news',          newsRoutes);

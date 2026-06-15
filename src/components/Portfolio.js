@@ -9,7 +9,7 @@ import React, {
 import { useNavigate } from 'react-router-dom';
 import { AuthContext } from '../App';
 import { usePortfolio, vintagePenalty } from '../context/PortfolioContext';
-import { txAPI, apiFetch } from '../services/api';
+import { txAPI, apiFetch, apiFetchMultipart } from '../services/api';
 import { generateReport } from '../services/ReportPDF';
 import ErrorBoundary from '../components/ErrorBoundary';
 import {
@@ -1103,6 +1103,7 @@ export default function PortfolioV3() {
   }, [isKYCVerified]);
 
   // AFTER
+// REPLACE WITH
 useEffect(() => {
   loadPendingCredits();
   loadEmissionsData();
@@ -1110,7 +1111,8 @@ useEffect(() => {
   refreshBoughtCredits && refreshBoughtCredits();
   const ethInterval = setInterval(fetchEthPrice, 5 * 60 * 1000);
   return () => clearInterval(ethInterval);
-}, []);
+// eslint-disable-next-line react-hooks/exhaustive-deps
+}, [refreshBoughtCredits]);
 
 // Watchlist gated on auth — fires once user session is confirmed
 useEffect(() => {
@@ -1456,12 +1458,12 @@ useEffect(() => {
 
   // ── IPFS upload via backend proxy ──────────────────────────────
   const uploadDocToIPFS = async (file) => {
-    const fd = new FormData();
-    fd.append('file', file);
-    const res = await apiFetch('/api/ipfs/pin', { method:'POST', body:fd });
-    if (!res?.ipfsHash) throw new Error('IPFS upload failed — no hash returned');
-    return res.ipfsHash;
-  };
+  const fd = new FormData();
+  fd.append('file', file);
+  const res = await apiFetchMultipart('/api/ipfs/pin', fd);
+  if (!res?.ipfsHash) throw new Error('IPFS upload failed — no hash returned');
+  return res.ipfsHash;
+};
 
   // ── Submit credit ──────────────────────────────────────────────
   const handleRegister = async () => {
@@ -1700,7 +1702,7 @@ const handleBulkRetire = async () => {
   for (let i = 0; i < selectedCredits.length; i++) {
     const credit = selectedCredits[i];
     try {
-      await retireCredit(credit.tokenId, credit.heldCredits ?? credit.credits);
+      await retireCredit(credit.tokenId, credit.heldCredits ?? credit.credits, '1', {});
       setBulkProgress(p => ({ ...p, done: p.done + 1 }));
     } catch (e) {
       setBulkProgress(p => ({ ...p, failed: p.failed + 1 }));
@@ -1728,7 +1730,12 @@ const handleBulkRetire = async () => {
       }
 
       setTxPending('Burning tokens on blockchain…');
-      const result     = await retireCredit(credit.tokenId ?? credit.id, qty);
+if (credit.tokenId == null) {
+  showToast('Credit not yet minted on-chain — cannot retire', 'error');
+  setTxPending('');
+  return;
+}
+const result = await retireCredit(credit.tokenId, qty);
       const retiredAt  = Date.now();
       const rawTokenId = credit.tokenId != null
         ? String(credit.tokenId).padStart(8, '0') : 'XXXXXXXX';
@@ -2306,7 +2313,7 @@ const handleBulkRetire = async () => {
                   borderRadius:14, padding:'14px 22px', marginBottom:24,
                   fontSize:10, color:'#f8717166', display:'flex', alignItems:'center', gap:10 }}>
                   ⚠️ Watchlist unavailable.
-                  <button onClick={loadWatchlist}
+                  <button onClick={() => user && loadWatchlist()}
                     style={{ marginLeft:'auto', padding:'5px 12px', borderRadius:5,
                       border:'1px solid #f8717133', background:'transparent',
                       color:'#f8717188', cursor:'pointer',

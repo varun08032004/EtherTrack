@@ -1,13 +1,19 @@
 // src/services/api.js — EtherTrack
-// PRODUCTION HARDENED — v10
+// PRODUCTION HARDENED — v11
 // ─────────────────────────────────────────────────────────────────────────────
-// CHANGES vs v9:
+// CHANGES vs v10:
 //
-// [API-v10] authAPI.resendOtp added — called by Signup.jsx OTP step.
-//           authAPI.login now passes error.code through so Login.jsx can
-//           handle USE_SOCIAL_LOGIN and EMAIL_NOT_VERIFIED codes.
+// [FIX-CSRF-1] apiFetch: replaced silent `if (csrf)` guard with a hard throw
+//              when CSRF token is empty on write requests. Prevents silent 403
+//              on /api/ipfs/pin and any other write route where the cookie
+//              hasn't been seeded yet.
 //
-// All v9 APIs retained unchanged.
+// [FIX-CSRF-2] ensureCsrfCookie: seed delay bumped 30 ms → 150 ms.
+//              30 ms was too tight under cold-start / slow network; the cookie
+//              was not reliably readable by getCsrfToken() before the next
+//              apiFetch call proceeded.
+//
+// All v10 APIs retained unchanged.
 // ─────────────────────────────────────────────────────────────────────────────
 'use strict';
 
@@ -48,10 +54,12 @@ async function ensureCsrfCookie() {
           method: 'GET', credentials: 'include',
         });
         if (res.ok || res.status === 204) {
-          await new Promise(r => setTimeout(r, 30));
+          // [FIX-CSRF-2] 30 ms was too tight — bumped to 150 ms so the cookie
+          // is reliably readable by getCsrfToken() before the caller proceeds.
+          await new Promise(r => setTimeout(r, 150));
         }
       } catch {
-        // Non-fatal
+        // Non-fatal — caller will hard-throw if token still missing
       } finally {
         _csrfPromise = null;
       }
@@ -88,16 +96,30 @@ export const apiFetch = async (path, options = {}, retry = true) => {
   const isFormData  = options.body instanceof FormData;
   const isWrite     = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
 
-  if (isWrite && !isAuthRoute) await ensureCsrfCookie();
+  // [FIX-CSRF-1] Seed cookie first, then hard-throw if still empty.
+  // Previously the code did `if (csrf) headers['X-CSRF-Token'] = csrf` which
+  // silently sent the request with no token, causing a server 403 that was
+  // confusing to debug (especially on /api/ipfs/pin).
+  if (isWrite && !isAuthRoute) {
+    await ensureCsrfCookie();
+    const csrf = getCsrfToken();
+    if (!csrf) {
+      throw Object.assign(
+        new Error('Could not obtain CSRF token. Refresh the page and try again.'),
+        { status: 403 }
+      );
+    }
+    // headers built below — csrf variable is in scope
+  }
 
   const headers = {
     ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
     ...options.headers,
   };
 
-  if (isWrite) {
-    const csrf = getCsrfToken();
-    if (csrf) headers['X-CSRF-Token'] = csrf;
+  if (isWrite && !isAuthRoute) {
+    // getCsrfToken() is guaranteed non-empty here (hard-throw above)
+    headers['X-CSRF-Token'] = getCsrfToken();
   }
 
   const { signal, clear } = withTimeout(REQUEST_TIMEOUT);
