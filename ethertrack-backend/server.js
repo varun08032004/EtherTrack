@@ -136,9 +136,14 @@ const CSRF_TOKEN_KEY  = 'XSRF-TOKEN';
 const seedCsrfToken = (req, res) => {
   const existing = req.cookies?.[CSRF_SECRET_KEY];
   const secret   = existing || crypto.randomBytes(32).toString('hex');
-  const OPTS     = { sameSite: 'strict', secure: IS_PROD, maxAge: 24 * 60 * 60 * 1000 };
+  const OPTS = {
+  sameSite: IS_PROD ? 'none' : 'lax',
+  secure: IS_PROD,
+  maxAge: 24 * 60 * 60 * 1000,
+};
   res.cookie(CSRF_SECRET_KEY, secret, { ...OPTS, httpOnly: true  });
   res.cookie(CSRF_TOKEN_KEY,  secret, { ...OPTS, httpOnly: false });
+  return secret;
 };
 
 const CSRF_SKIP_EXACT = new Set([
@@ -244,6 +249,7 @@ app.use((req, res, next) => {
 const ALLOWED_ORIGINS = [
   'http://localhost:3000',
   'https://ethertrackapp.vercel.app',
+   'https://app.ethertrack.in',
   process.env.FRONTEND_URL,
 ].filter(Boolean);
 
@@ -302,8 +308,8 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(csrfProtect);
 
 app.get('/api/auth/csrf', (req, res) => {
-  seedCsrfToken(req, res);
-  res.status(204).end();
+  const csrfToken = seedCsrfToken(req, res);
+  res.json({ csrfToken });
 });
 
 const SERVER_START = Date.now();

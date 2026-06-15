@@ -1,19 +1,18 @@
 // src/services/api.js — EtherTrack
-// PRODUCTION HARDENED — v11
+// PRODUCTION HARDENED — v12
 // ─────────────────────────────────────────────────────────────────────────────
-// CHANGES vs v10:
+// CHANGES vs v11:
 //
-// [FIX-CSRF-1] apiFetch: replaced silent `if (csrf)` guard with a hard throw
-//              when CSRF token is empty on write requests. Prevents silent 403
-//              on /api/ipfs/pin and any other write route where the cookie
-//              hasn't been seeded yet.
+// [FIX-CSRF-XDOMAIN] Replaced cookie-based CSRF token read with in-memory
+//                    storage. Frontend on app.ethertrack.in and backend on
+//                    ethertrack.onrender.com are different domains — browsers
+//                    (Safari ITP, Firefox strict, Chrome partitioned cookies)
+//                    block cross-domain cookies even with SameSite:none.
+//                    Token is now returned in the JSON body of /api/auth/csrf
+//                    and stored in a module-level variable. httpOnly secret
+//                    cookie still validates on the server side.
 //
-// [FIX-CSRF-2] ensureCsrfCookie: seed delay bumped 30 ms → 150 ms.
-//              30 ms was too tight under cold-start / slow network; the cookie
-//              was not reliably readable by getCsrfToken() before the next
-//              apiFetch call proceeded.
-//
-// All v10 APIs retained unchanged.
+// All v11 fixes retained.
 // ─────────────────────────────────────────────────────────────────────────────
 'use strict';
 
@@ -26,26 +25,28 @@ export const tokenStorage = {
   getRefresh : () => null,
   setTokens  : () => {},
   clear      : () => {
+    // [FIX-CSRF-XDOMAIN] Also clear in-memory CSRF token on logout
+    _csrfTokenMemory = '';
     try { localStorage.removeItem('et_access');  } catch {}
     try { localStorage.removeItem('et_refresh'); } catch {}
   },
 };
 
-// ── CSRF token — read from JS-readable cookie set by server ───────────────────
+// ── CSRF token — stored in memory (cross-domain cookie blocked by browsers) ───
+// The httpOnly _csrf_secret cookie is still set by the server and validated
+// server-side. The JS-readable token comes from the response body instead of
+// document.cookie to avoid cross-domain cookie restrictions.
+let _csrfTokenMemory = '';
+
 function getCsrfToken() {
-  try {
-    const match = document.cookie.match(/(?:^|;\s*)XSRF-TOKEN=([^;]+)/);
-    return match ? decodeURIComponent(match[1]) : '';
-  } catch {
-    return '';
-  }
+  return _csrfTokenMemory;
 }
 
 // ── CSRF seeder ───────────────────────────────────────────────────────────────
 let _csrfPromise = null;
 
 async function ensureCsrfCookie() {
-  if (getCsrfToken()) return;
+  if (_csrfTokenMemory) return;
 
   if (!_csrfPromise) {
     _csrfPromise = (async () => {
@@ -53,10 +54,11 @@ async function ensureCsrfCookie() {
         const res = await fetch(`${BASE}/api/auth/csrf`, {
           method: 'GET', credentials: 'include',
         });
-        if (res.ok || res.status === 204) {
-          // [FIX-CSRF-2] 30 ms was too tight — bumped to 150 ms so the cookie
-          // is reliably readable by getCsrfToken() before the caller proceeds.
-          await new Promise(r => setTimeout(r, 150));
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.csrfToken) {
+            _csrfTokenMemory = data.csrfToken;
+          }
         }
       } catch {
         // Non-fatal — caller will hard-throw if token still missing
@@ -96,10 +98,6 @@ export const apiFetch = async (path, options = {}, retry = true) => {
   const isFormData  = options.body instanceof FormData;
   const isWrite     = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
 
-  // [FIX-CSRF-1] Seed cookie first, then hard-throw if still empty.
-  // Previously the code did `if (csrf) headers['X-CSRF-Token'] = csrf` which
-  // silently sent the request with no token, causing a server 403 that was
-  // confusing to debug (especially on /api/ipfs/pin).
   if (isWrite && !isAuthRoute) {
     await ensureCsrfCookie();
     const csrf = getCsrfToken();
@@ -109,7 +107,6 @@ export const apiFetch = async (path, options = {}, retry = true) => {
         { status: 403 }
       );
     }
-    // headers built below — csrf variable is in scope
   }
 
   const headers = {
@@ -118,7 +115,6 @@ export const apiFetch = async (path, options = {}, retry = true) => {
   };
 
   if (isWrite && !isAuthRoute) {
-    // getCsrfToken() is guaranteed non-empty here (hard-throw above)
     headers['X-CSRF-Token'] = getCsrfToken();
   }
 
@@ -343,9 +339,7 @@ export const kycAPI = {
       { method: 'POST', body: JSON.stringify({ fullName, idType, idNumber, phone, docIpfsHash }) },
       'kyc-submit'
     ),
-
   status: () => apiFetch('/api/kyc/status'),
-
   uploadDoc: (file, idToken, onProgress) => {
     const formData = new FormData();
     formData.append('file', file);
@@ -356,9 +350,7 @@ export const kycAPI = {
       onProgress
     );
   },
-
   openStream: (handlers) => openKycSseStream(handlers),
-
   pending : (page = 0, size = 50) => apiFetch(`/api/kyc/pending${qs({ page, size })}`),
   detail  : (id)                  => apiFetch(`/api/kyc/${id}`),
   approve : (id, tier = 'full')   => apiFetch(`/api/kyc/${id}/approve`, { method: 'POST', body: JSON.stringify({ tier }) }),
@@ -371,16 +363,12 @@ export const kycAPI = {
 export const authAPI = {
   register    : (body) => apiFetch('/api/auth/register',     { method: 'POST', body: JSON.stringify(body) }),
   verifyEmail : (body) => apiFetch('/api/auth/verify-email', { method: 'POST', body: JSON.stringify(body) }),
-
-  // [API-v10] resend OTP for unverified accounts — used by Signup.jsx OTP step
-  resendOtp: (body) => apiFetch('/api/auth/resend-otp', { method: 'POST', body: JSON.stringify(body) }),
-
+  resendOtp   : (body) => apiFetch('/api/auth/resend-otp',   { method: 'POST', body: JSON.stringify(body) }),
   login: async (body) => {
     const data = await apiFetch('/api/auth/login', { method: 'POST', body: JSON.stringify(body) });
     tokenStorage.clear();
     return data;
   },
-
   syncUser: async (body, idToken) => {
     await ensureCsrfCookie();
     const data = await apiFetch('/api/auth/firebase-sync', {
@@ -391,13 +379,11 @@ export const authAPI = {
     tokenStorage.clear();
     return data;
   },
-
   me     : () => apiFetch('/api/auth/me'),
   logout : async () => {
     try { await apiFetch('/api/auth/logout', { method: 'POST' }); } catch {}
     tokenStorage.clear();
   },
-
   setup2FA       : ()                    => apiFetch('/api/auth/2fa/setup',        { method: 'POST' }),
   verifySetup2FA : (token)               => apiFetch('/api/auth/2fa/verify-setup', { method: 'POST', body: JSON.stringify({ token }) }),
   validate2FA    : (tempToken, totpCode) => apiFetch('/api/auth/2fa/validate',     { method: 'POST', body: JSON.stringify({ tempToken, totpCode }) }),
@@ -431,18 +417,13 @@ export const walletAPI = {
 // SUBSCRIPTION
 // ══════════════════════════════════════════════════════════════════════════════
 export const subscriptionAPI = {
-  getPrices: () =>
-    apiFetch('/api/subscription/prices'),
-
-  selectFree: () =>
-    apiFetch('/api/subscription/free', { method: 'POST' }),
-
+  getPrices: () => apiFetch('/api/subscription/prices'),
+  selectFree: () => apiFetch('/api/subscription/free', { method: 'POST' }),
   createOrder: (planKey, cycle = 'monthly', idempotencyKey) =>
     apiFetch('/api/subscription/order', {
       method: 'POST',
       body:   JSON.stringify({ plan: planKey, cycle, idempotency_key: idempotencyKey }),
     }),
-
   verifyAndActivate: (planKey, cycle, razorpayResponse, gstDetails = {}) =>
     apiFetch('/api/subscription/verify', {
       method: 'POST',
@@ -456,7 +437,6 @@ export const subscriptionAPI = {
         pan:                 gstDetails.pan   || undefined,
       }),
     }),
-
   payWithWallet: (planKey, cycle, idempotencyKey, gstDetails = {}) =>
     apiFetch('/api/subscription/wallet-pay', {
       method: 'POST',
@@ -468,7 +448,6 @@ export const subscriptionAPI = {
         pan:             gstDetails.pan   || undefined,
       }),
     }),
-
   payWithMetaMask: (planKey, cycle, walletAddress, signature, message, gstDetails = {}) =>
     apiFetch('/api/subscription/metamask-pay', {
       method: 'POST',
@@ -482,14 +461,9 @@ export const subscriptionAPI = {
         pan:            gstDetails.pan   || undefined,
       }),
     }),
-
   getHistory: ({ limit = 20, cursor } = {}) =>
-    apiFetch(
-      `/api/subscription/history?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
-    ),
-
-  getCurrentPlan: () =>
-    apiFetch('/api/org/plan'),
+    apiFetch(`/api/subscription/history?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`),
+  getCurrentPlan: () => apiFetch('/api/org/plan'),
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -588,9 +562,7 @@ export const orgAPI = {
 // PAT SCHEME
 // ══════════════════════════════════════════════════════════════════════════════
 export const patAPI = {
-  getProfile: () =>
-    apiFetch('/api/pat/profile'),
-
+  getProfile: () => apiFetch('/api/pat/profile'),
   saveProfile: (body) =>
     apiFetch('/api/pat/profile', {
       method: 'POST',
@@ -620,73 +592,41 @@ export const patAPI = {
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// CCTS COMPLIANCE
+// CCTS
 // ══════════════════════════════════════════════════════════════════════════════
 export const cctsAPI = {
   getProfile:  ()     => apiFetch('/api/ccts/profile'),
-  saveProfile: (body) => apiFetch('/api/ccts/profile', {
-    method: 'POST',
-    body:   JSON.stringify(body),
-  }),
-
+  saveProfile: (body) => apiFetch('/api/ccts/profile', { method: 'POST', body: JSON.stringify(body) }),
   getMonthlyData:  (year)       => apiFetch(`/api/ccts/monthly${qs({ year })}`),
-  saveMonthlyData: (year, body) => apiFetch('/api/ccts/monthly', {
-    method: 'POST',
-    body:   JSON.stringify({ year, ...body }),
-  }),
-
+  saveMonthlyData: (year, body) => apiFetch('/api/ccts/monthly', { method: 'POST', body: JSON.stringify({ year, ...body }) }),
   getAcvaStatus:     ()     => apiFetch('/api/ccts/acva/status'),
-  submitAcvaRequest: (body) => apiFetch('/api/ccts/acva/submit', {
-    method: 'POST',
-    body:   JSON.stringify(body),
-  }),
-
+  submitAcvaRequest: (body) => apiFetch('/api/ccts/acva/submit', { method: 'POST', body: JSON.stringify(body) }),
   getRegistryStatus: ()     => apiFetch('/api/ccts/registry/status'),
-  submitToRegistry:  (body) => apiFetch('/api/ccts/registry/submit', {
-    method: 'POST',
-    body:   JSON.stringify(body),
-  }),
-
+  submitToRegistry:  (body) => apiFetch('/api/ccts/registry/submit', { method: 'POST', body: JSON.stringify(body) }),
   exportForm: (formType) => apiFetch(`/api/ccts/forms/${formType}/export`),
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// BRSR ENVIRONMENTAL
+// BRSR
 // ══════════════════════════════════════════════════════════════════════════════
 export const brsrAPI = {
   getEnvironmental:  (year)        => apiFetch(`/api/brsr/environmental${qs({ year })}`),
-  saveEnvironmental: (year, body)  => apiFetch('/api/brsr/environmental', {
-    method: 'POST',
-    body:   JSON.stringify({ year, ...body }),
-  }),
-
+  saveEnvironmental: (year, body)  => apiFetch('/api/brsr/environmental', { method: 'POST', body: JSON.stringify({ year, ...body }) }),
   getSummary: (year) => apiFetch(`/api/brsr/summary${qs({ year })}`),
-
   getForm:  (formCode, year)       => apiFetch(`/api/brsr/forms/${formCode}${qs({ year })}`),
-  saveForm: (formCode, year, body) => apiFetch(`/api/brsr/forms/${formCode}`, {
-    method: 'POST',
-    body:   JSON.stringify({ year, ...body }),
-  }),
+  saveForm: (formCode, year, body) => apiFetch(`/api/brsr/forms/${formCode}`, { method: 'POST', body: JSON.stringify({ year, ...body }) }),
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// AUDIT TRAIL
+// AUDIT
 // ══════════════════════════════════════════════════════════════════════════════
 export const auditAPI = {
   getVerifiers:    (year)       => apiFetch(`/api/audit/verifiers${qs({ year })}`),
-  requestVerifier: (body)       => apiFetch('/api/audit/verifiers', {
-    method: 'POST',
-    body:   JSON.stringify(body),
-  }),
-  updateVerifier:  (id, body)   => apiFetch(`/api/audit/verifiers/${id}`, {
-    method: 'PATCH',
-    body:   JSON.stringify(body),
-  }),
+  requestVerifier: (body)       => apiFetch('/api/audit/verifiers', { method: 'POST', body: JSON.stringify(body) }),
+  updateVerifier:  (id, body)   => apiFetch(`/api/audit/verifiers/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   removeVerifier:  (id)         => apiFetch(`/api/audit/verifiers/${id}`, { method: 'DELETE' }),
-
   getLogs:  (p = {}) => apiFetch(`/api/audit/logs${qs(p)}`),
   getLog:   (id)     => apiFetch(`/api/audit/logs/${id}`),
-
   getStatements:   (year)     => apiFetch(`/api/audit/statements${qs({ year })}`),
   uploadStatement: (formData) => apiFetchMultipart('/api/audit/statements', formData),
 };
@@ -706,66 +646,44 @@ export const reportsAPI = {
       },
       body: JSON.stringify(payload),
     });
-
     if (!res.ok) {
       let errMsg = `Server error ${res.status}`;
       try { const j = await res.json(); errMsg = j.error || errMsg; } catch {}
       throw Object.assign(new Error(errMsg), { status: res.status });
     }
-
     return res;
   },
-
   generateGEI: (payload) =>
-    apiFetch('/api/reports/gei', {
-      method: 'POST',
-      body:   JSON.stringify(payload),
-    }),
+    apiFetch('/api/reports/gei', { method: 'POST', body: JSON.stringify(payload) }),
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// SBTi TARGETS
+// SBTi
 // ══════════════════════════════════════════════════════════════════════════════
 export const sbtiAPI = {
   getTargets:  ()     => apiFetch('/api/sbti/targets'),
-  saveTargets: (body) => apiFetch('/api/sbti/targets', {
-    method: 'POST',
-    body:   JSON.stringify(body),
-  }),
+  saveTargets: (body) => apiFetch('/api/sbti/targets', { method: 'POST', body: JSON.stringify(body) }),
   getProgress: (year) => apiFetch(`/api/sbti/progress${qs({ year })}`),
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 5-YEAR ACTION PLAN
+// ACTION PLAN
 // ══════════════════════════════════════════════════════════════════════════════
 export const actionPlanAPI = {
   getPlan:  ()     => apiFetch('/api/action-plan'),
-  savePlan: (body) => apiFetch('/api/action-plan', {
-    method: 'POST',
-    body:   JSON.stringify(body),
-  }),
-
+  savePlan: (body) => apiFetch('/api/action-plan', { method: 'POST', body: JSON.stringify(body) }),
   getMRVCalendar:  ()     => apiFetch('/api/action-plan/mrv-calendar'),
-  saveMRVCalendar: (body) => apiFetch('/api/action-plan/mrv-calendar', {
-    method: 'POST',
-    body:   JSON.stringify(body),
-  }),
+  saveMRVCalendar: (body) => apiFetch('/api/action-plan/mrv-calendar', { method: 'POST', body: JSON.stringify(body) }),
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// SUPPLIER PORTAL
+// SUPPLIERS
 // ══════════════════════════════════════════════════════════════════════════════
 export const supplierAPI = {
   getSuppliers:     (p = {})    => apiFetch(`/api/suppliers${qs(p)}`),
   getSupplier:      (id)        => apiFetch(`/api/suppliers/${id}`),
-  inviteSupplier:   (body)      => apiFetch('/api/suppliers/invite', {
-    method: 'POST',
-    body:   JSON.stringify(body),
-  }),
-  saveSupplierData: (id, body)  => apiFetch(`/api/suppliers/${id}/data`, {
-    method: 'POST',
-    body:   JSON.stringify(body),
-  }),
+  inviteSupplier:   (body)      => apiFetch('/api/suppliers/invite', { method: 'POST', body: JSON.stringify(body) }),
+  saveSupplierData: (id, body)  => apiFetch(`/api/suppliers/${id}/data`, { method: 'POST', body: JSON.stringify(body) }),
   getSupplierData:  (id, year)  => apiFetch(`/api/suppliers/${id}/data${qs({ year })}`),
   removeSupplier:   (id)        => apiFetch(`/api/suppliers/${id}`, { method: 'DELETE' }),
 };
@@ -775,16 +693,10 @@ export const supplierAPI = {
 // ══════════════════════════════════════════════════════════════════════════════
 export const multiEntityAPI = {
   getEntities:      ()           => apiFetch('/api/multi-entity/entities'),
-  addEntity:        (body)       => apiFetch('/api/multi-entity/entities', {
-    method: 'POST',
-    body:   JSON.stringify(body),
-  }),
+  addEntity:        (body)       => apiFetch('/api/multi-entity/entities', { method: 'POST', body: JSON.stringify(body) }),
   removeEntity:     (id)         => apiFetch(`/api/multi-entity/entities/${id}`, { method: 'DELETE' }),
   getConsolidated:  (year)       => apiFetch(`/api/multi-entity/consolidated${qs({ year })}`),
-  saveConsolidated: (year, body) => apiFetch('/api/multi-entity/consolidated', {
-    method: 'POST',
-    body:   JSON.stringify({ year, ...body }),
-  }),
+  saveConsolidated: (year, body) => apiFetch('/api/multi-entity/consolidated', { method: 'POST', body: JSON.stringify({ year, ...body }) }),
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
