@@ -25,3 +25,17 @@ yarn-error.log*
 .vercel
 .env
 
+
+# --- added by reorg script ---
+node_modules/
+.env
+.env.*
+!.env.example
+.vercel/
+dataconnect-generated/
+uploads/*
+!uploads/.gitkeep
+*.bak
+build/
+coverage/
+*.env

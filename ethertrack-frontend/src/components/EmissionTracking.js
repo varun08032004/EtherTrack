@@ -42,6 +42,7 @@ import CCTSCompliance     from './CCTSCompliance';
 import SBTiModule         from './SBTiModule';
 import FiveYearActionPlan from './FiveYearActionPlan';
 import SupplierPortal     from './SupplierPortal';
+import EmissionLogHub from './emission-log/EmissionLogHub';
 
 ChartJS.register(
   LineElement, BarElement, ArcElement,
