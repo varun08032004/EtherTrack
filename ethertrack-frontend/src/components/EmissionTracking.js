@@ -1215,102 +1215,16 @@ export default function EmissionTracking() {
 
             {/* ── LOG TAB ──────────────────────────────────────────────── */}
             {tab === 'log' && (
-              <div className="em-glog">
-                <div className="em-card">
-                  <div className="em-ctit">LOG NEW EMISSION RECORD</div>
-                  {preview && (
-                    <div className="em-prev">
-                      <div>
-                        <div style={{ fontSize: 11, color: 'var(--mut)', letterSpacing: '.1em', marginBottom: 6 }}>CALCULATED CO2e</div>
-                        <div className="em-prev-val">{preview.co2e.toFixed(4)}</div>
-                        <div style={{ fontSize: 11, color: 'var(--mut)', marginTop: 2 }}>tonnes CO2e · Scope {preview.scope} · {preview.cat}</div>
-                        {preview.method && <div style={{ fontSize: 10, color: preview.method === 'market' ? '#10b981' : '#3b82f6', marginTop: 4 }}>{preview.method === 'market' ? 'Market-based Scope 2' : 'Location-based Scope 2'}</div>}
-                      </div>
-                      <div style={{ fontSize: 11, color: 'var(--mut)', textAlign: 'right', lineHeight: 1.9 }}>
-                        Factor: <strong style={{ color: 'var(--txt)' }}>{preview.factor} kg CO2e/{preview.unit}</strong><br/>
-                        Source: <strong style={{ color: 'var(--grn)' }}>{preview.source}</strong><br/>
-                        Method: Activity-based GHG
-                      </div>
-                    </div>
-                  )}
-                  <form onSubmit={handleAdd}>
-                    <div className="em-fg4">
-                      <div className="em-fg">
-                        <label className="em-lbl">EMISSION ACTIVITY</label>
-                        <select className="em-sel" value={form.activity} onChange={e => setForm(f => ({ ...f, activity: e.target.value }))} required>
-                          <option value="">Select activity</option>
-                          {[1, 2, 3].map(s => (
-                            <optgroup key={s} label={`SCOPE ${s}`}>
-                              {Object.entries(EF).filter(([, ef]) => ef.scope === s).map(([name]) => (
-                                <option key={name} value={name}>{name}</option>
-                              ))}
-                            </optgroup>
-                          ))}
-                        </select>
-                      </div>
-                      <div className="em-fg">
-                        <label className="em-lbl">QUANTITY{EF[form.activity] ? ` (${EF[form.activity].unit})` : ''}</label>
-                        <input className="em-inp" type="number" step="0.001" min="0.001" max="999999999" placeholder="0.000"
-                          value={form.qty} onChange={e => setForm(f => ({ ...f, qty: e.target.value }))} required/>
-                      </div>
-                      <div className="em-fg">
-                        <label className="em-lbl">DATE</label>
-                        <input className="em-inp" type="date" value={form.date}
-                          max={new Date().toISOString().slice(0, 10)}
-                          onChange={e => setForm(f => ({ ...f, date: e.target.value }))} required/>
-                      </div>
-                      <div className="em-fg">
-                        <label className="em-lbl">NOTES</label>
-                        <input className="em-inp" type="text" placeholder="Description" maxLength={200}
-                          value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}/>
-                      </div>
-                    </div>
-                    <div style={{ display: 'flex', gap: 10 }}>
-                      <button type="submit" className="em-btn em-btn-p" disabled={submitting}>{submitting ? 'SAVING' : 'LOG EMISSION'}</button>
-                      <button type="button" className="em-btn em-btn-g" onClick={handleExport}>EXPORT GHG CSV</button>
-                    </div>
-                  </form>
-                  <div style={{ marginTop: 20, borderTop: '1px solid var(--brd)', paddingTop: 18 }}>
-                    <div className="em-ctit">BULK IMPORT CSV</div>
-                    <div className={`em-drop${dragOver ? ' over' : ''}`}
-                      onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-                      onDragLeave={() => setDragOver(false)}
-                      onDrop={e => { e.preventDefault(); setDragOver(false); handleCSVImport(e.dataTransfer.files[0]); }}
-                      onClick={() => fileRef.current?.click()}>
-                      <div style={{ fontSize: 12, color: 'var(--txt)', letterSpacing: '.06em' }}>DROP CSV HERE or CLICK TO UPLOAD</div>
-                      <div style={{ fontSize: 11, color: 'var(--mut)', marginTop: 6 }}>Required: date, activity, quantity optional: notes · Max 5MB · 2,000 rows</div>
-                    </div>
-                    <input ref={fileRef} type="file" accept=".csv,text/csv" style={{ display: 'none' }} onChange={e => handleCSVImport(e.target.files[0])}/>
-                    <a href="data:text/plain,date,activity,quantity,notes" download="ethertrack_ghg_template.csv"
-                      style={{ fontSize: 11, color: 'var(--grn)', letterSpacing: '.06em' }}>DOWNLOAD CSV TEMPLATE</a>
-                  </div>
-                </div>
-                <div className="em-card">
-                  <div className="em-ctit">EMISSION FACTOR REFERENCE</div>
-                  <div style={{ maxHeight: 500, overflowY: 'auto' }}>
-                    {[1, 2, 3].map(s => (
-                      <div key={s} style={{ marginBottom: 16 }}>
-                        <div style={{ fontSize: 11, letterSpacing: '.1em', color: SC[s], marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <span style={{ width: 8, height: 1, background: SC[s], display: 'inline-block' }}/>SCOPE {s}
-                          {s === 2 && <span style={{ fontSize: 9, color: 'var(--mut)', marginLeft: 4 }}>(Location-based: 0.000727 tCO2e/kWh CEA V20.0)</span>}
-                        </div>
-                        {Object.entries(EF).filter(([, ef]) => ef.scope === s).map(([name, ef]) => (
-                          <div key={name} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--brd)44', fontSize: 11 }}>
-                            <span style={{ color: 'var(--mut)', flex: 1 }}>{name}</span>
-                            <span style={{ color: SC[s], marginRight: 12 }}>{ef.factor} kg/{ef.unit}</span>
-                            <span style={{ fontSize: 9, color: 'var(--mut)', opacity: .6 }}>{ef.source}</span>
-                          </div>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                  <div style={{ marginTop: 10, fontSize: 11, color: 'var(--mut)', lineHeight: 1.9 }}>
-                    Sources: DEFRA 2024 · IPCC AR6 GWP100 · IEA 2024 · CEA V20.0 Dec 2024 · BEE India PAT
-                  </div>
-                </div>
-              </div>
-            )}
-
+  <EmissionLogHub
+    EF={EF}
+    year={year}
+    onRecordAdded={(record) => {
+      setRecords(prev => [record, ...prev]);
+    }}
+    onBulkAdded={() => loadAll()}
+    profile={profile}
+  />
+)}
             {/* ── LEDGER TAB ───────────────────────────────────────────── */}
             {tab === 'ledger' && (
               <div className="em-card">

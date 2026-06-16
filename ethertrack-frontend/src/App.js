@@ -21,6 +21,9 @@
 //
 // [KYC-1]  handleKycComplete sets kyc_status + kyc_tier
 // [PLAN-SYNC] Background poll every 5 mins
+//
+// [SUPPORT-WIDGET] Floating support assistant added — renders on all
+//                  authenticated pages (bottom-right bubble).
 // ─────────────────────────────────────────────────────────────────────────────
 
 import React, {
@@ -46,6 +49,7 @@ import VerifyCertificate from './components/VerifyCertificate';
 import JoinOrg           from './components/JoinOrg';
 import PlanSelection     from './components/PlanSelection';
 import Dashboard         from './components/dashboard/Dashboard';
+import SupportWidget     from './components/SupportWidget';   // ← [SUPPORT-WIDGET]
 
 import { NotificationProvider } from './context/NotificationContext';
 import { PortfolioProvider }    from './context/PortfolioContext';
@@ -425,6 +429,12 @@ function AppInner() {
     <>
       {isAuthenticated && !isAdmin && <Header />}
       {isAuthenticated && !isAdmin && <Lazy><WalletMismatchBanner /></Lazy>}
+
+      {/* ── [SUPPORT-WIDGET] Floating support assistant ─────────────────────
+           Renders for all authenticated non-admin users on every page.
+           Widget sits outside the scrollable content area (position: fixed).
+      ──────────────────────────────────────────────────────────────────────── */}
+      {isAuthenticated && !isAdmin && <SupportWidget />}
 
       <div
         className="main-content"
