@@ -1,21 +1,42 @@
 // server.js — EtherTrack API
-// PRODUCTION HARDENED — v13
+// PRODUCTION HARDENED — v16
 // ─────────────────────────────────────────────────────────────────────────────
-// CHANGES vs v12:
+// CHANGES vs v15:
 //
-// [FIX-IPFS-CSRF] Added /api/ipfs to CSRF_SKIP_PREFIX.
-//                 The IPFS pin route is authenticated via JWT (authenticate
-//                 middleware in ipfsRoute.js). CSRF skip is safe and consistent
-//                 with the /api/trades and /api/reports pattern.
-//                 Eliminates the 403 on POST /api/ipfs/pin that was hitting
-//                 when the XSRF-TOKEN cookie hadn't been seeded before the
-//                 file upload triggered (race condition on cold start).
+// [FIX-INVOICE-VERIFY]  Mounted /api/invoices → routes/invoiceVerify.js —
+//                       public, unauthenticated lookup backing the QR code
+//                       printed on every trade invoice/bill (GET
+//                       /api/invoices/verify/:invoiceNumber). Named
+//                       "invoiceVerify" rather than "verify" to avoid
+//                       colliding with the existing routes/verify.js already
+//                       mounted at /api/verify. GET-only, so no CSRF_SKIP_PREFIX
+//                       entry needed — csrfProtect already skips all
+//                       GET/HEAD/OPTIONS requests before the skip-list checks
+//                       even run. Rate limiting for this route lives inside
+//                       routes/invoiceVerify.js itself (30/min per IP), on top
+//                       of the general /api/ limiter below.
 //
-// All v12 fixes retained.
+// CHANGES vs v14 (retained from v15):
+//
+// [FIX-ERP-ROUTE]  Mounted /api/erp → routes/erp.js (new ERP Connect module).
+//                  Added to CSRF_SKIP_PREFIX — ERP OAuth callbacks (/zoho/callback,
+//                  /quickbooks/callback) arrive as GET redirects from the ERP
+//                  provider and carry no CSRF cookie; all mutating endpoints are
+//                  protected by JWT `requireAuth`. Same pattern as /api/reports.
+//                  Added rate limiters for /api/erp/*/test (10/hr per IP) and
+//                  /api/erp/*/pull (5/hr per IP) to prevent credential stuffing
+//                  and runaway sync loops.
+//                  initErpCron(db) called after server starts — schedules
+//                  per-org ERP syncs (daily/weekly/monthly per sync_config).
+//                  Added ERP_CREDS_KEY to REQUIRED_ENV in production.
+//
+// All v14 fixes retained.
 // ─────────────────────────────────────────────────────────────────────────────
 'use strict';
 
 require('dotenv').config();
+
+const IS_PROD = process.env.NODE_ENV === 'production';
 
 const REQUIRED_ENV = [
   'DATABASE_URL',
@@ -29,6 +50,8 @@ const REQUIRED_ENV = [
   'PINATA_API_KEY',
   'PINATA_SECRET_KEY',
   'FRONTEND_URL',
+  // [FIX-ERP-ROUTE v15] Required in prod — AES-256 key for ERP credential encryption
+  ...(IS_PROD ? ['ERP_CREDS_KEY'] : []),
 ];
 
 const MISSING_ENV = REQUIRED_ENV.filter(k => !process.env[k]);
@@ -50,11 +73,17 @@ const OPTIONAL_ENV = [
   'IEX_API_KEY', 'IEX_API_URL', 'IEX_CLIENT_ID',
   'PXIL_API_KEY', 'PXIL_API_URL', 'PXIL_CLIENT_ID',
   'ADMIN_EMAIL',
-  'SMTP_HOST',
-  'SMTP_USER',
-  'SMTP_PASS',
-  'SMTP_FROM',
+  'SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM',
   'REDIS_URL',
+  'BASE_URL',         // [FIX-ERP-ROUTE v15] Used for OAuth callbacks
+  'ERP_CREDS_KEY',    // [FIX-ERP-ROUTE v15] Required in prod, optional in dev
+  // Chain logging (Sepolia testnet → Polygon mainnet later)
+  'CHAIN_SIGNER_PRIVATE_KEY',   // backend hot wallet signs INR trade logs
+  'SIGNER_WALLET',              // public address of CHAIN_SIGNER_PRIVATE_KEY
+  'POLYGON_RPC_URL',            // Sepolia: use ALCHEMY_RPC value here too
+  'POLYGON_NETWORK',            // 'sepolia' or 'polygon'
+  'COMPANY_USER_ID',            // DB id of platform@ethertrack.in
+  'COMPANY_FUND_ACCOUNT_ID',    // Razorpay fund account for fee sweep
 ];
 OPTIONAL_ENV.forEach(k => {
   if (!process.env[k]) console.warn(`⚠️  Optional env var not set: ${k}`);
@@ -67,7 +96,7 @@ try {
     Sentry.init({
       dsn             : process.env.SENTRY_DSN,
       environment     : process.env.NODE_ENV || 'development',
-      tracesSampleRate: process.env.NODE_ENV === 'production' ? 0.2 : 0,
+      tracesSampleRate: IS_PROD ? 0.2 : 0,
     });
     console.log('✅ Sentry error monitoring active');
   }
@@ -95,6 +124,10 @@ const kycRoutes         = require('./routes/kyc');
 const adminRoutes       = require('./routes/admin');
 const portfolioRoutes   = require('./routes/portfolio');
 const verifyRoutes      = require('./routes/verify');
+// [FIX-INVOICE-VERIFY v16] Public invoice/bill QR-code verification lookup.
+// Separate file/mount from routes/verify.js above (which already owns /api/verify
+// for something else) to avoid overwriting existing behavior.
+const invoiceVerifyRoutes = require('./routes/invoiceVerify');
 const tradeRoutes       = require('./routes/trades');
 const marketRoutes      = require('./routes/market');
 const ipfsRoutes        = require('./routes/ipfsRoute');
@@ -104,12 +137,15 @@ const userRoutes        = require('./routes/user');
 const watchlistRoutes   = require('./routes/watchlist');
 const certificateRoutes = require('./routes/certificates');
 const entitiesRoutes    = require('./routes/entities');
-const auditRoutes       = require('./routes/audit');
+const auditRoutes                = require('./routes/audit');
+const auditorVerificationRoutes  = require('./routes/auditor-verification');
+const auditorAccessRoutes        = require('./routes/audit-auditor-access');
 const brsrRoutes        = require('./routes/brsr');
 const patRoutes         = require('./routes/pat');
 const cctsRoutes        = require('./routes/ccts');
 const alertRoutes       = require('./routes/alerts');
 const newsRoutes        = require('./routes/news');
+const supportRoutes     = require('./routes/support');
 const orgRoutes                     = require('./routes/org');
 const { checkSubscriptionExpiries } = require('./routes/org');
 const { router: notificationRoutes }= require('./routes/notifications');
@@ -119,6 +155,9 @@ const supplierRoutes  = require('./routes/suppliers');
 const subscriptionRoutes = require('./routes/subscription');
 const { kycSubmitLimiter, adminActionLimiter } = require('./middleware/rateLimit');
 const reportRoutes = require('./routes/reports');
+// [FIX-ERP-ROUTE v15] ERP Connect — all 6 ERPs + cron scheduler
+const { router: erpRoutes, initErpCron } = require('./routes/erp');
+
 const { startPolling: startPriceFeed, stopPolling: stopPriceFeed } =
   require('./services/priceFeedService');
 
@@ -129,7 +168,6 @@ try {
   console.warn('⚠️  scheduler.js not found:', e.message);
 }
 
-const IS_PROD         = process.env.NODE_ENV === 'production';
 const CSRF_SECRET_KEY = '_csrf_secret';
 const CSRF_TOKEN_KEY  = 'XSRF-TOKEN';
 
@@ -137,10 +175,10 @@ const seedCsrfToken = (req, res) => {
   const existing = req.cookies?.[CSRF_SECRET_KEY];
   const secret   = existing || crypto.randomBytes(32).toString('hex');
   const OPTS = {
-  sameSite: IS_PROD ? 'none' : 'lax',
-  secure: IS_PROD,
-  maxAge: 24 * 60 * 60 * 1000,
-};
+    sameSite: IS_PROD ? 'none' : 'lax',
+    secure:   IS_PROD,
+    maxAge:   24 * 60 * 60 * 1000,
+  };
   res.cookie(CSRF_SECRET_KEY, secret, { ...OPTS, httpOnly: true  });
   res.cookie(CSRF_TOKEN_KEY,  secret, { ...OPTS, httpOnly: false });
   return secret;
@@ -156,28 +194,30 @@ const CSRF_SKIP_EXACT = new Set([
   '/api/auth/csrf',
 ]);
 
-// [FIX-IPFS-CSRF] Added /api/ipfs — JWT-authenticated via Pinata proxy,
-//                 CSRF skip is safe. Belt-and-suspenders: the hard-throw fix
-//                 in api.js v11 (FIX-CSRF-1) is the primary defence; this
-//                 skip ensures the server never 403s even if the cookie race
-//                 condition survives in an edge case.
-//
-// [FIX-REPORTS]   /api/reports added in v12 — JWT-protected, CSRF skip safe.
-// [FIX-CSRF]      /api/trades, /api/transactions, /api/portfolio retained from v11.
 const CSRF_SKIP_PREFIX = [
   '/api/wallet/webhook',
   '/api/subscription/webhook',
   '/api/subscription',
   '/api/market',
   '/api/verify',
+  // [FIX-INVOICE-VERIFY v16] GET-only in practice, but listed for clarity/
+  // consistency with the rest of this list — csrfProtect already lets all
+  // GET/HEAD/OPTIONS requests through before this list is even consulted,
+  // so this entry is a no-op safety net rather than a functional requirement.
+  '/api/invoices',
   '/api/news',
   '/api/ccc',
   '/api/kyc/stream',
   '/api/trades',
   '/api/transactions',
   '/api/portfolio',
-  '/api/reports',       // [FIX-REPORTS v12] Puppeteer PDF generation — JWT auth sufficient
-  '/api/ipfs',          // [FIX-IPFS-CSRF v13] Pinata proxy — JWT auth sufficient
+  '/api/reports',
+  '/api/audit',
+  '/api/ipfs',
+  '/api/support',
+  // [FIX-ERP-ROUTE v15] OAuth callbacks arrive as GET redirects from providers
+  // (no CSRF cookie). Mutating endpoints all require JWT `requireAuth`.
+  '/api/erp',
   '/health',
 ];
 
@@ -232,6 +272,14 @@ app.use((req, res, next) => {
           'https://checkout.razorpay.com',
           'https://api.iexindia.com',
           'https://api.pxil.co.in',
+          // [FIX-ERP-ROUTE v15] ERP OAuth providers
+          'https://accounts.zoho.in',
+          'https://accounts.zoho.com',
+          'https://accounts.zoho.eu',
+          'https://accounts.zoho.com.au',
+          'https://appcenter.intuit.com',
+          'https://oauth.platform.intuit.com',
+          'https://login.microsoftonline.com',
         ],
         frameSrc      : ['https://api.razorpay.com', 'https://checkout.razorpay.com'],
         imgSrc        : ["'self'", 'data:', 'blob:', 'https://gateway.pinata.cloud'],
@@ -249,7 +297,7 @@ app.use((req, res, next) => {
 const ALLOWED_ORIGINS = [
   'http://localhost:3000',
   'https://ethertrackapp.vercel.app',
-   'https://app.ethertrack.in',
+  'https://app.ethertrack.in',
   process.env.FRONTEND_URL,
 ].filter(Boolean);
 
@@ -300,6 +348,15 @@ app.use('/api/subscription/verify',       limiter(60 * 1000, 10, 'Too many payme
 app.use('/api/subscription/wallet-pay',   limiter(60 * 1000, 10, 'Too many payment requests. Slow down.'));
 app.use('/api/subscription/metamask-pay', limiter(60 * 1000, 10, 'Too many payment requests. Slow down.'));
 app.use('/api/reports/generate',    limiter(60 * 60 * 1000,  20,  'Too many report generation requests. Try again later.'));
+app.use('/api/support/tickets',     limiter(60 * 60 * 1000,  10,  'Too many support tickets submitted. Try again later.'));
+// [FIX-ERP-ROUTE v15] ERP-specific rate limits
+app.use('/api/erp/:erpId/test',     limiter(60 * 60 * 1000,  10,  'Too many ERP connection tests. Try again later.'));
+app.use('/api/erp/:erpId/pull',     limiter(60 * 60 * 1000,   5,  'Too many ERP data pulls. Try again later.'));
+app.use('/api/erp',                 limiter(15 * 60 * 1000,  60,  'Too many ERP requests. Try again later.'));
+// [FIX-INVOICE-VERIFY v16] Public QR-scan endpoint — modest per-IP ceiling on
+// top of the route's own internal limiter (30/min), since this is reachable
+// by anyone who scans a printed invoice, not just logged-in users.
+app.use('/api/invoices',            limiter(60 * 1000,        40,  'Too many verification requests. Slow down.'));
 app.use('/api/',                    limiter(15 * 60 * 1000,  500,  'Too many requests. Try again later.'));
 
 app.use(express.json({ limit: '10mb' }));
@@ -341,15 +398,17 @@ app.get('/health', async (req, res) => {
 });
 app.get('/api/health', (req, res) => res.redirect('/health'));
 
-// ── Routes ────────────────────────────────────────────────────────
-app.use('/api/reports',       reportRoutes);      // [FIX-REPORTS v12] Puppeteer PDF
+// ── Routes ────────────────────────────────────────────────────────────────────
+app.use('/api/reports',       reportRoutes);
 app.use('/api/market',        marketRoutes);
 app.use('/api/verify',        verifyRoutes);
+// [FIX-INVOICE-VERIFY v16] Public invoice/bill verification (QR code target)
+app.use('/api/invoices',      invoiceVerifyRoutes);
 app.use('/api/news',          newsRoutes);
 app.use('/api/auth',          authRoutes);
 app.use('/api/wallet',        walletRoutes);
 app.use('/api/user',          userRoutes);
-app.use('/api/support',       userRoutes);
+app.use('/api/support',       supportRoutes);
 app.use('/api/org',           orgRoutes);
 app.use('/api/kyc',           kycRoutes);
 app.use('/api/notifications', notificationRoutes);
@@ -370,9 +429,12 @@ app.use('/api/certificates',  certPDFRoutes);
 app.use('/api/cert',          certificateRoutes);
 app.use('/api/entities',      entitiesRoutes);
 app.use('/api/audit',         auditRoutes);
+app.use('/api/audit',         auditorVerificationRoutes);
+app.use('/api/audit',         auditorAccessRoutes);
 app.use('/api/admin',         adminRoutes);
 app.use('/api/suppliers',     supplierRoutes);
 app.use('/api/subscription',  subscriptionRoutes);
+app.use('/api/erp',           erpRoutes); // [FIX-ERP-ROUTE v15]
 
 if (Sentry?.Handlers) app.use(Sentry.Handlers.errorHandler());
 
@@ -397,7 +459,7 @@ app.use((err, req, res, next) => {
   });
 
   res.status(err.status || 500).json({
-    error: process.env.NODE_ENV === 'production'
+    error: IS_PROD
       ? 'Internal server error'
       : (err.message || 'Internal server error'),
   });
@@ -453,6 +515,48 @@ server.listen(PORT, () => {
     console.warn('⚠️  Blockchain listeners skipped — missing ALCHEMY_RPC or MARKETPLACE_ADDRESS');
   }
 
+  // ── Chain logger crons (INR/Razorpay trade on-chain logging) ──────────────
+  // POLYGON_RPC_URL falls back to ALCHEMY_RPC (which is Ankr Sepolia URL)
+  if (!process.env.POLYGON_RPC_URL && process.env.ALCHEMY_RPC) {
+    process.env.POLYGON_RPC_URL = process.env.ALCHEMY_RPC;
+    console.log('ℹ️  POLYGON_RPC_URL set from ALCHEMY_RPC');
+  }
+
+  if (process.env.CHAIN_SIGNER_PRIVATE_KEY && process.env.MARKETPLACE_ADDRESS) {
+    try {
+      const chainLogger  = require('./services/chainLogger');
+      const feeOps       = require('./services/feeOperations');
+      const nodeCron     = require('node-cron');
+
+      // Retry failed chain logs — every 5 minutes
+      nodeCron.schedule('*/5 * * * *', () =>
+        chainLogger.retryPendingLogs().catch(e =>
+          console.error('[cron/chainLogger] retryPendingLogs failed:', e.message)
+        )
+      );
+
+      // Batch log unlogged INR trades — every hour
+      nodeCron.schedule('0 * * * *', () =>
+        chainLogger.batchLogPending().catch(e =>
+          console.error('[cron/chainLogger] batchLogPending failed:', e.message)
+        )
+      );
+
+      // Sweep platform fees to company bank — every Monday 10am IST (4:30am UTC)
+      nodeCron.schedule('30 4 * * 1', () =>
+        feeOps.sweepPlatformFees().catch(e =>
+          console.error('[cron/feeOps] sweepPlatformFees failed:', e.message)
+        )
+      );
+
+      console.log('⛓  Chain logger crons started (retry/5min, batch/1hr, sweep/weekly)');
+    } catch (e) {
+      console.warn('⚠️  Chain logger crons not started:', e.message);
+    }
+  } else {
+    console.warn('⚠️  Chain logger crons skipped — missing CHAIN_SIGNER_PRIVATE_KEY or MARKETPLACE_ADDRESS');
+  }
+
   try {
     require('./cron/jobs');
     console.log('⏰ Cron jobs loaded');
@@ -467,6 +571,20 @@ server.listen(PORT, () => {
 
   startPriceFeed();
   console.log('📈 CCC price feed started');
+
+  // [FIX-ERP-ROUTE v15] Start ERP sync cron scheduler
+  // Reads sync_config per org from DB and schedules daily/weekly/monthly syncs.
+  // Re-polls every 5 min for new/changed configs. Runs in IST timezone.
+  try {
+    const { pool: db } = require('./db/pool');
+    initErpCron(db).then(() => {
+      console.log('🔌 ERP sync cron scheduler started');
+    }).catch(e => {
+      console.warn('⚠️  ERP cron scheduler failed to start:', e.message);
+    });
+  } catch (e) {
+    console.warn('⚠️  ERP cron scheduler not started:', e.message);
+  }
 
   setTimeout(() => {
     checkSubscriptionExpiries().catch(err =>

@@ -1,48 +1,30 @@
-// src/services/api.js — EtherTrack
-// PRODUCTION HARDENED — v12
-// ─────────────────────────────────────────────────────────────────────────────
-// CHANGES vs v11:
-//
-// [FIX-CSRF-XDOMAIN] Replaced cookie-based CSRF token read with in-memory
-//                    storage. Frontend on app.ethertrack.in and backend on
-//                    ethertrack.onrender.com are different domains — browsers
-//                    (Safari ITP, Firefox strict, Chrome partitioned cookies)
-//                    block cross-domain cookies even with SameSite:none.
-//                    Token is now returned in the JSON body of /api/auth/csrf
-//                    and stored in a module-level variable. httpOnly secret
-//                    cookie still validates on the server side.
-//
-// All v11 fixes retained.
-// ─────────────────────────────────────────────────────────────────────────────
+// src/services/api.js — EtherTrack v15
+// [FEAT-BULK-DELETE]    emissionsAPI.bulkDelete(ids)
+// [FEAT-LEDGER-CHAIN]   auditAPI.getChain() / auditAPI.writeChain()
+// All v14 code retained unchanged.
+
 'use strict';
 
 const BASE            = process.env.REACT_APP_API_URL || '';
 const REQUEST_TIMEOUT = 60_000;
 
-// ── Token storage — no-ops (server sets httpOnly cookies) ─────────────────────
 export const tokenStorage = {
   getAccess  : () => null,
   getRefresh : () => null,
   setTokens  : () => {},
   clear      : () => {
-    // [FIX-CSRF-XDOMAIN] Also clear in-memory CSRF token on logout
     _csrfTokenMemory = '';
     try { localStorage.removeItem('et_access');  } catch {}
     try { localStorage.removeItem('et_refresh'); } catch {}
   },
 };
 
-// ── CSRF token — stored in memory (cross-domain cookie blocked by browsers) ───
-// The httpOnly _csrf_secret cookie is still set by the server and validated
-// server-side. The JS-readable token comes from the response body instead of
-// document.cookie to avoid cross-domain cookie restrictions.
 let _csrfTokenMemory = '';
 
 function getCsrfToken() {
   return _csrfTokenMemory;
 }
 
-// ── CSRF seeder ───────────────────────────────────────────────────────────────
 let _csrfPromise = null;
 
 async function ensureCsrfCookie() {
@@ -61,7 +43,6 @@ async function ensureCsrfCookie() {
           }
         }
       } catch {
-        // Non-fatal — caller will hard-throw if token still missing
       } finally {
         _csrfPromise = null;
       }
@@ -71,7 +52,6 @@ async function ensureCsrfCookie() {
   await _csrfPromise;
 }
 
-// ── Request timeout via AbortController ──────────────────────────────────────
 function withTimeout(ms) {
   const ctrl = new AbortController();
   const id   = setTimeout(() => ctrl.abort(), ms);
@@ -82,7 +62,6 @@ let _loggingOut  = false;
 let _refreshing  = false;
 let _refreshWait = null;
 
-// ── Query string builder ──────────────────────────────────────────────────────
 function qs(params = {}) {
   const filtered = Object.fromEntries(
     Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== '')
@@ -91,7 +70,6 @@ function qs(params = {}) {
   return str ? '?' + str : '';
 }
 
-// ── Core fetch ────────────────────────────────────────────────────────────────
 export const apiFetch = async (path, options = {}, retry = true) => {
   const isAuthRoute = path.startsWith('/api/auth/');
   const method      = (options.method || 'GET').toUpperCase();
@@ -133,7 +111,6 @@ export const apiFetch = async (path, options = {}, retry = true) => {
   }
   clear();
 
-  // Auto-refresh on 401
   if (res.status === 401 && retry && !isAuthRoute && !_loggingOut) {
     if (_refreshing && _refreshWait) {
       await _refreshWait;
@@ -186,7 +163,6 @@ export const apiFetch = async (path, options = {}, retry = true) => {
   return data;
 };
 
-// ── Multipart fetch ───────────────────────────────────────────────────────────
 export const apiFetchMultipart = async (path, formData, options = {}) => {
   await ensureCsrfCookie();
   const csrf = getCsrfToken();
@@ -222,7 +198,6 @@ export const apiFetchMultipart = async (path, formData, options = {}) => {
   return data;
 };
 
-// ── XHR multipart with progress events ───────────────────────────────────────
 export const apiFetchMultipartWithProgress = (path, formData, options = {}, onProgress) => {
   let xhr;
   const promise = (async () => {
@@ -274,7 +249,6 @@ export const apiFetchMultipartWithProgress = (path, formData, options = {}, onPr
   return { promise, abort: () => xhr?.abort() };
 };
 
-// ── Idempotent fetch ──────────────────────────────────────────────────────────
 export const apiFetchWithIdempotency = (path, options = {}, keyPrefix = 'req') => {
   const key = `${keyPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   return apiFetch(path, {
@@ -283,7 +257,6 @@ export const apiFetchWithIdempotency = (path, options = {}, keyPrefix = 'req') =
   });
 };
 
-// ── SSE stream factory ────────────────────────────────────────────────────────
 export const openKycSseStream = ({ onApproved, onRejected, onError } = {}) => {
   let es         = null;
   let closed     = false;
@@ -318,7 +291,6 @@ export const openKycSseStream = ({ onApproved, onRejected, onError } = {}) => {
   return { close: () => { closed = true; clearTimeout(retryTimer); es?.close(); es = null; } };
 };
 
-// ── Safe wrapper ──────────────────────────────────────────────────────────────
 export const apiFetchStrict = async (path, options) => {
   const result = await apiFetch(path, options);
   if (result === null)
@@ -402,11 +374,12 @@ export const walletAPI = {
   getTransactions : (p = {}) => apiFetch(`/api/wallet/transactions${qs(p)}`),
   getEthRate      : ()       => apiFetch('/api/wallet/eth-inr-rate'),
   getLimits       : ()       => apiFetch('/api/wallet/limits'),
-  createDepositOrder : (amount, method = 'upi') => apiFetch('/api/wallet/deposit/create-order', { method: 'POST', body: JSON.stringify({ amount, method }) }),
-  verifyDeposit      : (body) => apiFetch('/api/wallet/deposit/verify', { method: 'POST', body: JSON.stringify(body) }),
-  withdraw           : (body) => apiFetch('/api/wallet/withdraw',       { method: 'POST', body: JSON.stringify(body) }),
-  tradeDeduct        : (body) => apiFetch('/api/wallet/trade-deduct',   { method: 'POST', body: JSON.stringify(body) }),
-  refundTrade        : (body) => apiFetch('/api/wallet/trade-refund',   { method: 'POST', body: JSON.stringify(body) }),
+  createDepositOrder : (amount, method = 'upi') =>
+    apiFetch('/api/wallet/deposit/create-order', { method: 'POST', body: JSON.stringify({ amount, method }) }),
+  verifyDeposit : (body) => apiFetch('/api/wallet/deposit/verify', { method: 'POST', body: JSON.stringify(body) }),
+  withdraw      : (body) => apiFetch('/api/wallet/withdraw',       { method: 'POST', body: JSON.stringify(body) }),
+  tradeDeduct   : (body) => apiFetch('/api/wallet/trade-deduct',   { method: 'POST', body: JSON.stringify(body) }),
+  refundTrade   : (body) => apiFetch('/api/wallet/trade-refund',   { method: 'POST', body: JSON.stringify(body) }),
   getBankAccounts    : ()     => apiFetch('/api/wallet/bank-accounts'),
   addBankAccount     : (body) => apiFetch('/api/wallet/bank-accounts',               { method: 'POST',   body: JSON.stringify(body) }),
   setDefaultAccount  : (id)   => apiFetch(`/api/wallet/bank-accounts/${id}/default`, { method: 'PUT' }),
@@ -417,8 +390,8 @@ export const walletAPI = {
 // SUBSCRIPTION
 // ══════════════════════════════════════════════════════════════════════════════
 export const subscriptionAPI = {
-  getPrices: () => apiFetch('/api/subscription/prices'),
-  selectFree: () => apiFetch('/api/subscription/free', { method: 'POST' }),
+  getPrices  : () => apiFetch('/api/subscription/prices'),
+  selectFree : () => apiFetch('/api/subscription/free', { method: 'POST' }),
   createOrder: (planKey, cycle = 'monthly', idempotencyKey) =>
     apiFetch('/api/subscription/order', {
       method: 'POST',
@@ -440,26 +413,14 @@ export const subscriptionAPI = {
   payWithWallet: (planKey, cycle, idempotencyKey, gstDetails = {}) =>
     apiFetch('/api/subscription/wallet-pay', {
       method: 'POST',
-      body:   JSON.stringify({
-        plan:            planKey,
-        cycle,
-        idempotency_key: idempotencyKey,
-        gstin:           gstDetails.gstin || undefined,
-        pan:             gstDetails.pan   || undefined,
-      }),
+      body:   JSON.stringify({ plan: planKey, cycle, idempotency_key: idempotencyKey,
+        gstin: gstDetails.gstin || undefined, pan: gstDetails.pan || undefined }),
     }),
   payWithMetaMask: (planKey, cycle, walletAddress, signature, message, gstDetails = {}) =>
     apiFetch('/api/subscription/metamask-pay', {
       method: 'POST',
-      body:   JSON.stringify({
-        plan:           planKey,
-        cycle,
-        wallet_address: walletAddress,
-        signature,
-        message,
-        gstin:          gstDetails.gstin || undefined,
-        pan:            gstDetails.pan   || undefined,
-      }),
+      body:   JSON.stringify({ plan: planKey, cycle, wallet_address: walletAddress,
+        signature, message, gstin: gstDetails.gstin || undefined, pan: gstDetails.pan || undefined }),
     }),
   getHistory: ({ limit = 20, cursor } = {}) =>
     apiFetch(`/api/subscription/history?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`),
@@ -500,6 +461,13 @@ export const tradesAPI = {
   stats   : ()        => apiFetch('/api/trades/stats'),
   myFees  : (p = {})  => apiFetch(`/api/trades/my-fees${qs(p)}`),
   ethRate : ()        => apiFetch('/api/trades/eth-rate'),
+  checkoutOrder  : (payload) => apiFetch('/api/trades/checkout-order',  { method: 'POST', body: JSON.stringify(payload) }),
+  checkoutVerify : (payload) => apiFetch('/api/trades/checkout-verify', { method: 'POST', body: JSON.stringify(payload) }),
+  verifyOnChain  : (tradeId) => apiFetch(`/api/trades/${tradeId}/verify`),
+  getInvoice: (tradeId) => {
+    window.open(`${BASE}/api/trades/${tradeId}/invoice`, '_blank', 'noopener,noreferrer');
+  },
+  hasInvoice: (trade) => Boolean(trade?.has_invoice || trade?.trade_invoice_number),
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -518,12 +486,30 @@ export const marketAPI = {
 export const emissionsAPI = {
   getMy          : ()        => apiFetch('/api/emissions/my'),
   getActivities  : (p = {})  => apiFetch(`/api/emissions/activities${qs(p)}`),
-  log            : (body)    => apiFetch('/api/emissions/log',     { method: 'POST', body: JSON.stringify(body) }),
-  bulk           : (records) => apiFetch('/api/emissions/bulk',    { method: 'POST', body: JSON.stringify({ records }) }),
+  log            : (body)    => apiFetch('/api/emissions/log',  { method: 'POST', body: JSON.stringify(body) }),
+  bulk           : (records) => apiFetch('/api/emissions/bulk', { method: 'POST', body: JSON.stringify({ records }) }),
   getSummary     : (year)    => apiFetch(`/api/emissions/summary${qs({ year })}`),
   getProfile     : ()        => apiFetch('/api/emissions/profile'),
   saveProfile    : (body)    => apiFetch('/api/emissions/profile', { method: 'POST', body: JSON.stringify(body) }),
   deleteActivity : (id)      => apiFetch(`/api/emissions/activities/${id}`, { method: 'DELETE' }),
+
+  // [FEAT-BULK-DELETE] Delete multiple records in one request.
+  // GHGLedger.jsx calls this when user confirms bulk deletion via checkboxes.
+  bulkDelete: (ids) => apiFetch('/api/emissions/bulk-delete', {
+    method: 'POST',
+    body:   JSON.stringify({ ids }),
+  }),
+
+  // Maker-Checker approval workflow
+  transitionState  : (id, state, comment) =>
+    apiFetch(`/api/emissions/activities/${id}/state`, { method: 'PATCH', body: JSON.stringify({ state, comment }) }),
+  submitAdjustment : (id, { field, old_val, new_val, reason }) =>
+    apiFetch(`/api/emissions/activities/${id}/adjustment`, { method: 'POST', body: JSON.stringify({ field, old_val, new_val, reason }) }),
+  getAdjustments   : (id) => apiFetch(`/api/emissions/activities/${id}/adjustments`),
+
+  // Source-to-number lineage
+  getLineage    : (id) => apiFetch(`/api/emissions/activities/${id}/lineage`),
+  getEFVersions : ()   => apiFetch('/api/emissions/ef-versions'),
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -539,8 +525,8 @@ export const portfolioAPI = {
   submitCredit             : (data)   => apiFetch('/api/portfolio/submit-credit',     { method: 'POST',   body: JSON.stringify(data) }),
   cancelSubmission         : (id)     => apiFetch(`/api/portfolio/submissions/${id}`, { method: 'DELETE' }),
   getWatchlist             : ()       => apiFetch('/api/portfolio/watchlist'),
-  addToWatchlist           : (lid)    => apiFetch('/api/portfolio/watchlist',        { method: 'POST',   body: JSON.stringify({ listingId: lid }) }),
-  removeFromWatchlist      : (lid)    => apiFetch(`/api/portfolio/watchlist/${lid}`, { method: 'DELETE' }),
+  addToWatchlist           : (lid)    => apiFetch('/api/portfolio/watchlist',         { method: 'POST',   body: JSON.stringify({ listingId: lid }) }),
+  removeFromWatchlist      : (lid)    => apiFetch(`/api/portfolio/watchlist/${lid}`,  { method: 'DELETE' }),
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -559,6 +545,15 @@ export const orgAPI = {
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
+// ORG ROLES
+// ══════════════════════════════════════════════════════════════════════════════
+export const orgRoleAPI = {
+  getMyRole   : () => apiFetch('/api/org/my-role'),
+  setUserRole : (userId, role) =>
+    apiFetch('/api/org/roles', { method: 'POST', body: JSON.stringify({ userId, role }) }),
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
 // PAT SCHEME
 // ══════════════════════════════════════════════════════════════════════════════
 export const patAPI = {
@@ -567,26 +562,16 @@ export const patAPI = {
     apiFetch('/api/pat/profile', {
       method: 'POST',
       body:   JSON.stringify({
-        sector:               body.sector,
-        cycle:                body.cycle,
-        dc_name:              body.dc_name,
-        dc_number:            body.dc_number,
-        reporting_year:       body.reporting_year,
-        baseline_sec:         body.baseline_sec         ?? null,
-        target_sec:           body.target_sec           ?? null,
+        sector: body.sector, cycle: body.cycle, dc_name: body.dc_name,
+        dc_number: body.dc_number, reporting_year: body.reporting_year,
+        baseline_sec: body.baseline_sec ?? null, target_sec: body.target_sec ?? null,
         target_reduction_pct: body.target_reduction_pct ?? null,
-        gate_capacity:        body.gate_capacity        ?? null,
-        monthly_gj:           body.monthly_gj,
-        energy_sources:       body.energy_sources       ?? null,
-        current_sec:          body.current_sec          ?? null,
-        energy_saved_gj:      body.energy_saved_gj      ?? null,
-        escerts:              body.escerts              ?? 0,
-        escert_deficit:       body.escert_deficit       ?? 0,
-        auditor_name:         body.auditor_name         ?? null,
-        auditor_firm:         body.auditor_firm         ?? null,
-        auditor_reg_number:   body.auditor_reg_number   ?? null,
-        audit_date:           body.audit_date           ?? null,
-        audit_verified:       body.audit_verified       ?? false,
+        gate_capacity: body.gate_capacity ?? null, monthly_gj: body.monthly_gj,
+        energy_sources: body.energy_sources ?? null, current_sec: body.current_sec ?? null,
+        energy_saved_gj: body.energy_saved_gj ?? null, escerts: body.escerts ?? 0,
+        escert_deficit: body.escert_deficit ?? 0, auditor_name: body.auditor_name ?? null,
+        auditor_firm: body.auditor_firm ?? null, auditor_reg_number: body.auditor_reg_number ?? null,
+        audit_date: body.audit_date ?? null, audit_verified: body.audit_verified ?? false,
       }),
     }),
 };
@@ -597,13 +582,13 @@ export const patAPI = {
 export const cctsAPI = {
   getProfile:  ()     => apiFetch('/api/ccts/profile'),
   saveProfile: (body) => apiFetch('/api/ccts/profile', { method: 'POST', body: JSON.stringify(body) }),
-  getMonthlyData:  (year)       => apiFetch(`/api/ccts/monthly${qs({ year })}`),
-  saveMonthlyData: (year, body) => apiFetch('/api/ccts/monthly', { method: 'POST', body: JSON.stringify({ year, ...body }) }),
+  getMonthlyData:    (year)       => apiFetch(`/api/ccts/monthly${qs({ year })}`),
+  saveMonthlyData:   (year, body) => apiFetch('/api/ccts/monthly', { method: 'POST', body: JSON.stringify({ year, ...body }) }),
   getAcvaStatus:     ()     => apiFetch('/api/ccts/acva/status'),
   submitAcvaRequest: (body) => apiFetch('/api/ccts/acva/submit', { method: 'POST', body: JSON.stringify(body) }),
   getRegistryStatus: ()     => apiFetch('/api/ccts/registry/status'),
   submitToRegistry:  (body) => apiFetch('/api/ccts/registry/submit', { method: 'POST', body: JSON.stringify(body) }),
-  exportForm: (formType) => apiFetch(`/api/ccts/forms/${formType}/export`),
+  exportForm: (formType)    => apiFetch(`/api/ccts/forms/${formType}/export`),
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -612,9 +597,11 @@ export const cctsAPI = {
 export const brsrAPI = {
   getEnvironmental:  (year)        => apiFetch(`/api/brsr/environmental${qs({ year })}`),
   saveEnvironmental: (year, body)  => apiFetch('/api/brsr/environmental', { method: 'POST', body: JSON.stringify({ year, ...body }) }),
-  getSummary: (year) => apiFetch(`/api/brsr/summary${qs({ year })}`),
+  getSummary:        (year)        => apiFetch(`/api/brsr/summary${qs({ year })}`),
   getForm:  (formCode, year)       => apiFetch(`/api/brsr/forms/${formCode}${qs({ year })}`),
   saveForm: (formCode, year, body) => apiFetch(`/api/brsr/forms/${formCode}`, { method: 'POST', body: JSON.stringify({ year, ...body }) }),
+  autoPopulate: (year) => apiFetch(`/api/brsr/auto-populate/${year}`),
+  esgSummary:   (year) => apiFetch(`/api/brsr/esg-summary/${year}`),
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -625,10 +612,28 @@ export const auditAPI = {
   requestVerifier: (body)       => apiFetch('/api/audit/verifiers', { method: 'POST', body: JSON.stringify(body) }),
   updateVerifier:  (id, body)   => apiFetch(`/api/audit/verifiers/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   removeVerifier:  (id)         => apiFetch(`/api/audit/verifiers/${id}`, { method: 'DELETE' }),
-  getLogs:  (p = {}) => apiFetch(`/api/audit/logs${qs(p)}`),
-  getLog:   (id)     => apiFetch(`/api/audit/logs/${id}`),
-  getStatements:   (year)     => apiFetch(`/api/audit/statements${qs({ year })}`),
-  uploadStatement: (formData) => apiFetchMultipart('/api/audit/statements', formData),
+  getLogs:         (p = {})     => apiFetch(`/api/audit/logs${qs(p)}`),
+  getLog:          (id)         => apiFetch(`/api/audit/logs/${id}`),
+  getStatements:   (year)       => apiFetch(`/api/audit/statements${qs({ year })}`),
+  uploadStatement: (formData)   => apiFetchMultipart('/api/audit/statements', formData),
+
+  // [FEAT-LEDGER-CHAIN] Lightweight per-user ledger chain (ghg_ledger_chain table).
+  // GHGLedger.jsx uses these to read and write the Chain Log panel.
+  getChain:   ({ year, limit = 50 } = {}) => apiFetch(`/api/audit/chain${qs({ year, limit })}`),
+  writeChain: (payload)                   => apiFetch('/api/audit/chain', { method: 'POST', body: JSON.stringify(payload) }),
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AUDITOR ACCESS
+// ══════════════════════════════════════════════════════════════════════════════
+export const auditorAccessAPI = {
+  generateToken : ({ auditor_email, auditor_firm, expires_days, package: pkg, year }) =>
+    apiFetch('/api/audit/auditor-token', {
+      method: 'POST',
+      body:   JSON.stringify({ auditor_email, auditor_firm, expires_days, package: pkg, year }),
+    }),
+  listTokens  : ()   => apiFetch('/api/audit/auditor-tokens'),
+  revokeToken : (id) => apiFetch(`/api/audit/auditor-tokens/${id}`, { method: 'DELETE' }),
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -640,10 +645,7 @@ export const reportsAPI = {
     const res = await fetch(`${BASE}/api/reports/generate`, {
       method:      'POST',
       credentials: 'include',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-CSRF-Token': getCsrfToken(),
-      },
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
       body: JSON.stringify(payload),
     });
     if (!res.ok) {
@@ -670,8 +672,8 @@ export const sbtiAPI = {
 // ACTION PLAN
 // ══════════════════════════════════════════════════════════════════════════════
 export const actionPlanAPI = {
-  getPlan:  ()     => apiFetch('/api/action-plan'),
-  savePlan: (body) => apiFetch('/api/action-plan', { method: 'POST', body: JSON.stringify(body) }),
+  getPlan:         ()     => apiFetch('/api/action-plan'),
+  savePlan:        (body) => apiFetch('/api/action-plan', { method: 'POST', body: JSON.stringify(body) }),
   getMRVCalendar:  ()     => apiFetch('/api/action-plan/mrv-calendar'),
   saveMRVCalendar: (body) => apiFetch('/api/action-plan/mrv-calendar', { method: 'POST', body: JSON.stringify(body) }),
 };
@@ -680,12 +682,12 @@ export const actionPlanAPI = {
 // SUPPLIERS
 // ══════════════════════════════════════════════════════════════════════════════
 export const supplierAPI = {
-  getSuppliers:     (p = {})    => apiFetch(`/api/suppliers${qs(p)}`),
-  getSupplier:      (id)        => apiFetch(`/api/suppliers/${id}`),
-  inviteSupplier:   (body)      => apiFetch('/api/suppliers/invite', { method: 'POST', body: JSON.stringify(body) }),
-  saveSupplierData: (id, body)  => apiFetch(`/api/suppliers/${id}/data`, { method: 'POST', body: JSON.stringify(body) }),
-  getSupplierData:  (id, year)  => apiFetch(`/api/suppliers/${id}/data${qs({ year })}`),
-  removeSupplier:   (id)        => apiFetch(`/api/suppliers/${id}`, { method: 'DELETE' }),
+  getSuppliers:     (p = {})   => apiFetch(`/api/suppliers${qs(p)}`),
+  getSupplier:      (id)       => apiFetch(`/api/suppliers/${id}`),
+  inviteSupplier:   (body)     => apiFetch('/api/suppliers/invite', { method: 'POST', body: JSON.stringify(body) }),
+  saveSupplierData: (id, body) => apiFetch(`/api/suppliers/${id}/data`, { method: 'POST', body: JSON.stringify(body) }),
+  getSupplierData:  (id, year) => apiFetch(`/api/suppliers/${id}/data${qs({ year })}`),
+  removeSupplier:   (id)       => apiFetch(`/api/suppliers/${id}`, { method: 'DELETE' }),
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -707,6 +709,18 @@ export const notificationsAPI = {
   markRead:    (id)     => apiFetch(`/api/notifications/${id}/read`,  { method: 'PATCH' }),
   markAllRead: ()       => apiFetch('/api/notifications/read-all',    { method: 'PATCH' }),
   deleteOne:   (id)     => apiFetch(`/api/notifications/${id}`,       { method: 'DELETE' }),
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SUPPORT
+// ══════════════════════════════════════════════════════════════════════════════
+export const supportAPI = {
+  raiseTicket    : (body) => apiFetch('/api/support/tickets',    { method: 'POST', body: JSON.stringify(body) }),
+  logFeedback    : (body) => apiFetch('/api/support/feedback',   { method: 'POST', body: JSON.stringify(body) }),
+  logUnanswered  : (body) => apiFetch('/api/support/unanswered', { method: 'POST', body: JSON.stringify(body) }),
+  getTickets     : (p = {})   => apiFetch(`/api/support/tickets${qs(p)}`),
+  updateTicket   : (id, body) => apiFetch(`/api/support/tickets/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  getAnalytics   : ()         => apiFetch('/api/support/analytics'),
 };
 
 export default apiFetch;

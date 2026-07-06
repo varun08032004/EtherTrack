@@ -1,38 +1,13 @@
 // routes/wallet.js — EtherTrack (NODAL ACCOUNT MODEL)
 // ─────────────────────────────────────────────────────────────────────────────
-// ARCHITECTURE: Razorpay holds all user float in a nodal/escrow account.
-// EtherTrack's DB is a pure ledger layer — inr_balance reflects what Razorpay
-// is holding on behalf of each user, but actual INR never touches our bank.
+// FIXES in this version:
 //
-// This means EtherTrack does NOT require a PPI license — Razorpay operates
-// under their own PPI authorization. We are a merchant using Razorpay Routes.
+// [FIX-2] /bind route now stores wallet_address as lowercase to prevent
+//         case mismatch between MetaMask checksummed address and DB value.
 //
-// Money flow:
-//   DEPOSIT:    User → Razorpay checkout → Razorpay nodal account
-//               → DB ledger credit (no money in our DB/bank)
-//
-//   TRADE BUY:  DB ledger debit (user)
-//               → Razorpay Transfer: nodal → EtherTrack merchant account
-//
-//   TRADE SELL: Razorpay Transfer: EtherTrack merchant → nodal (credit user)
-//               → DB ledger credit
-//
-//   WITHDRAW:   DB ledger debit
-//               → Razorpay Payout: nodal → user bank account directly
-//
-// Key change from old wallet.js:
-//   adjustBalance()  → pure ledger, no actual money movement
-//   deposit/verify   → confirms Razorpay captured; ledger update only
-//   withdraw         → fires razorpay.payouts.create() from nodal account
-//   trade-deduct     → DB ledger debit + razorpay transfer to merchant account
-//   trade-refund     → DB ledger credit + razorpay transfer back to nodal
-//
-// Requirements:
-//   - Razorpay Route enabled on your account (nodal/escrow)
-//   - Razorpay Payouts enabled (for withdrawals)
-//   - ENV: RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, RAZORPAY_WEBHOOK_SECRET
-//          RAZORPAY_ACCOUNT_NUMBER (your Razorpay X / nodal account number)
-//          RAZORPAY_MERCHANT_ACCOUNT_ID (linked merchant account for trade settlements)
+// [FIX-3] /bind route calls invalidateUserCache() after binding so the
+//         Redis-cached user object is busted immediately — stale cache
+//         was causing 'wallet not verified' errors right after binding.
 // ─────────────────────────────────────────────────────────────────────────────
 
 'use strict';
@@ -46,9 +21,9 @@ const crypto     = require('crypto');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const pino       = require('pino');
 
-const { safeQuery: query, pool } = require('../db/pool');
-const { authenticate }           = require('../middleware/auth');
-const { createNotification }     = require('./notifications');
+const { safeQuery: query, pool }       = require('../db/pool');
+const { authenticate, invalidateUserCache } = require('../middleware/auth');
+const { createNotification }           = require('./notifications');
 
 // ── Compliance stubs ──────────────────────────────────────────────────────────
 const runComplianceChecks = async (userId, amount, type) => ({
@@ -125,9 +100,7 @@ const sanitiseText = (str, maxLen = 60) =>
     ? str.replace(/[^\x20-\x7E\u0900-\u097F]/g, '').trim().slice(0, maxLen)
     : '';
 
-// ── LEDGER HELPER — pure DB accounting, no money movement ────────────────────
-// inr_balance in users table = ledger balance (mirror of what Razorpay nodal holds)
-// Actual INR is always in Razorpay nodal account, never in EtherTrack's bank.
+// ── LEDGER HELPER ─────────────────────────────────────────────────────────────
 async function adjustLedger(userId, amount, type, client) {
   const col = type === 'credit' ? 'inr_balance + $1' : 'inr_balance - $1';
   const { rows } = await client.query(
@@ -150,20 +123,16 @@ const generateInvoiceNo = txId =>
 const DAILY_WITHDRAWAL_LIMIT = 200000;
 
 // ── Razorpay Payout helper ────────────────────────────────────────────────────
-// Creates a contact + fund account + payout from nodal account to user bank.
-// Razorpay Payouts API: https://razorpay.com/docs/api/x/payouts/
 async function initiateRazorpayPayout({ amount, tdsAmount, accountName, accountNumber, ifsc, reference, userId }) {
   const rzp = getRazorpay();
   const netAmount = amount - (tdsAmount || 0);
 
-  // Step 1: Create contact
   const contact = await rzp.contacts.create({
     name:         sanitiseText(accountName, 60),
     type:         'customer',
     reference_id: `ET_${userId.slice(0, 8)}_${Date.now()}`,
   });
 
-  // Step 2: Create fund account (bank account linked to contact)
   const fundAccount = await rzp.fundAccount.create({
     contact_id:   contact.id,
     account_type: 'bank_account',
@@ -174,53 +143,39 @@ async function initiateRazorpayPayout({ amount, tdsAmount, accountName, accountN
     },
   });
 
-  // Step 3: Create payout from nodal account
-  // Amount in paise, net of TDS
   const payout = await rzp.payouts.create({
-    account_number: process.env.RAZORPAY_ACCOUNT_NUMBER, // nodal account
-    fund_account_id: fundAccount.id,
-    amount:          Math.round(netAmount * 100),         // paise
-    currency:        'INR',
-    mode:            'IMPS',
-    purpose:         'payout',
+    account_number:       process.env.RAZORPAY_ACCOUNT_NUMBER,
+    fund_account_id:      fundAccount.id,
+    amount:               Math.round(netAmount * 100),
+    currency:             'INR',
+    mode:                 'IMPS',
+    purpose:              'payout',
     queue_if_low_balance: true,
-    reference_id:    reference,
-    narration:       `EtherTrack withdrawal ${reference}`,
+    reference_id:         reference,
+    narration:            `EtherTrack withdrawal ${reference}`,
   });
 
   return { contact, fundAccount, payout };
 }
 
-// ── Razorpay Transfer helper ──────────────────────────────────────────────────
-// Moves money between nodal account and EtherTrack merchant account for trades.
-// Uses Razorpay Routes transfer API.
+// ── Razorpay Transfer helpers ─────────────────────────────────────────────────
 async function transferNodalToMerchant(amount, reference) {
   const rzp = getRazorpay();
-  // Transfer from nodal to linked merchant account
   return rzp.transfers.create({
-    account:    process.env.RAZORPAY_MERCHANT_ACCOUNT_ID,
-    amount:     Math.round(amount * 100), // paise
-    currency:   'INR',
-    notes: {
-      reference,
-      purpose: 'trade_settlement',
-    },
+    account:  process.env.RAZORPAY_MERCHANT_ACCOUNT_ID,
+    amount:   Math.round(amount * 100),
+    currency: 'INR',
+    notes:    { reference, purpose: 'trade_settlement' },
   });
 }
 
 async function transferMerchantToNodal(amount, reference) {
-  // Reverse transfer — when trade is refunded or sell proceeds go back to user nodal
-  // In practice: create a payout from merchant account back to nodal
-  // This depends on your Razorpay Route setup; adjust account IDs accordingly.
   const rzp = getRazorpay();
   return rzp.transfers.create({
-    account:    process.env.RAZORPAY_NODAL_ACCOUNT_ID || process.env.RAZORPAY_ACCOUNT_NUMBER,
-    amount:     Math.round(amount * 100),
-    currency:   'INR',
-    notes: {
-      reference,
-      purpose: 'trade_refund',
-    },
+    account:  process.env.RAZORPAY_NODAL_ACCOUNT_ID || process.env.RAZORPAY_ACCOUNT_NUMBER,
+    amount:   Math.round(amount * 100),
+    currency: 'INR',
+    notes:    { reference, purpose: 'trade_refund' },
   });
 }
 
@@ -238,7 +193,7 @@ router.get('/health', async (req, res) => {
     db:           dbOk ? 'up' : 'down',
     ethRateAge:   rateAge,
     ethRateStale: rateAge > 10 * 60 * 1000,
-    nodalModel:   true, // confirms nodal architecture is active
+    nodalModel:   true,
     ts:           new Date().toISOString(),
   });
 });
@@ -356,7 +311,6 @@ router.get('/transactions', authenticate, walletReadLimiter, async (req, res) =>
 });
 
 // ── Deposit: create order ─────────────────────────────────────────────────────
-// Creates Razorpay order — money will land in Razorpay nodal account on capture.
 router.post('/deposit/create-order', authenticate, walletWriteLimiter, async (req, res) => {
   const { amount, method } = req.body;
 
@@ -399,8 +353,6 @@ router.post('/deposit/create-order', authenticate, walletWriteLimiter, async (re
 });
 
 // ── Deposit: verify ───────────────────────────────────────────────────────────
-// Verifies Razorpay signature, then credits ledger ONLY.
-// Money is already in Razorpay nodal — we just update our accounting.
 router.post('/deposit/verify', authenticate, async (req, res) => {
   const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
   if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature)
@@ -419,7 +371,6 @@ router.post('/deposit/verify', authenticate, async (req, res) => {
 
     if (!txRows.length) {
       await client.query('ROLLBACK');
-      // Idempotency — return success if already processed
       const { rows: done } = await query(
         `SELECT balance_after, reference, razorpay_payment_id
          FROM wallet_transactions
@@ -440,7 +391,6 @@ router.post('/deposit/verify', authenticate, async (req, res) => {
 
     const tx = txRows[0];
 
-    // Verify Razorpay signature
     const expectedSig = crypto
       .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
@@ -451,7 +401,6 @@ router.post('/deposit/verify', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Payment signature verification failed', code: 'SIG_MISMATCH' });
     }
 
-    // Ledger credit only — Razorpay already holds the money in nodal account
     const { rows: userRows } = await client.query(
       'SELECT inr_balance FROM users WHERE id = $1', [req.user.id]
     );
@@ -498,8 +447,6 @@ router.post('/deposit/verify', authenticate, async (req, res) => {
 });
 
 // ── Webhook ───────────────────────────────────────────────────────────────────
-// Fallback for cases where user closes browser before /verify fires.
-// Razorpay will POST payment.captured — we credit ledger here idempotently.
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig         = req.headers['x-razorpay-signature'];
   const body        = req.body;
@@ -572,7 +519,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       );
     }
 
-    // Payout webhook — update withdrawal status when Razorpay processes it
     if (event.event === 'payout.processed') {
       const payout = event.payload.payout.entity;
       await query(
@@ -587,7 +533,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 
     if (event.event === 'payout.failed') {
       const payout = event.payload.payout.entity;
-      // Payout failed — reverse the ledger debit and return funds to user
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
@@ -608,7 +553,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
              WHERE id = $1`,
             [tx.id]
           );
-          // Record reversal transaction
           await client.query(
             `INSERT INTO wallet_transactions
                (user_id, type, method, amount, status, balance_before, balance_after, notes)
@@ -644,9 +588,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 });
 
 // ── Withdraw ──────────────────────────────────────────────────────────────────
-// Debits ledger, then fires Razorpay Payout from nodal account to user's bank.
-// User's money flows: Razorpay nodal → user's bank account directly.
-// EtherTrack's bank account is never involved.
 router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
   const { amount, accountNumber, ifsc, accountName } = req.body;
 
@@ -698,7 +639,6 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
     const tdsAmount     = compliance.tdsAmount || 0;
     const netAmount     = compliance.netAmount  || amount;
     const balanceBefore = currentBalance;
-    // Debit ledger immediately — payout is async
     const balanceAfter  = await adjustLedger(req.user.id, amount, 'debit', client);
 
     const { rows: txRows } = await client.query(
@@ -722,7 +662,6 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
 
     await client.query('COMMIT');
 
-    // Fire Razorpay Payout from nodal account — async, status updated via webhook
     let payoutId = null;
     try {
       const { payout } = await initiateRazorpayPayout({
@@ -730,14 +669,12 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
         ifsc: ifsc.toUpperCase(), reference: txRef, userId: req.user.id,
       });
       payoutId = payout.id;
-      // Store payout ID for webhook reconciliation
       await query(
         `UPDATE wallet_transactions SET razorpay_payout_id = $1 WHERE id = $2`,
         [payoutId, txId]
       );
       log.info({ userId: req.user.id, amount, txRef, payoutId }, 'Razorpay payout initiated');
     } catch (payoutErr) {
-      // Payout failed to initiate — reverse ledger debit
       log.error({ err: payoutErr?.message, userId: req.user.id, txRef }, 'Payout initiation failed — reversing ledger');
       const reverseClient = await pool.connect();
       try {
@@ -804,8 +741,6 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
 });
 
 // ── Trade deduct ──────────────────────────────────────────────────────────────
-// Debits user ledger, then transfers from nodal → EtherTrack merchant account.
-// This settles the trade revenue into our operating account.
 router.post('/trade-deduct', authenticate, async (req, res) => {
   const { amount, tokenId, quantity, projectName } = req.body;
   if (!amount || amount <= 0)
@@ -833,16 +768,13 @@ router.post('/trade-deduct', authenticate, async (req, res) => {
     );
     await client.query('COMMIT');
 
-    // Transfer from Razorpay nodal → EtherTrack merchant account (async, non-blocking)
     const txRef = txRows[0].reference;
     try {
       await transferNodalToMerchant(amount, txRef);
       log.info({ userId: req.user.id, amount, tokenId }, 'Trade settled — nodal → merchant transfer done');
     } catch (transferErr) {
-      // Non-critical: ledger debit succeeded; transfer can be retried via reconciliation job
       log.error({ err: transferErr?.message, userId: req.user.id, txRef },
         'Nodal→merchant transfer failed — schedule reconciliation');
-      // TODO: push txRef to a reconciliation queue (e.g. Redis LPUSH 'pending_transfers' txRef)
     }
 
     try {
@@ -864,7 +796,6 @@ router.post('/trade-deduct', authenticate, async (req, res) => {
 });
 
 // ── Trade refund ──────────────────────────────────────────────────────────────
-// Credits user ledger, then transfers from EtherTrack merchant → nodal account.
 router.post('/trade-refund', authenticate, async (req, res) => {
   const { amount, reference } = req.body;
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
@@ -896,7 +827,6 @@ router.post('/trade-refund', authenticate, async (req, res) => {
     );
     await client.query('COMMIT');
 
-    // Transfer from EtherTrack merchant account back to nodal (replenish user's float)
     try {
       await transferMerchantToNodal(amount, reference);
       log.info({ userId: req.user.id, amount, reference }, 'Refund settled — merchant → nodal transfer done');
@@ -987,12 +917,17 @@ router.post('/bind', authenticate, walletWriteLimiter, async (req, res) => {
       });
     }
 
+    // [FIX-2] Store lowercase to prevent case mismatch with MetaMask checksummed addresses
     await query(
       'UPDATE users SET wallet_address = $1, wallet_bound_at = NOW(), updated_at = NOW() WHERE id = $2',
-      [walletAddress, req.user.id]
+      [walletAddress.toLowerCase(), req.user.id]
     );
+
+    // [FIX-3] Invalidate Redis cache so next request picks up the new wallet_address
+    await invalidateUserCache(req.user.id);
+
     log.info({ userId: req.user.id, wallet: mask(walletAddress) }, 'Wallet bound');
-    res.json({ message: 'Wallet bound successfully', walletAddress });
+    res.json({ message: 'Wallet bound successfully', walletAddress: walletAddress.toLowerCase() });
   } catch (err) {
     log.error({ err: err?.message, userId: req.user.id }, 'Wallet bind error');
     res.status(500).json({ error: 'Failed to bind wallet' });

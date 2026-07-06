@@ -1,104 +1,83 @@
-// routes/brsr.js
-// SEBI BRSR Core — Principle 6 Environmental KPIs
-// P6-E2 Energy · P6-E3 Water · P6-E4 Waste
-// ── Fix log:
-//    [FIX-AUDIT-HASH]    insertAuditEntry() uses SHA-256 hash chain — same
-//                        as audit.js. Fixes NOT NULL crash on audit_log.hash.
-//    [FIX-YEAR]          safeYear() bounds check 2000–2100.
-//    [FIX-PREV-HASH-TX]  getPrevHash() + insertAuditEntry() accept a pg client
-//                        so both run inside the same transaction from
-//                        withTransaction(). Prevents stale prev_hash reads
-//                        under concurrent saves. Uses SELECT…FOR UPDATE SKIP
-//                        LOCKED to lock the latest audit row.
-//    [FIX-WITH-TX]       Manual pool.connect()/BEGIN/COMMIT/ROLLBACK replaced
-//                        with pool.js's own withTransaction() helper — which
-//                        already handles ROLLBACK + client.release() correctly,
-//                        including logging rollback failures.
-//    [FIX-NULL-ZERO]     cleanNumericObj() preserves null (not entered) vs 0
-//                        (confirmed zero). BRSR PDF generator distinguishes.
-//    [FIX-ROLLBACK-LOG]  Handled inside withTransaction() in pool.js.
-//    [FIX-ARRAY-GUARD]   req.body sections validated as plain objects before
-//                        cleanNumericObj — prevents silent empty output.
-//    [FIX-RATE-LIMIT]    Per-user rate limiter: 10 saves / 60s. Replace with
-//                        express-rate-limit + Redis for multi-instance prod.
-//    [FIX-STAGING-ERR]   Non-production error responses include err.message.
-
 'use strict';
+/**
+ * routes/brsr.js — EtherTrack SEBI BRSR Core + ESG Summary
+ * ─────────────────────────────────────────────────────────────────────────────
+ * EXISTING ROUTES (unchanged):
+ *   GET  /api/brsr/environmental        — fetch saved data
+ *   POST /api/brsr/environmental        — save energy/water/waste data
+ *   GET  /api/brsr/summary              — completeness + KPIs
+ *
+ * NEW ROUTES ADDED:
+ *   GET  /api/brsr/auto-populate/:year  — pre-fill BRSR from trades + emissions
+ *   GET  /api/brsr/esg-summary/:year    — full CFO dashboard (trades + emissions
+ *                                         + BRSR + retirements in one response)
+ *
+ * DB tables confirmed in Supabase:
+ *   brsr_environmental  ✅ (id, user_id, year, energy, water, waste, created_at, updated_at)
+ *   emission_activities ✅ (id, user_id, date, scope, co2e, org_id, ...)
+ *   retirements         ✅ (id, retired_by, amount, retire_year, retire_scope, ...)
+ *   trades              ✅ (buyer_id, quantity, buyer_pays_inr, status, created_at, ...)
+ *   pat_profiles        ❌ not in DB — ESG summary skips gracefully
+ *   ccts_profiles       ❌ not in DB — ESG summary skips gracefully
+ */
 
 const router = require('express').Router();
 const { safeQuery: query, withTransaction } = require('../db/pool');
 const { authenticate } = require('../middleware/auth');
 const crypto = require('crypto');
 
-// ── [FIX-RATE-LIMIT] Simple in-memory rate limiter per user
-// For production, replace with express-rate-limit + Redis store
+// ── Rate limiter (in-memory, replace with Redis for multi-instance) ───────────
 const saveRateLimiter = (() => {
-  const map = new Map(); // userId → { count, resetAt }
+  const map = new Map();
   const WINDOW_MS = 60_000;
   const MAX_SAVES = 10;
-
   return (userId) => {
-    const now = Date.now();
+    const now   = Date.now();
     const entry = map.get(userId);
     if (!entry || now > entry.resetAt) {
       map.set(userId, { count: 1, resetAt: now + WINDOW_MS });
-      return false; // not limited
+      return false;
     }
-    if (entry.count >= MAX_SAVES) return true; // limited
+    if (entry.count >= MAX_SAVES) return true;
     entry.count++;
     return false;
   };
 })();
 
-// ─────────────────────────────────────────────────────────────────────────────
-// HELPERS
-// ─────────────────────────────────────────────────────────────────────────────
-
+// ── Helpers ───────────────────────────────────────────────────────────────────
 const sanitiseText = (val, maxLen = 500) =>
   String(val || '').replace(/<[^>]*>/g, '').replace(/['"`;\\]/g, '').trim().slice(0, maxLen);
 
-// [FIX-YEAR] Bounded year validation
 const safeYear = (val, fallback = null) => {
   const n = parseInt(val, 10);
   if (!Number.isFinite(n) || n < 2000 || n > 2100) return fallback;
   return n;
 };
 
-// [FIX-NULL-ZERO] safeFloat returns null for absent/invalid, NOT 0
-// Callers decide what null means for their context
 const safeFloat = (val, min = 0, max = 1e12) => {
   if (val === null || val === undefined) return null;
   const n = parseFloat(val);
   return Number.isFinite(n) && n >= min && n <= max ? n : null;
 };
 
-const isPureObject = (v) =>
-  v !== null && typeof v === 'object' && !Array.isArray(v);
+const isPureObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
 const dbErr = (res, context = 'Operation', err = null) => {
   if (err) console.error(`[BRSR] ${context} error:`, err.message);
   const msg = process.env.NODE_ENV !== 'production'
-    ? `${context} failed: ${err?.message || 'unknown error'}` // [FIX-STAGING-ERR]
+    ? `${context} failed: ${err?.message || 'unknown error'}`
     : 'An error occurred. Please try again.';
   return res.status(500).json({ error: msg });
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// [FIX-AUDIT-HASH] + [FIX-PREV-HASH-TX] Hash-chained audit entry helper
-// client param = open pg client from pool.connect() — runs inside transaction
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Hash-chained audit entry ──────────────────────────────────────────────────
 const sha256 = (str) => crypto.createHash('sha256').update(str).digest('hex');
 
-// [FIX-PREV-HASH-TX] Accepts client so the SELECT runs within the open
-// transaction, avoiding stale reads under concurrent saves.
-// SELECT ... FOR UPDATE locks the latest audit row for this user+year
-// so two concurrent POSTs can't both read the same prev_hash.
 const getPrevHash = async (client, userId, year) => {
   const { rows } = await client.query(
     `SELECT hash FROM audit_log
      WHERE user_id = $1 AND year = $2
-     ORDER BY created_at DESC
-     LIMIT 1
+     ORDER BY created_at DESC LIMIT 1
      FOR UPDATE SKIP LOCKED`,
     [userId, year]
   );
@@ -110,71 +89,49 @@ const insertAuditEntry = async (client, userId, year, action, message, meta = {}
   const ts        = new Date().toISOString();
   const hashInput = JSON.stringify({ userId, year, action, message, meta, ts, prevHash });
   const hash      = sha256(hashInput);
-
   const { rows } = await client.query(
     `INSERT INTO audit_log
        (user_id, year, action, message, meta, hash, prev_hash, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-     RETURNING *`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
     [userId, year, action, message, JSON.stringify(meta), hash, prevHash, ts]
   );
   return rows[0];
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Numeric field whitelists — prevents arbitrary key injection into JSONB
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Numeric field whitelists ───────────────────────────────────────────────────
 const ENERGY_NUMERIC_KEYS = [
-  'coal_gj', 'oil_gj', 'gas_gj', 'grid_gj',
-  'solar_gj', 'wind_gj', 'biomass_gj', 'hydro_gj', 'other_ren_gj',
-  'prev_total_gj', 'prev_renewable_gj', 'prev_intensity_gj_cr',
-  'total_gj', 'renewable_gj', 'intensity_gj_cr',
-  'intensity_gj_ppp_m', // [FIX-NULL-ZERO] PPP intensity field
-  'ppp_rate',
+  'coal_gj','oil_gj','gas_gj','grid_gj',
+  'solar_gj','wind_gj','biomass_gj','hydro_gj','other_ren_gj',
+  'prev_total_gj','prev_renewable_gj','prev_intensity_gj_cr',
+  'total_gj','renewable_gj','intensity_gj_cr','intensity_gj_ppp_m','ppp_rate',
 ];
 const WATER_NUMERIC_KEYS = [
-  'surface_kl', 'groundwater_kl', 'thirdparty_kl', 'seawater_kl',
-  'rainwater_kl', 'municipal_kl',
-  'consumption_kl', 'recycled_kl', 'intensity_kl_cr',
-  'prev_withdrawal_kl', 'prev_consumption_kl',
-  'withdrawal_kl', 'intensity_kl_ppp_m',
+  'surface_kl','groundwater_kl','thirdparty_kl','seawater_kl',
+  'rainwater_kl','municipal_kl','consumption_kl','recycled_kl','intensity_kl_cr',
+  'prev_withdrawal_kl','prev_consumption_kl','withdrawal_kl','intensity_kl_ppp_m',
 ];
 const WASTE_NUMERIC_KEYS = [
-  'hazardous_kg', 'ewaste_kg', 'plastic_kg', 'biomedical_kg',
-  'construction_kg', 'battery_kg', 'radioactive_kg', 'non_hazardous_kg',
-  'recycled_kg', 'landfill_kg', 'composted_kg', 'incinerated_kg', 'coprocessed_kg',
-  'prev_total_kg', 'total_kg',
+  'hazardous_kg','ewaste_kg','plastic_kg','biomedical_kg','construction_kg',
+  'battery_kg','radioactive_kg','non_hazardous_kg','recycled_kg','landfill_kg',
+  'composted_kg','incinerated_kg','coprocessed_kg','prev_total_kg','total_kg',
 ];
 
-// [FIX-NULL-ZERO] Preserve null — do NOT coerce to 0.
-// null in the JSONB = "not entered by user"
-// 0 in the JSONB    = "user confirmed this is zero"
-// The BRSR PDF generator must treat these differently per SEBI guidance.
 const cleanNumericObj = (obj, numericKeys, maxVal = 1e12) => {
-  // [FIX-ARRAY-GUARD] Reject non-plain-objects silently → return empty
   if (!isPureObject(obj)) return {};
   const clean = {};
-  for (const key of numericKeys) {
-    // safeFloat returns null for absent/invalid — preserved here, not coerced
-    clean[key] = safeFloat(obj[key], 0, maxVal); // null | number
-  }
-  // Preserve string fields with sanitisation
+  for (const key of numericKeys) clean[key] = safeFloat(obj[key], 0, maxVal);
   for (const key of Object.keys(obj)) {
-    if (numericKeys.includes(key)) continue;
-    if (key === '_meta') continue; // never copy client-supplied _meta
+    if (numericKeys.includes(key) || key === '_meta') continue;
     if (typeof obj[key] === 'string')  { clean[key] = sanitiseText(obj[key], 1000); continue; }
     if (typeof obj[key] === 'boolean') { clean[key] = Boolean(obj[key]);            continue; }
     if (Array.isArray(obj[key])) {
-      clean[key] = obj[key]
-        .filter(v => typeof v === 'string')
-        .map(v => sanitiseText(v, 100))
-        .slice(0, 20);
+      clean[key] = obj[key].filter(v => typeof v === 'string')
+        .map(v => sanitiseText(v, 100)).slice(0, 20);
     }
   }
   return clean;
 };
 
-// JSONB payload size guard — 10KB per section
 const JSON_SIZE_LIMIT = 10 * 1024;
 const checkPayloadSize = (obj, name) => {
   const size = Buffer.byteLength(JSON.stringify(obj), 'utf8');
@@ -187,42 +144,29 @@ const checkPayloadSize = (obj, name) => {
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/environmental', authenticate, async (req, res) => {
   const year = safeYear(req.query.year, new Date().getFullYear());
-  if (req.query.year !== undefined && safeYear(req.query.year) === null) {
+  if (req.query.year !== undefined && safeYear(req.query.year) === null)
     return res.status(400).json({ error: 'Invalid year — must be 2000–2100' });
-  }
-
   try {
     const { rows } = await query(
       `SELECT id, year, energy, water, waste, updated_at
-       FROM brsr_environmental
-       WHERE user_id = $1 AND year = $2`,
+       FROM brsr_environmental WHERE user_id = $1 AND year = $2`,
       [req.user.id, year]
     );
     res.json({ data: rows[0] || null, year });
-  } catch (err) {
-    dbErr(res, 'Fetch BRSR environmental', err);
-  }
+  } catch (err) { dbErr(res, 'Fetch BRSR environmental', err); }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/brsr/environmental
-// [FIX-WITH-TX]      Uses pool.js withTransaction() — client passed through to
-//                    getPrevHash so hash chain runs atomically in same tx.
-// [FIX-NULL-ZERO]    null fields stored as JSON null — NOT coerced to 0.
-// [FIX-RATE-LIMIT]   10 saves / 60s per user
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/environmental', authenticate, async (req, res) => {
-  // [FIX-RATE-LIMIT]
-  if (saveRateLimiter(req.user.id)) {
-    return res.status(429).json({ error: 'Too many saves — please wait a moment before retrying' });
-  }
+  if (saveRateLimiter(req.user.id))
+    return res.status(429).json({ error: 'Too many saves — please wait a moment' });
 
   const year = safeYear(req.body.year, new Date().getFullYear());
-  if (req.body.year !== undefined && safeYear(req.body.year) === null) {
+  if (req.body.year !== undefined && safeYear(req.body.year) === null)
     return res.status(400).json({ error: 'Invalid year — must be 2000–2100' });
-  }
 
-  // [FIX-ARRAY-GUARD] Validate sections are plain objects before cleaning
   const rawEnergy = isPureObject(req.body.energy) ? req.body.energy : {};
   const rawWater  = isPureObject(req.body.water)  ? req.body.water  : {};
   const rawWaste  = isPureObject(req.body.waste)  ? req.body.waste  : {};
@@ -231,7 +175,6 @@ router.post('/environmental', authenticate, async (req, res) => {
   const waterClean  = cleanNumericObj(rawWater,  WATER_NUMERIC_KEYS);
   const wasteClean  = cleanNumericObj(rawWaste,  WASTE_NUMERIC_KEYS);
 
-  // Add regulatory metadata — always server-generated, never from client
   energyClean._meta = {
     gridEmissionFactor: 0.727,
     gridEFSource:       'CEA V20.0 Dec 2024 (FY 2023-24 weighted average)',
@@ -247,10 +190,6 @@ router.post('/environmental', authenticate, async (req, res) => {
     checkPayloadSize(wasteClean,  'waste');
   if (sizeErr) return res.status(400).json({ error: sizeErr });
 
-  // [FIX-WITH-TX] Use pool.js withTransaction() — handles BEGIN/COMMIT/ROLLBACK
-  // + client.release() correctly, including logging rollback failures.
-  // [FIX-PREV-HASH-TX] client is passed into insertAuditEntry so the hash
-  // chain SELECT runs on the same connection inside the open transaction.
   try {
     const savedRow = await withTransaction(async (client) => {
       const { rows } = await client.query(
@@ -258,81 +197,56 @@ router.post('/environmental', authenticate, async (req, res) => {
            (user_id, year, energy, water, waste, updated_at)
          VALUES ($1, $2, $3, $4, $5, NOW())
          ON CONFLICT (user_id, year) DO UPDATE SET
-           energy     = EXCLUDED.energy,
-           water      = EXCLUDED.water,
-           waste      = EXCLUDED.waste,
-           updated_at = NOW()
+           energy = EXCLUDED.energy, water = EXCLUDED.water,
+           waste  = EXCLUDED.waste,  updated_at = NOW()
          RETURNING id, year, energy, water, waste, updated_at`,
-        [
-          req.user.id,
-          year,
-          JSON.stringify(energyClean),
-          JSON.stringify(waterClean),
-          JSON.stringify(wasteClean),
-        ]
+        [req.user.id, year,
+         JSON.stringify(energyClean), JSON.stringify(waterClean), JSON.stringify(wasteClean)]
       );
 
-      // [FIX-PREV-HASH-TX] Same client → hash chain is consistent + atomic
-      await insertAuditEntry(
-        client,
-        req.user.id,
-        year,
-        'UPDATE',
-        `BRSR P6 environmental data saved — ` +
-        // [FIX-NULL-ZERO] null → "not entered" in audit message
-        `Energy: ${energyClean.total_gj ?? 'not entered'} GJ, ` +
+      await insertAuditEntry(client, req.user.id, year, 'UPDATE',
+        `BRSR P6 saved — Energy: ${energyClean.total_gj ?? 'not entered'} GJ, ` +
         `Water: ${waterClean.withdrawal_kl ?? 'not entered'} KL, ` +
         `Waste: ${wasteClean.total_kg ?? 'not entered'} kg`,
         {
-          has_energy:     energyClean.total_gj !== null,
-          has_water:      waterClean.withdrawal_kl !== null,
-          has_waste:      wasteClean.total_kg !== null,
-          // [FIX-NULL-ZERO] Distinguish "zero" from "not entered" in audit meta
+          has_energy: energyClean.total_gj !== null,
+          has_water:  waterClean.withdrawal_kl !== null,
+          has_waste:  wasteClean.total_kg !== null,
           energy_is_zero: energyClean.total_gj === 0,
           water_is_zero:  waterClean.withdrawal_kl === 0,
           waste_is_zero:  wasteClean.total_kg === 0,
-          grid_ef_used:   0.727,
-          grid_ef_source: 'CEA V20.0 Dec 2024',
+          grid_ef_used: 0.727,
         }
       );
-
       return rows[0];
     });
-
     res.json({ message: 'BRSR environmental data saved', data: savedRow });
-  } catch (err) {
-    dbErr(res, 'Save BRSR environmental', err);
-  }
+  } catch (err) { dbErr(res, 'Save BRSR environmental', err); }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/brsr/summary?year=2025
-// [FIX-NULL-ZERO] Distinguishes null (not entered) from 0 (confirmed zero)
-// in completeness calculation — null fields don't count as "entered"
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/summary', authenticate, async (req, res) => {
   const year = safeYear(req.query.year, new Date().getFullYear());
-  if (req.query.year !== undefined && safeYear(req.query.year) === null) {
+  if (req.query.year !== undefined && safeYear(req.query.year) === null)
     return res.status(400).json({ error: 'Invalid year — must be 2000–2100' });
-  }
-
   try {
     const { rows } = await query(
       `SELECT
-         -- [FIX-NULL-ZERO] Use IS NOT NULL checks for completeness
-         energy->>'total_gj'           AS total_gj_raw,
-         water->>'withdrawal_kl'       AS withdrawal_kl_raw,
-         waste->>'total_kg'            AS total_waste_kg_raw,
-         (energy->>'total_gj')::numeric              AS total_gj,
-         (energy->>'renewable_gj')::numeric           AS renewable_gj,
-         (energy->>'intensity_gj_cr')::numeric        AS energy_intensity,
-         (energy->>'intensity_gj_ppp_m')::numeric     AS energy_intensity_ppp,
-         (water->>'withdrawal_kl')::numeric            AS withdrawal_kl,
-         (water->>'recycled_kl')::numeric              AS recycled_kl,
-         (water->>'intensity_kl_cr')::numeric          AS water_intensity,
-         (water->>'intensity_kl_ppp_m')::numeric       AS water_intensity_ppp,
-         (waste->>'total_kg')::numeric                 AS total_waste_kg,
-         (waste->>'hazardous_kg')::numeric             AS hazardous_kg,
+         energy->>'total_gj'      AS total_gj_raw,
+         water->>'withdrawal_kl'  AS withdrawal_kl_raw,
+         waste->>'total_kg'       AS total_waste_kg_raw,
+         (energy->>'total_gj')::numeric          AS total_gj,
+         (energy->>'renewable_gj')::numeric       AS renewable_gj,
+         (energy->>'intensity_gj_cr')::numeric    AS energy_intensity,
+         (energy->>'intensity_gj_ppp_m')::numeric AS energy_intensity_ppp,
+         (water->>'withdrawal_kl')::numeric        AS withdrawal_kl,
+         (water->>'recycled_kl')::numeric          AS recycled_kl,
+         (water->>'intensity_kl_cr')::numeric      AS water_intensity,
+         (water->>'intensity_kl_ppp_m')::numeric   AS water_intensity_ppp,
+         (waste->>'total_kg')::numeric             AS total_waste_kg,
+         (waste->>'hazardous_kg')::numeric         AS hazardous_kg,
          updated_at
        FROM brsr_environmental
        WHERE user_id = $1 AND year = $2`,
@@ -341,31 +255,256 @@ router.get('/summary', authenticate, async (req, res) => {
 
     if (!rows.length) return res.json({ data: null, year, completeness: 0 });
 
-    const r = rows[0];
-
-    // [FIX-NULL-ZERO] null raw = not entered, not the same as zero
+    const r        = rows[0];
     const hasEnergy = r.total_gj_raw !== null;
     const hasWater  = r.withdrawal_kl_raw !== null;
     const hasWaste  = r.total_waste_kg_raw !== null;
-
     const completeness = Math.round(
       ([hasEnergy, hasWater, hasWaste].filter(Boolean).length / 3) * 100
     );
 
     res.json({
-      data: r,
-      year,
-      completeness,
-      // Surface null/zero status explicitly for the frontend
+      data: r, year, completeness,
       dataStatus: {
-        energy: hasEnergy ? (parseFloat(r.total_gj_raw) === 0 ? 'zero' : 'entered') : 'not_entered',
+        energy: hasEnergy ? (parseFloat(r.total_gj_raw)      === 0 ? 'zero' : 'entered') : 'not_entered',
         water:  hasWater  ? (parseFloat(r.withdrawal_kl_raw) === 0 ? 'zero' : 'entered') : 'not_entered',
-        waste:  hasWaste  ? (parseFloat(r.total_waste_kg_raw) === 0 ? 'zero' : 'entered') : 'not_entered',
+        waste:  hasWaste  ? (parseFloat(r.total_waste_kg_raw)=== 0 ? 'zero' : 'entered') : 'not_entered',
       },
     });
-  } catch (err) {
-    dbErr(res, 'BRSR summary', err);
-  }
+  } catch (err) { dbErr(res, 'BRSR summary', err); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/brsr/auto-populate/:year
+// Pulls actual trade + emission data → returns ready-to-use BRSR P6 values
+// Frontend can call this to pre-fill the environmental form automatically
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/auto-populate/:year', authenticate, async (req, res) => {
+  const year = safeYear(req.params.year);
+  if (!year) return res.status(400).json({ error: 'Invalid year' });
+
+  try {
+    const [tradeRows, emissionRows, brsrRows] = await Promise.all([
+
+      // Carbon credits bought = voluntary offsets this year
+      // Uses confirmed DB: trades.buyer_id, trades.quantity, trades.buyer_pays_inr
+      query(
+        `SELECT
+           COALESCE(SUM(quantity), 0)       AS total_credits,
+           COALESCE(SUM(buyer_pays_inr), 0) AS total_spend_inr,
+           COUNT(*)                          AS trade_count
+         FROM trades
+         WHERE buyer_id = $1
+           AND status = 'completed'
+           AND EXTRACT(YEAR FROM created_at) = $2`,
+        [req.user.id, year]
+      ),
+
+      // Gross emissions — uses confirmed DB: emission_activities.user_id, scope, co2e, date
+      query(
+        `SELECT
+           COALESCE(SUM(co2e), 0)                           AS total,
+           COALESCE(SUM(co2e) FILTER (WHERE scope = 1), 0) AS scope1,
+           COALESCE(SUM(co2e) FILTER (WHERE scope = 2), 0) AS scope2,
+           COALESCE(SUM(co2e) FILTER (WHERE scope = 3), 0) AS scope3,
+           COUNT(*) AS activity_count
+         FROM emission_activities
+         WHERE user_id = $1
+           AND EXTRACT(YEAR FROM date) = $2`,
+        [req.user.id, year]
+      ),
+
+      // Existing BRSR data for this year — keep energy/water/waste as-is
+      query(
+        `SELECT energy, water, waste, updated_at
+         FROM brsr_environmental
+         WHERE user_id = $1 AND year = $2`,
+        [req.user.id, year]
+      ),
+    ]);
+
+    const t  = tradeRows.rows[0];
+    const e  = emissionRows.rows[0];
+    const existing = brsrRows.rows[0] || null;
+
+    const grossEmissions  = parseFloat(e.total  || 0);
+    const offsetPurchased = parseFloat(t.total_credits || 0); // 1 credit = 1 tCO2e
+    const netEmissions    = grossEmissions - offsetPurchased;
+
+    res.json({
+      year,
+      brsr_section:   'Principle 6 — Environment',
+      disclosure:     'E1 — GHG Emissions',
+      auto_populated: true,
+      source:         'EtherTrack Trade History + Emission Activities',
+
+      // GHG data
+      gross_emissions_tco2e:   +grossEmissions.toFixed(4),
+      scope1_tco2e:            +parseFloat(e.scope1 || 0).toFixed(4),
+      scope2_tco2e:            +parseFloat(e.scope2 || 0).toFixed(4),
+      scope3_tco2e:            +parseFloat(e.scope3 || 0).toFixed(4),
+      activity_count:          parseInt(e.activity_count || 0),
+
+      // Offsets
+      offsets_purchased_tco2e: +offsetPurchased.toFixed(4),
+      offset_spend_inr:        +parseFloat(t.total_spend_inr || 0).toFixed(2),
+      trade_count:             parseInt(t.trade_count || 0),
+
+      // Net
+      net_emissions_tco2e:     +netEmissions.toFixed(4),
+      carbon_neutral:          netEmissions <= 0,
+
+      // Existing BRSR data so frontend can merge
+      existing_brsr: existing,
+
+      // Ready-to-POST values for /api/brsr/environmental
+      suggested_form_values: {
+        year,
+        energy: existing?.energy || {},
+        water:  existing?.water  || {},
+        waste:  existing?.waste  || {},
+        // GHG sub-fields for the BRSR form
+        ghg_scope1: +parseFloat(e.scope1 || 0).toFixed(4),
+        ghg_scope2: +parseFloat(e.scope2 || 0).toFixed(4),
+        ghg_scope3: +parseFloat(e.scope3 || 0).toFixed(4),
+        ghg_offset: +offsetPurchased.toFixed(4),
+        ghg_net:    +netEmissions.toFixed(4),
+      },
+    });
+
+  } catch (err) { dbErr(res, 'BRSR auto-populate', err); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/brsr/esg-summary/:year
+// Full CFO dashboard — trades + emissions + BRSR + retirements in one call
+// Gracefully skips pat_profiles / ccts_profiles if tables don't exist
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/esg-summary/:year', authenticate, async (req, res) => {
+  const year = safeYear(req.params.year);
+  if (!year) return res.status(400).json({ error: 'Invalid year' });
+
+  try {
+    // Run all queries in parallel, skip tables that may not exist
+    const [tradeRows, emissionRows, brsrRows, retirementRows, prevYearRows] =
+      await Promise.all([
+
+        // Trades — confirmed columns: buyer_id, quantity, buyer_pays_inr, status, created_at, chain_status
+        query(
+          `SELECT
+             COALESCE(SUM(quantity), 0)       AS offset_tco2e,
+             COALESCE(SUM(buyer_pays_inr), 0) AS spend_inr,
+             COUNT(*)                          AS trade_count,
+             COALESCE(SUM(quantity) FILTER (WHERE chain_status = 'confirmed'), 0) AS on_chain_tco2e
+           FROM trades
+           WHERE buyer_id = $1
+             AND status = 'completed'
+             AND EXTRACT(YEAR FROM created_at) = $2`,
+          [req.user.id, year]
+        ),
+
+        // Emissions — confirmed columns: user_id, date, scope, co2e
+        query(
+          `SELECT
+             COALESCE(SUM(co2e), 0)                           AS total,
+             COALESCE(SUM(co2e) FILTER (WHERE scope = 1), 0) AS scope1,
+             COALESCE(SUM(co2e) FILTER (WHERE scope = 2), 0) AS scope2,
+             COALESCE(SUM(co2e) FILTER (WHERE scope = 3), 0) AS scope3,
+             COUNT(*) AS activity_count
+           FROM emission_activities
+           WHERE user_id = $1
+             AND EXTRACT(YEAR FROM date) = $2`,
+          [req.user.id, year]
+        ),
+
+        // BRSR filed — confirmed columns: user_id, year, updated_at
+        query(
+          `SELECT updated_at FROM brsr_environmental
+           WHERE user_id = $1 AND year = $2`,
+          [req.user.id, year]
+        ),
+
+        // Retirements — confirmed columns: retired_by, amount, retire_year, retire_scope
+        // retire_year exists in DB (confirmed above)
+        query(
+          `SELECT
+             COUNT(*) AS cert_count,
+             COALESCE(SUM(amount), 0) AS retired_tco2e
+           FROM retirements
+           WHERE retired_by = $1
+             AND retire_year = $2`,
+          [req.user.id, year]
+        ).catch(() => ({ rows: [{ cert_count: 0, retired_tco2e: 0 }] })),
+
+        // Previous year emissions for YoY
+        query(
+          `SELECT COALESCE(SUM(co2e), 0) AS total
+           FROM emission_activities
+           WHERE user_id = $1
+             AND EXTRACT(YEAR FROM date) = $2`,
+          [req.user.id, year - 1]
+        ),
+      ]);
+
+    const t  = tradeRows.rows[0];
+    const e  = emissionRows.rows[0];
+    const r  = retirementRows.rows[0];
+    const py = prevYearRows.rows[0];
+
+    const grossEmissions  = parseFloat(e.total  || 0);
+    const offsetPurchased = parseFloat(t.offset_tco2e || 0);
+    const netEmissions    = grossEmissions - offsetPurchased;
+    const prevTotal       = parseFloat(py.total || 0);
+    const yoyChange       = prevTotal > 0
+      ? +((grossEmissions - prevTotal) / prevTotal * 100).toFixed(1)
+      : null;
+
+    res.json({
+      year,
+      generated_at: new Date().toISOString(),
+
+      emissions: {
+        gross_tco2e:     +grossEmissions.toFixed(4),
+        scope1_tco2e:    +parseFloat(e.scope1 || 0).toFixed(4),
+        scope2_tco2e:    +parseFloat(e.scope2 || 0).toFixed(4),
+        scope3_tco2e:    +parseFloat(e.scope3 || 0).toFixed(4),
+        activity_count:  parseInt(e.activity_count || 0),
+        prev_year_tco2e: +prevTotal.toFixed(4),
+        yoy_change_pct:  yoyChange,
+      },
+
+      offsets: {
+        purchased_tco2e: +offsetPurchased.toFixed(4),
+        spend_inr:       +parseFloat(t.spend_inr || 0).toFixed(2),
+        trade_count:     parseInt(t.trade_count || 0),
+        on_chain_tco2e:  +parseFloat(t.on_chain_tco2e || 0).toFixed(4),
+        retired_tco2e:   +parseFloat(r.retired_tco2e || 0).toFixed(4),
+        cert_count:      parseInt(r.cert_count || 0),
+      },
+
+      net: {
+        net_emissions_tco2e: +netEmissions.toFixed(4),
+        carbon_neutral:      netEmissions <= 0,
+        offset_ratio_pct:    grossEmissions > 0
+          ? +((offsetPurchased / grossEmissions) * 100).toFixed(1)
+          : 0,
+      },
+
+      brsr: {
+        filed:      brsrRows.rows.length > 0,
+        updated_at: brsrRows.rows[0]?.updated_at || null,
+        section:    'SEBI BRSR Core — Principle 6',
+      },
+
+      // pat and ccts skipped — tables not in DB yet
+      pat:  null,
+      ccts: null,
+
+      frameworks:            ['GHG Protocol', 'SEBI BRSR', 'CDP', 'TCFD', 'ISO 14064-3'],
+      ready_for_submission:  brsrRows.rows.length > 0 && grossEmissions > 0,
+    });
+
+  } catch (err) { dbErr(res, 'ESG summary', err); }
 });
 
 module.exports = router;

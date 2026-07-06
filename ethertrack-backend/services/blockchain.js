@@ -1,27 +1,41 @@
 // services/blockchain.js — Updated for new Marketplace contract events
 // ─────────────────────────────────────────────────────────────────────────
-// FIXES:
+// FIXES (carried over from previous version):
 //
-// [B1]  SYNC TIMEOUT — syncMissedEvents() had no timeout. With 1112 chunks
-//       × 150ms delay = 167 seconds minimum. Server was being killed by
-//       graceful shutdown (10s timeout) mid-sync, causing "Graceful shutdown
-//       timed out — forcing exit" on EVERY boot. Added 25s hard cap —
-//       sync resumes on next poll cycle if it can't finish in time.
+// [B1]  SYNC TIMEOUT — hard 25s/120s cap so a slow sync can't block
+//       graceful shutdown.
+// [B2]  BACKGROUND SYNC — sync runs concurrently with polling, not blocking
+//       server boot.
+// [B3]  SYNC DEDUP — persists lastSyncedBlock to DB.
+// [B4]  SHUTDOWN FLAG — stop() clears the poll timer and cancels in-flight
+//       polls gracefully.
+// [B5]  CHUNK DELAY reduced 150ms → 50ms (superseded by B6 below).
+// [B6]  CHUNK SIZE / DELAY / TIMEOUT tuned for Ankr free tier.
 //
-// [B2]  BACKGROUND SYNC — sync now runs in background, not blocking server
-//       boot. startPolling() fires immediately; sync runs concurrently.
-//       Server is fully ready within seconds of startup.
+// NEW IN THIS VERSION:
 //
-// [B3]  SYNC DEDUP — persists lastSyncedBlock to DB so missed-event sync
-//       starts from where it left off, not always "current - 10000".
-//       Prevents the same 1112-chunk replay on every restart.
+// [FIX-LISTED-QTY] handleCreditListed, handleCreditTraded, and
+//       handleListingCancelled (plus their mirrors inside syncMissedEvents)
+//       now read/write carbon_batches.listed_quantity — the column that
+//       tracks how many credits of a batch are currently sitting in an
+//       ACTIVE on-chain listing (mirrors the contract's
+//       Listing.amountRemaining).
 //
-// [B4]  SHUTDOWN FLAG — pollTimer cleared and in-flight poll cancelled
-//       gracefully. module.exports now includes a stop() function that
-//       server.js shutdown() can call.
+//       Previously these handlers only ever touched available_credits and
+//       listing_id_onchain, so:
+//         - CreditListed  never recorded HOW MANY credits were listed
+//         - CreditTraded  (the ETH/AMM settlement path) decremented
+//                         available_credits but left listed_quantity
+//                         completely unset/stale
+//         - ListingCancelled cleared listing_id_onchain but never reset
+//                         listed_quantity, so a subsequent listing on the
+//                         same batch could inherit a stale non-zero value
 //
-// [B5]  CHUNK DELAY reduced 150ms → 50ms — still safe for free-tier RPCs
-//       but 3× faster when sync does run.
+//       Net effect before this fix: any trade settled via the ETH/AMM path
+//       (as opposed to INR wallet or Razorpay, which go through
+//       routes/trades.js and now decrement listed_quantity there) would
+//       leave the delist modal and the market "available" figure showing
+//       stale numbers for that listing.
 // ─────────────────────────────────────────────────────────────────────────
 'use strict';
 
@@ -47,12 +61,13 @@ let pollTimer       = null;
 let _stopped        = false; // [B4] shutdown flag
 
 const POLL_INTERVAL_MS = 15_000;
-const CHUNK_SIZE       = 9;
-const CHUNK_DELAY_MS   = 50;    // [B5] 150ms → 50ms
-const SYNC_TIMEOUT_MS  = 25_000; // [B1] hard cap on startup sync
+const CHUNK_SIZE       = 2000;   // [B6] was 9 — Ankr supports ~3500 blocks per call
+const CHUNK_DELAY_MS   = 200;    // [B6] was 50ms — breathing room for Ankr free tier
+const SYNC_TIMEOUT_MS  = 120_000; // [B6] was 25s — increased to match larger chunks
+const SYNC_WINDOW      = 2_000;  // [B6] was 10_000 — cap sync lookback to reduce RPC calls
 
 // ── [B3] Persist lastSyncedBlock to DB ───────────────────────────
-// Prevents replaying 10,000 blocks on every restart.
+// Prevents replaying blocks on every restart.
 const SYNC_STATE_KEY = 'blockchain:last_synced_block';
 
 const getLastSyncedBlock = async () => {
@@ -142,11 +157,11 @@ const init = () => {
 
 // ── [B2] Background sync — runs after polling starts ─────────────
 const runBackgroundSync = async (currentBlock) => {
-  // [B1] Hard timeout — abort sync if it takes > 25s
+  // [B1] Hard timeout — abort sync if it takes too long
   const controller = new AbortController();
   const timeoutId  = setTimeout(() => {
     controller.abort();
-    console.warn('[blockchain] Startup sync timed out after 25s — will resume on next poll');
+    console.warn(`[blockchain] Startup sync timed out after ${SYNC_TIMEOUT_MS / 1000}s — will resume on next poll`);
   }, SYNC_TIMEOUT_MS);
 
   try {
@@ -225,11 +240,12 @@ const pollEvents = async () => {
 // ── [B3] Sync missed events — starts from last saved block ───────
 const syncMissedEvents = async (currentBlock, abortSignal) => {
   try {
-    // [B3] Start from where we left off, not always -10000
+    // [B3] Start from where we left off
+    // [B6] Cap lookback to SYNC_WINDOW blocks to reduce RPC calls
     const savedBlock = await getLastSyncedBlock();
     const fromBlock  = savedBlock
-      ? Math.max(savedBlock, currentBlock - 10_000) // cap at 10k blocks back
-      : Math.max(0, currentBlock - 10_000);
+      ? Math.max(savedBlock, currentBlock - SYNC_WINDOW)
+      : Math.max(0, currentBlock - SYNC_WINDOW);
 
     if (fromBlock >= currentBlock) {
       console.log('[blockchain] No missed blocks to sync');
@@ -238,9 +254,10 @@ const syncMissedEvents = async (currentBlock, abortSignal) => {
 
     const totalChunks = Math.ceil((currentBlock - fromBlock) / CHUNK_SIZE);
     console.log(`🔄 Syncing missed events from block ${fromBlock} to ${currentBlock}...`);
-    console.log(`   (${totalChunks} chunks — timeout: ${SYNC_TIMEOUT_MS / 1000}s)`);
+    console.log(`   (${totalChunks} chunks × ${CHUNK_SIZE} blocks — timeout: ${SYNC_TIMEOUT_MS / 1000}s)`);
 
     // ── Sync CreditListed ─────────────────────────────────────
+    // [FIX-LISTED-QTY] now also writes listed_quantity = amount
     if (!abortSignal?.aborted) {
       const listedEvents = await queryFilterChunked(
         marketplace, marketplace.filters.CreditListed(), fromBlock, currentBlock, abortSignal
@@ -254,14 +271,15 @@ const syncMissedEvents = async (currentBlock, abortSignal) => {
           const batch = batches[0];
           if (!batch?.id) continue;
           const priceINR = Number(pricePerUnitINR);
-          if (priceINR > 0) {
-            await query(
-              `UPDATE carbon_batches
-               SET price_per_credit_inr = $1, listing_id_onchain = $2, updated_at = NOW()
-               WHERE id = $3 AND (listing_id_onchain IS NULL OR listing_id_onchain != $2)`,
-              [priceINR, Number(listingId), batch.id]
-            );
-          }
+          await query(
+            `UPDATE carbon_batches
+             SET price_per_credit_inr = COALESCE(NULLIF($1, 0), price_per_credit_inr),
+                 listing_id_onchain   = $2,
+                 listed_quantity      = $3,
+                 updated_at           = NOW()
+             WHERE id = $4 AND (listing_id_onchain IS NULL OR listing_id_onchain != $2)`,
+            [priceINR, Number(listingId), Number(amount), batch.id]
+          );
         } catch (e) {
           console.error(`  ↳ CreditListed sync error (listingId:${listingId}):`, e.message);
         }
@@ -269,6 +287,8 @@ const syncMissedEvents = async (currentBlock, abortSignal) => {
     }
 
     // ── Sync ListingCancelled ─────────────────────────────────
+    // [FIX-LISTED-QTY] now also zeroes listed_quantity — a cancel always
+    // deactivates the whole listing on-chain (no partial cancel exists).
     if (!abortSignal?.aborted) {
       const cancelledEvents = await queryFilterChunked(
         marketplace, marketplace.filters.ListingCancelled(), fromBlock, currentBlock, abortSignal
@@ -279,7 +299,9 @@ const syncMissedEvents = async (currentBlock, abortSignal) => {
         const [listingId] = ev.args;
         try {
           await query(
-            `UPDATE carbon_batches SET listing_id_onchain = NULL, updated_at = NOW() WHERE listing_id_onchain = $1`,
+            `UPDATE carbon_batches
+             SET listing_id_onchain = NULL, listed_quantity = 0, updated_at = NOW()
+             WHERE listing_id_onchain = $1`,
             [Number(listingId)]
           );
         } catch (e) {
@@ -316,6 +338,27 @@ const syncMissedEvents = async (currentBlock, abortSignal) => {
       }
     }
 
+    // ── Sync CreditTraded (ETH/AMM settlements missed while offline) ──
+    // [FIX-LISTED-QTY] added — previously this event type wasn't replayed
+    // at all during sync, meaning any ETH trade that happened while the
+    // listener was down would never decrement available_credits OR
+    // listed_quantity until/unless pollEvents happened to catch it live.
+    if (!abortSignal?.aborted) {
+      const tradedEvents = await queryFilterChunked(
+        marketplace, marketplace.filters.CreditTraded(), fromBlock, currentBlock, abortSignal
+      );
+      console.log(`   Found ${tradedEvents.length} CreditTraded events`);
+      for (const ev of tradedEvents) {
+        if (abortSignal?.aborted) break;
+        const [tradeId, listingId, buyOrderId, buyer, seller, tokenId, amount, pricePerUnit, pricePerUnitINR, totalPrice, buyerFee, sellerFee, totalFee, isAMM] = ev.args;
+        try {
+          await handleCreditTraded(tradeId, listingId, buyOrderId, buyer, seller, tokenId, amount, pricePerUnit, pricePerUnitINR, totalPrice, buyerFee, sellerFee, totalFee, isAMM, ev);
+        } catch (e) {
+          console.error(`  ↳ CreditTraded sync error (tradeId:${tradeId}):`, e.message);
+        }
+      }
+    }
+
     if (!abortSignal?.aborted) {
       await saveLastSyncedBlock(currentBlock); // [B3] mark sync complete
       console.log('✅ Historical event sync complete');
@@ -328,7 +371,7 @@ const syncMissedEvents = async (currentBlock, abortSignal) => {
   }
 };
 
-// ── Event handlers (unchanged) ────────────────────────────────────
+// ── Event handlers ────────────────────────────────────────────────
 
 const handleCreditMinted = async (tokenId, to, amount, projectName, standard, serialNumber, ev) => {
   try {
@@ -355,6 +398,10 @@ const handleCreditMinted = async (tokenId, to, amount, projectName, standard, se
   }
 };
 
+// [FIX-LISTED-QTY] now writes listed_quantity = amount from the event.
+// Previously `amount` was destructured into this function's params but
+// never actually persisted anywhere — the DB had zero record of how many
+// credits were put into a given on-chain listing.
 const handleCreditListed = async (listingId, seller, tokenId, amount, pricePerUnit, pricePerUnitINR, ev) => {
   try {
     const { rows: batches } = await query('SELECT id, project_id FROM carbon_batches WHERE token_id = $1', [Number(tokenId)]);
@@ -362,23 +409,35 @@ const handleCreditListed = async (listingId, seller, tokenId, amount, pricePerUn
     const { rows: users } = await query('SELECT id FROM users WHERE LOWER(wallet_address) = LOWER($1)', [seller]);
     const priceEth = parseFloat(ethers.formatEther(pricePerUnit));
     const priceINR = Number(pricePerUnitINR);
+    const qty      = Number(amount);
     await query(
       `INSERT INTO registry_transactions (type, token_id, batch_id, project_id, listing_id, from_wallet, from_user_id, amount, price_eth, price_inr)
        VALUES ('LIST', $1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [Number(tokenId), batch?.id, batch?.project_id, Number(listingId), seller, users[0]?.id, Number(amount), priceEth, priceINR]
+      [Number(tokenId), batch?.id, batch?.project_id, Number(listingId), seller, users[0]?.id, qty, priceEth, priceINR]
     );
-    if (batch?.id && priceINR > 0) {
+    if (batch?.id) {
       await query(
-        `UPDATE carbon_batches SET price_per_credit_inr = $1, listing_id_onchain = $2, updated_at = NOW() WHERE id = $3`,
-        [priceINR, Number(listingId), batch.id]
+        `UPDATE carbon_batches
+         SET price_per_credit_inr = COALESCE(NULLIF($1, 0), price_per_credit_inr),
+             listing_id_onchain   = $2,
+             listed_quantity      = $3,
+             updated_at           = NOW()
+         WHERE id = $4`,
+        [priceINR, Number(listingId), qty, batch.id]
       );
     }
-    console.log(`📋 LIST — listingId:${listingId} tokenId:${tokenId} priceINR:₹${priceINR}`);
+    console.log(`📋 LIST — listingId:${listingId} tokenId:${tokenId} qty:${qty} priceINR:₹${priceINR}`);
   } catch (e) {
     console.error('CreditListed handler error:', e.message);
   }
 };
 
+// [FIX-LISTED-QTY] now decrements listed_quantity alongside
+// available_credits. This is the ETH/AMM settlement path — INR wallet and
+// Razorpay trades are decremented directly inside routes/trades.js at
+// settlement time, but ETH trades settle purely on-chain and only reach the
+// DB through this listener, so without this fix ETH trades never reduced
+// listed_quantity at all.
 const handleCreditTraded = async (tradeId, listingId, buyOrderId, buyer, seller, tokenId, amount, pricePerUnit, pricePerUnitINR, totalPrice, buyerFee, sellerFee, totalFee, isAMM, ev) => {
   try {
     const { rows: batches } = await query('SELECT id, project_id FROM carbon_batches WHERE token_id = $1', [Number(tokenId)]);
@@ -393,6 +452,7 @@ const handleCreditTraded = async (tradeId, listingId, buyOrderId, buyer, seller,
     const sellerFeeEth = parseFloat(ethers.formatEther(sellerFee));
     const totalFeeEth  = parseFloat(ethers.formatEther(totalFee));
     const priceINR     = Number(pricePerUnitINR);
+    const qty          = Number(amount);
     const txHash       = ev?.transactionHash || null;
     const paymentMethod = isAMM ? 'amm' : 'eth';
     if (txHash) {
@@ -406,35 +466,50 @@ const handleCreditTraded = async (tradeId, listingId, buyOrderId, buyer, seller,
       await client.query(
         `INSERT INTO registry_transactions (type, token_id, batch_id, project_id, listing_id, from_wallet, to_wallet, from_user_id, to_user_id, amount, price_eth, price_inr, buyer_fee_eth, seller_fee_eth, total_fee_eth, total_price_eth, payment_mode, tx_hash)
          VALUES ('TRADE', $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) ON CONFLICT (tx_hash) DO NOTHING`,
-        [Number(tokenId), batch?.id, batch?.project_id, Number(listingId), seller, buyer, sellers[0]?.id, buyers[0]?.id, Number(amount), priceEth, priceINR, buyerFeeEth, sellerFeeEth, totalFeeEth, totalEth, paymentMethod, txHash]
+        [Number(tokenId), batch?.id, batch?.project_id, Number(listingId), seller, buyer, sellers[0]?.id, buyers[0]?.id, qty, priceEth, priceINR, buyerFeeEth, sellerFeeEth, totalFeeEth, totalEth, paymentMethod, txHash]
       );
       if (batch?.id) {
         await client.query(
-          `UPDATE carbon_batches SET available_credits = GREATEST(0, available_credits - $1), last_traded_price_inr = $2, updated_at = NOW() WHERE id = $3`,
-          [Number(amount), priceINR, batch.id]
+          `UPDATE carbon_batches
+           SET available_credits = GREATEST(0, available_credits - $1),
+               listed_quantity   = GREATEST(0, listed_quantity - $1),
+               last_traded_price_inr = $2, updated_at = NOW()
+           WHERE id = $3`,
+          [qty, priceINR, batch.id]
         );
       }
       if (sellers[0]?.id && priceINR > 0) {
-        const sellerGetsINR = Math.round(priceINR * Number(amount) * 0.995);
+        const sellerGetsINR = Math.round(priceINR * qty * 0.995);
         if (sellerGetsINR > 0) {
           await client.query(`UPDATE users SET inr_balance = inr_balance + $1, updated_at = NOW() WHERE id = $2`, [sellerGetsINR, sellers[0].id]);
           await client.query(
             `INSERT INTO wallet_transactions (user_id, type, method, amount, status, notes, trade_type) VALUES ($1, 'credit', 'eth', $2, 'success', $3, 'sell_credit')`,
-            [sellers[0].id, sellerGetsINR, `Sale of ${Number(amount)} × Token #${Number(tokenId)} @ ₹${priceINR}/credit (ETH tradeId:${Number(tradeId)})`]
+            [sellers[0].id, sellerGetsINR, `Sale of ${qty} × Token #${Number(tokenId)} @ ₹${priceINR}/credit (ETH tradeId:${Number(tradeId)})`]
           );
         }
       }
     });
-    console.log(`💱 TRADE — tradeId:${tradeId} amount:${amount} priceINR:₹${priceINR}`);
+    console.log(`💱 TRADE — tradeId:${tradeId} amount:${qty} priceINR:₹${priceINR}`);
   } catch (e) {
     console.error('CreditTraded handler error:', e.message);
   }
 };
 
+// [FIX-LISTED-QTY] now also zeroes listed_quantity when a listing is
+// cancelled. Safe to always zero: cancelListing() on-chain always
+// deactivates the WHOLE listing (there's no partial cancel), so whatever
+// was left unsold gets returned to the seller's wallet and the listing
+// stops existing. A subsequent partial re-list will fire a fresh
+// CreditListed event that sets listed_quantity to the new correct amount.
 const handleListingCancelled = async (listingId, seller, ev) => {
   try {
     await query(`INSERT INTO registry_transactions (type, listing_id, from_wallet) VALUES ('DELIST', $1, $2)`, [Number(listingId), seller]);
-    await query(`UPDATE carbon_batches SET listing_id_onchain = NULL, updated_at = NOW() WHERE listing_id_onchain = $1`, [Number(listingId)]);
+    await query(
+      `UPDATE carbon_batches
+       SET listing_id_onchain = NULL, listed_quantity = 0, updated_at = NOW()
+       WHERE listing_id_onchain = $1`,
+      [Number(listingId)]
+    );
     console.log(`❌ DELIST — listingId:${listingId}`);
   } catch (e) {
     console.error('ListingCancelled handler error:', e.message);

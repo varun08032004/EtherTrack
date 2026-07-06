@@ -1,4 +1,4 @@
-// src/components/AuditTrail.jsx — Blockchain-anchored GHG Audit Trail v2
+// src/components/AuditTrail.jsx — Blockchain-anchored GHG Audit Trail v3
 // ── Production fixes:
 //    [FIX-API-WIRE]     All apiFetch calls replaced with auditAPI methods
 //    [FIX-ABORT]        Abort controller on load — no state updates after unmount
@@ -8,9 +8,14 @@
 //    [FIX-SANITISE]     Comment trimmed and length-capped before submit
 //    [FIX-EMAIL-VALID]  Client-side email validation on verifier form
 //    [FIX-CHAIN-API]    chain-status, lock, verify-chain, retry all in auditAPI
+// ── v3:
+//    [FEAT-AUDITOR-TAB] New "AUDITOR EXPORT" tab — wraps AuditorExport.jsx.
+//                       Gives Big 4 auditors a downloadable package + scoped
+//                       read-only API token, instead of manual data compilation.
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { apiFetch } from '../services/api';
+import AuditorExport from './AuditorExport';
 
 // ── auditAPI — inline since api.js may not be updated yet in all envs ─────────
 // These map directly to routes/audit.js endpoints
@@ -159,6 +164,7 @@ const CSS = `
 .at-tabs{display:flex;gap:0;margin-bottom:18px;border-bottom:1px solid var(--brd);overflow-x:auto;}
 .at-tab{padding:9px 15px;font-family:'Space Mono',monospace;font-size:11px;letter-spacing:.08em;cursor:pointer;border:none;background:none;color:var(--mut);border-bottom:2px solid transparent;transition:all .2s;margin-bottom:-1px;white-space:nowrap;flex-shrink:0;}
 .at-tab.on{color:var(--grn);border-bottom-color:var(--grn);}
+.at-tab.auditor.on{color:var(--pur);border-bottom-color:var(--pur);}
 .at-confirm-overlay{position:fixed;inset:0;z-index:1000;background:#00000088;display:flex;align-items:center;justify-content:center;}
 .at-confirm-box{background:var(--surf);border:1px solid var(--brd2);border-radius:10px;padding:24px;max-width:400px;width:90%;}
 .locked-banner{padding:12px 16px;border-radius:8px;background:#f9731606;border:1px solid #f9731633;font-size:11px;color:#f97316;display:flex;align-items:center;gap:10px;margin-bottom:14px;}
@@ -173,7 +179,7 @@ const CSS = `
 @media(max-width:600px){.stats,.ass-grid{grid-template-columns:1fr;}}
 `;
 
-export default function AuditTrail({ year: propYear, profile, emissions = [] }) {
+export default function AuditTrail({ year: propYear, profile, emissions = [], retirements = [] }) {
   const [year,               setYear]              = useState(propYear || new Date().getFullYear());
   const [tab,                setTab]               = useState('log');
   const [entries,            setEntries]           = useState([]);
@@ -565,8 +571,9 @@ export default function AuditTrail({ year: propYear, profile, emissions = [] }) 
               ['verifier', `VERIFIER (${verifiers.length})`],
               ['comment',  'ADD COMMENT'],
               ['chain',    'CHAIN INTEGRITY'],
+              ['auditor',  'AUDITOR EXPORT'],
             ].map(([k, v]) => (
-              <button key={k} className={`at-tab${tab === k ? ' on' : ''}`} onClick={() => setTab(k)}>{v}</button>
+              <button key={k} className={`at-tab${k === 'auditor' ? ' auditor' : ''}${tab === k ? ' on' : ''}`} onClick={() => setTab(k)}>{v}</button>
             ))}
           </div>
 
@@ -913,6 +920,16 @@ export default function AuditTrail({ year: propYear, profile, emissions = [] }) 
                     ))}
                   </div>
                 </div>
+              )}
+
+              {/* ── [FEAT-AUDITOR-TAB] AUDITOR EXPORT TAB ────────────────── */}
+              {tab === 'auditor' && (
+                <AuditorExport
+                  profile={profile}
+                  year={year}
+                  records={emissions}
+                  retirements={retirements}
+                />
               )}
             </>
           )}

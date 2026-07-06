@@ -6,6 +6,70 @@
 //    BEE CCTS Oct 2025 / Jan 2026 gazette — 9 sectors
 //    IPCC AR6 GWP100 — all GHG factors
 //    DEFRA 2024 — non-India factors
+// ── Bug fixes v9 (this merge — combines your v7 and v8 files):
+//    [MERGE-CSS]        Restored CSS classes that v8 silently dropped and
+//                       that child components rely on for global styling:
+//                       .em-lbl, .em-fg / .em-fg3 / .em-fg4 (form grids used
+//                       by EmissionLogHub's log form), .em-drop (+hover/over,
+//                       bulk CSV import drop zone), .em-inp::placeholder,
+//                       .em-card-dark, .em-ctit-action, .em-export-btn::before,
+//                       .em-fw[style*="cursor"]:hover, .em-nz / .em-nzf,
+//                       .em-prev / .em-prev-val, .em-chart-wrap,
+//                       @keyframes shimmer.
+//    [MERGE-UPPERCASE]  Kept text-transform:uppercase on .em-brand-label,
+//                       .em-badge, .em-ctit, .em-lh, .em-lbl. v8 had dropped
+//                       these, which silently broke the plan badge (it would
+//                       render lowercase "growth"/"corporate" from the API
+//                       instead of "GROWTH"/"CORPORATE").
+//    [MERGE-BRSR-LABEL] Kept the friendly section-name map (Section A,
+//                       Section B, P1…P9, "P6 Environmental") in the BRSR
+//                       save toast. v8 had regressed to toasting the raw
+//                       sectionKey (e.g. "p6 saved" instead of
+//                       "P6 Environmental saved").
+//    [MERGE-ANIM-FIX]   UpgradeLock referenced a non-existent "fU" keyframe
+//                       (leftover typo — silently did nothing). Fixed to the
+//                       real "fadeUp" keyframe.
+// ── Bug fixes v8 (state-correctness fixes, carried forward from your latest file):
+//    [FIX-REFRESH]      onRecordAdded now calls setSummary() after every log
+//                       so scope cards, analytics, inventory, and category
+//                       breakdown all update immediately — not just ledger rows.
+//    [FIX-LOADALL-YEAR] loadAll() always fetches records filtered by the
+//                       selected year. Previously fetched all-time records,
+//                       so switching years showed wrong totals and ledger rows.
+//    [FIX-RECORDS-INIT] setRecords([]) when the year has no data, so the
+//                       ledger never shows stale records from a previous year.
+//    [FIX-SSE-DEDUP]    SSE 'log' handler skips prepend if the record was
+//                       already added by the optimistic update, skips records
+//                       outside the currently-viewed year, and always
+//                       refreshes summary regardless.
+//    [FIX-DELETE-SYNC]  Delete now optimistically updates summary state too,
+//                       not just the records array, so scope cards update
+//                       instantly. Rolls back via loadAll() on failure.
+// ── Bug fixes v7:
+//    [FEAT-APPROVALS]  New "Approvals" tab in Data & Ledger group — renders
+//                      MakerChecker.jsx. Draft → submitted → reviewed →
+//                      approved → locked workflow for every emission record.
+//    [FEAT-LINEAGE]    Each ledger row now has a 🔍 lineage button that opens
+//                      EmissionLineage.jsx — full source-to-number traceability
+//                      (file → user → EF version → approver → blockchain anchor).
+// ── Bug fixes v6:
+//    [FIX-TAB-GROUP]   Tab bar restructured — Overview pinned, 5 collapsible
+//                      groups (Data & Ledger, Analysis, BRSR & Regulatory,
+//                      Targets & Planning, Supply Chain). Locked tabs hidden
+//                      for Growth users; single "Unlock Corporate" button shown
+//                      instead of scattered lock icons.
+//    [FIX-PLAN-NULL]   subscriptionPlan defaults to 'loading' not null.
+//                      Corporate tabs show neutral skeleton until plan resolves,
+//                      not UpgradeLock (which was showing briefly for Corp users).
+//    [FIX-TOAST-DUP]   Removed redundant toasts in handlePdfExportClick —
+//                      the pre-flight modal already shows all check rows.
+//    [FIX-SFILT-RESET] sfilt now resets to 'all' on tab switch alongside page.
+//    [FIX-NZ-FALLBACK] Net Zero bars show explicit "No baseline data" message
+//                      when prevYearTotal is null, instead of four red 0% bars.
+//    [FIX-CHECKS-MEMO] getExportChecks memoized via useMemo keyed on
+//                      pendingExport?.type to avoid double-compute per render.
+//    [FIX-BRSR-MERGE]  brsrData keyed by section (section-a, section-b, p1..p9)
+//                      — saving one section never wipes another.
 // ── Bug fixes v5:
 //    [FIX-TIER-GATE]   Corporate-only tabs gated — ESG, BRSR-ENV, AUDIT, GEI,
 //                      PAT, CCTS, ACTION-PLAN, SBTi, SUPPLIERS, MULTI-ENTITY.
@@ -25,8 +89,11 @@
 //    [FIX-PDF]  [FIX-CSRF]  [FIX-404]  [FIX-LOAD]  [FIX-VALIDATE]
 // ── Security: abort controllers, input sanitisation, XSS prevention,
 //    blob URL revocation, no window.confirm, rate limiting awareness
+// ── Real-time: SSE stream subscribes to /api/emissions/stream for live
+//    log/bulk/delete events — exponential backoff retry on disconnect.
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { Line, Bar, Doughnut } from 'react-chartjs-2';
 import {
@@ -34,7 +101,7 @@ import {
   CategoryScale, LinearScale, PointElement, Tooltip, Legend, Filler
 } from 'chart.js';
 import { apiFetch } from '../services/api';
-import BRSREnvironmental  from './BRSREnvironmental';
+import BRSRDisclosures    from './BRSRDisclosures';
 import AuditTrail         from './AuditTrail';
 import PATScheme          from './PATScheme';
 import MultiEntity        from './MultiEntity';
@@ -42,7 +109,11 @@ import CCTSCompliance     from './CCTSCompliance';
 import SBTiModule         from './SBTiModule';
 import FiveYearActionPlan from './FiveYearActionPlan';
 import SupplierPortal     from './SupplierPortal';
-import EmissionLogHub from './emission-log/EmissionLogHub';
+import EmissionLogHub     from './emission-log/EmissionLogHub';
+import MakerChecker       from './emission-log/MakerChecker';
+import EmissionLineage    from './EmissionLineage';
+import EmissionAnalytics from './EmissionAnalytics';
+import GHGLedger from './emission-log/GHGLedger';
 
 ChartJS.register(
   LineElement, BarElement, ArcElement,
@@ -54,7 +125,6 @@ ChartJS.register(
 // CEA V20.0 Dec 2024: weighted-avg grid EF = 0.727 tCO2/MWh (FY 2023-24)
 // ─────────────────────────────────────────────────────────────────────────────
 const CEA_GRID_EF_2024 = 0.727;
-
 
 const EF = {
   'Diesel (L)':                  { factor: 2.68,   unit: 'L',      scope: 1, cat: 'Stationary Combustion',  source: 'DEFRA 2024' },
@@ -143,12 +213,18 @@ const safeNum = (val, min = 0, max = 1e12) => {
   if (!isFinite(n) || n < min || n > max) return null;
   return n;
 };
-const calc = (activity, qty) => {
-  const e = EF[activity];
-  const q = safeNum(qty);
-  if (!e || q === null) return null;
-  return { co2e: (q * e.factor / 1000), scope: e.scope, cat: e.cat, unit: e.unit, factor: e.factor, source: e.source, method: e.method || null };
-};
+
+// [FIX-REFRESH] Centralised record normaliser — used everywhere a record
+// comes in from the API or SSE, so the shape handed to the rest of the
+// component is always consistent (loadAll, SSE 'log' events, onRecordAdded).
+const normaliseRecord = (r) => ({
+  ...r,
+  qty:      parseFloat(r.quantity || r.qty || 0),
+  co2e:     parseFloat(r.co2e || 0),
+  date:     (r.date || '').slice(0, 10),
+  notes:    sanitise(r.notes    || ''),
+  activity: sanitise(r.activity || ''),
+});
 
 const IMF_PPP_RATE_INR = 27.3;
 const MONTHS       = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -184,74 +260,80 @@ const CHART_OPTS = {
   },
 };
 
-
-// ─────────────────────────────────────────────────────────────────────────────
-// CSV PARSER
-// ─────────────────────────────────────────────────────────────────────────────
-const parseCSV = (text) => {
-  const lines = text.trim().split('\n');
-  if (lines.length < 2) return [];
-  const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/[^a-z_]/g, ''));
-  return lines.slice(1).map(line => {
-    const vals = line.split(',');
-    const obj  = {};
-    headers.forEach((h, i) => { obj[h] = (vals[i] || '').trim().replace(/^"|"$/g, ''); });
-    const ef  = EF[obj.activity];
-    const qty = safeNum(obj.quantity || obj.qty, 0);
-    if (qty === null) return null;
-    return {
-      date:     sanitise(obj.date),
-      activity: sanitise(obj.activity),
-      quantity: qty,
-      notes:    sanitise(obj.notes || ''),
-      unit:     ef?.unit,
-      scope:    ef?.scope || parseInt(obj.scope),
-      category: ef?.cat   || sanitise(obj.category),
-      factor:   ef?.factor,
-      source:   sanitise(ef?.source || obj.source || 'Manual entry'),
-      co2e:     ef ? qty * ef.factor / 1000 : safeNum(obj.co2e, 0) || 0,
-    };
-  }).filter(r => r && r.date && r.activity && r.quantity > 0);
-};
-
 // ─────────────────────────────────────────────────────────────────────────────
 // [FIX-TIER-GATE] Tier helpers
 // ─────────────────────────────────────────────────────────────────────────────
 const CORPORATE_PLANS = ['corporate', 'enterprise'];
 const isCorporate = (plan) => CORPORATE_PLANS.includes(plan);
 
-// Tabs locked to Corporate+
-const CORPORATE_TABS = [
-  'esg', 'brsr-env', 'audit', 'gei-report',
-  'pat-scheme', 'ccts', 'action-plan', 'sbti', 'suppliers', 'multi',
-];
-
 // PDF types locked to Corporate+ (ghg-protocol available on Growth)
 const CORPORATE_PDF_TYPES = ['brsr', 'cdp', 'tcfd'];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TABS
+// [FIX-TAB-GROUP] Tab navigation structure
+// Overview is pinned. Corporate tabs are hidden from Growth users entirely.
+// [FEAT-APPROVALS] 'approvals' added to Data & Ledger group — available on
+//                  Growth too, since the approval workflow is core data
+//                  hygiene, not a corporate-only compliance feature.
 // ─────────────────────────────────────────────────────────────────────────────
-const TABS = [
-  ['log',         'LOG EMISSION'],
-  ['ledger',      'GHG LEDGER'],
-  ['analytics',   'ANALYTICS'],
-  ['intensity',   'INTENSITY'],
-  ['esg',         'ESG REPORT'],
-  ['brsr-env',    'BRSR ENVIRONMENTAL'],
-  ['audit',       'AUDIT TRAIL'],
-  ['pat-scheme',  'PAT SCHEME'],
-  ['ccts',        'CCTS COMPLIANCE'],
-  ['action-plan', '5-YEAR PLAN'],
-  ['sbti',        'SBTi TARGETS'],
-  ['suppliers',   'SUPPLIERS'],
-  ['multi',       'MULTI-ENTITY'],
+const TAB_GROUPS = [
+  {
+    id: 'data',
+    label: 'DATA & LEDGER',
+    tabs: [
+      { k: 'log',       v: 'Log Emission' },
+      { k: 'ledger',    v: 'GHG Ledger'  },
+      { k: 'approvals', v: 'Approvals'   },
+    ],
+    corporate: false,
+  },
+  {
+    id: 'analysis',
+    label: 'ANALYSIS',
+    tabs: [
+      { k: 'analytics', v: 'Analytics' },
+      { k: 'intensity', v: 'Intensity' },
+    ],
+    corporate: false,
+  },
+  {
+    id: 'regulatory',
+    label: 'BRSR & REGULATORY',
+    tabs: [
+      { k: 'brsr-env',   v: 'BRSR Disclosures'  },
+      { k: 'pat-scheme', v: 'PAT Scheme'         },
+      { k: 'ccts',       v: 'CCTS Compliance'    },
+      { k: 'audit',      v: 'Audit Trail'         },
+    ],
+    corporate: true,
+  },
+  {
+    id: 'targets',
+    label: 'TARGETS & PLANNING',
+    tabs: [
+      { k: 'sbti',        v: 'SBTi Targets' },
+      { k: 'action-plan', v: '5-Year Plan'  },
+    ],
+    corporate: true,
+  },
+  {
+    id: 'supply',
+    label: 'SUPPLY CHAIN',
+    tabs: [
+      { k: 'suppliers', v: 'Suppliers'    },
+      { k: 'multi',     v: 'Multi-Entity' },
+    ],
+    corporate: true,
+  },
 ];
 
+// [FEAT-APPROVALS] 'approvals' added — renders MakerChecker full-page, same
+// as other full-page tabs, so it doesn't fall inside the scope cards section.
 const isFullPageTab = (t) => [
   'brsr-env', 'audit', 'pat-scheme', 'ccts', 'multi',
-  'gei-report', 'sbti', 'action-plan', 'suppliers',
+  'gei-report', 'sbti', 'action-plan', 'suppliers', 'approvals',
 ].includes(t);
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // UPGRADE LOCK SCREEN
@@ -262,7 +344,9 @@ const UpgradeLock = ({ tabLabel, navigate }) => (
     display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
     minHeight: 340, gap: 16, padding: 40,
     background: 'var(--surf)', border: '1px solid var(--brd)', borderRadius: 10,
-    animation: 'fU .4s ease both',
+    // [MERGE-ANIM-FIX] was 'fU .4s ease both' — "fU" matched no @keyframes,
+    // so this animation was a silent no-op. Fixed to the real "fadeUp".
+    animation: 'fadeUp .4s ease both',
   }}>
     <div style={{ fontSize: 36, opacity: .5 }}>&#128274;</div>
     <div style={{ fontFamily: 'Syne,sans-serif', fontSize: 20, fontWeight: 800, color: 'var(--txt)', textAlign: 'center' }}>
@@ -337,22 +421,35 @@ const PdfUpgradeModal = ({ label, onClose, navigate }) => (
 );
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PLAN LOADING SKELETON
+// Shown in place of UpgradeLock while subscriptionPlan is still resolving
+// ─────────────────────────────────────────────────────────────────────────────
+const PlanLoadingSkeleton = () => (
+  <div style={{
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    minHeight: 340, gap: 12,
+    background: 'var(--surf)', border: '1px solid var(--brd)', borderRadius: 10,
+  }}>
+    <div style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--mut)', opacity: .4, animation: 'pulse 1.2s ease infinite' }}/>
+    <div style={{ fontSize: 11, color: 'var(--mut)', letterSpacing: '.12em' }}>LOADING PLAN DATA</div>
+  </div>
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MAIN COMPONENT
 // ─────────────────────────────────────────────────────────────────────────────
 export default function EmissionTracking() {
   const [records,           setRecords]           = useState([]);
   const [summary,           setSummary]           = useState(null);
   const [profile,           setProfile]           = useState(null);
-  const [tab,               setTab]               = useState('log');
+  const [tab,               setTab]               = useState('esg');
+  const [activeGroup,       setActiveGroup]       = useState(null);
   const [sfilt,             setSfilt]             = useState('all');
   const [page,              setPage]              = useState(1);
   const [year,              setYear]              = useState(new Date().getFullYear());
   const [notif,             setNotif]             = useState(null);
   const [loading,           setLoading]           = useState(true);
-  const [synced,            setSynced]            = useState(false);
-  const [dragOver,          setDragOver]          = useState(false);
   const [exportLoading,     setExportLoading]     = useState('');
-  const [submitting,        setSubmitting]        = useState(false);
   const [deleteConfirm,     setDeleteConfirm]     = useState(null);
   const [showExportModal,   setShowExportModal]   = useState(false);
   const [pendingExport,     setPendingExport]     = useState(null);
@@ -363,26 +460,40 @@ export default function EmissionTracking() {
   const [prevYearEmissions, setPrevYearEmissions] = useState(null);
   const [cctsData,          setCctsData]          = useState(null);
   const [patData,           setPatData]           = useState(null);
-  // [FIX-PLAN-FETCH] subscription plan state
-  const [subscriptionPlan,  setSubscriptionPlan]  = useState(null);
-  // [FIX-PDF-GATE] upgrade modal state for locked PDF exports
+  const [subscriptionPlan,  setSubscriptionPlan]  = useState('loading');
   const [pdfUpgradeModal,   setPdfUpgradeModal]   = useState(null);
+  // [FEAT-LINEAGE] holds the record currently shown in the lineage modal
+  const [lineageRecord,     setLineageRecord]     = useState(null);
 
-  const fileRef  = useRef();
-  const abortRef = useRef(null);
+  const abortRef   = useRef(null);
+  const navRef     = useRef(null);
+  const groupRefs  = useRef({});
+  const [dropdownPos, setDropdownPos] = useState({ top: 0, left: 0 });
   const PER_PAGE = 10;
 
-  const [form, setForm] = useState({ date: '', activity: '', qty: '', notes: '' });
-  const [pform, setPform] = useState({
-    companyName: '', industry: '', revenueCr: '', employees: '', floorSqft: '',
-    netZeroYear: '2050', netZeroTargetCo2e: '', reportingYear: String(new Date().getFullYear()),
-    companyCin: '', companyGstin: '', companyPan: '', companyType: '', baseYear: '2024',
-  });
-
   const navigate = useNavigate();
-  const toast = (msg, type = 'success') => { setNotif({ msg, type }); setTimeout(() => setNotif(null), 4000); };
+  const toast = useCallback((msg, type = 'success') => {
+    setNotif({ msg, type });
+    setTimeout(() => setNotif(null), 4000);
+  }, []);
+
+  // ── Click-outside closes nav dropdown ─────────────────────────────────────
+  useEffect(() => {
+    const handler = (e) => {
+      // Close if click is outside the nav AND outside any group button
+      const inNav = navRef.current?.contains(e.target);
+      const inAnyGroup = Object.values(groupRefs.current).some(el => el?.contains(e.target));
+      if (!inNav && !inAnyGroup) setActiveGroup(null);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
 
   // ── [FIX-PLAN-FETCH] Load all data including subscription plan ─────────────
+  // [FIX-LOADALL-YEAR] / [FIX-RECORDS-INIT] Activities are always fetched
+  // filtered by the selected year, and records are always reset (including to
+  // [] when that year has no data) — previously this fetched all-time
+  // activities, so switching years showed the wrong totals and stale rows.
   const loadAll = useCallback(async () => {
     if (abortRef.current) abortRef.current.abort();
     const ctl = new AbortController();
@@ -390,55 +501,38 @@ export default function EmissionTracking() {
     setLoading(true);
     try {
       const [acts, sum, prof] = await Promise.all([
-        apiFetch(`/api/emissions/activities?limit=500`, { signal: ctl.signal }).catch(() => null),
-        apiFetch(`/api/emissions/summary?year=${year}`, { signal: ctl.signal }).catch(() => null),
-        apiFetch('/api/emissions/profile',              { signal: ctl.signal }).catch(() => null),
+        apiFetch(`/api/emissions/activities?year=${year}&limit=500`, { signal: ctl.signal }).catch(() => null),
+        apiFetch(`/api/emissions/summary?year=${year}`,              { signal: ctl.signal }).catch(() => null),
+        apiFetch('/api/emissions/profile',                            { signal: ctl.signal }).catch(() => null),
       ]);
 
       if (ctl.signal.aborted) return;
 
-      if (acts?.activities?.length) {
-        setRecords(acts.activities.map(r => ({
-          ...r,
-          qty:      parseFloat(r.quantity || 0),
-          co2e:     parseFloat(r.co2e     || 0),
-          date:     (r.date || '').slice(0, 10),
-          notes:    sanitise(r.notes    || ''),
-          activity: sanitise(r.activity || ''),
-        })));
-        setSynced(true);
-      }
+      // [FIX-RECORDS-INIT] Always reset records for the selected year — even
+      // to an empty array — so a year with no data never shows the previous
+      // year's rows left over from before the fetch resolved.
+      setRecords(acts?.activities?.length ? acts.activities.map(normaliseRecord) : []);
       if (sum) setSummary(sum);
       if (prof?.profile) {
-        const p = prof.profile;
-        setProfile(p);
-        setPform(f => ({
-          ...f,
-          companyName:       sanitise(p.company_name    || ''),
-          industry:          sanitise(p.industry        || ''),
-          revenueCr:         p.revenue_cr               || '',
-          employees:         p.employees                || '',
-          floorSqft:         p.floor_sqft               || '',
-          netZeroYear:       String(p.net_zero_year      || 2050),
-          netZeroTargetCo2e: p.net_zero_target_co2e     || '',
-          reportingYear:     String(p.reporting_year     || new Date().getFullYear()),
-          companyCin:        sanitise(p.company_cin     || ''),
-          companyGstin:      sanitise(p.company_gstin   || ''),
-          companyPan:        sanitise(p.company_pan     || ''),
-          baseYear:          String(p.base_year         || 2024),
-        }));
+        setProfile(prof.profile);
       }
 
-      // [FIX-PLAN-FETCH] Fetch subscription plan from /api/org/plan
+      // [FIX-PLAN-NULL] Fetch subscription plan — stays 'loading' until resolved
       apiFetch('/api/org/plan', { signal: ctl.signal })
-        .then(d => { if (!ctl.signal.aborted && d?.plan) setSubscriptionPlan(d.plan); })
-        .catch(() => {});
+        .then(d => { if (!ctl.signal.aborted) setSubscriptionPlan(d?.plan || 'growth'); })
+        .catch(() => { if (!ctl.signal.aborted) setSubscriptionPlan('growth'); });
 
       apiFetch(`/api/transactions/retirements`, { signal: ctl.signal })
         .then(d => { if (ctl.signal.aborted || !d) return; setRetirements(d?.retirements || d?.data || []); setCredits(d?.credits || []); }).catch(() => {});
 
       apiFetch(`/api/brsr/environmental?year=${year}`, { signal: ctl.signal })
-        .then(d => { if (ctl.signal.aborted || !d?.data) return; const { energy, water, waste } = d.data; if (energy || water || waste) setBrsrData({ energyData: energy, waterData: water, wasteData: waste }); }).catch(() => {});
+        .then(d => {
+          if (ctl.signal.aborted || !d?.data) return;
+          const { energy, water, waste } = d.data;
+          if (energy || water || waste) {
+            setBrsrData(prev => ({ ...prev, p6: { energyData: energy, waterData: water, wasteData: waste } }));
+          }
+        }).catch(() => {});
 
       apiFetch(`/api/audit/verifiers?year=${year}`, { signal: ctl.signal })
         .then(d => { if (ctl.signal.aborted || !d) return; setVerifier(d?.verifiers?.find(v => v.status === 'verified') || null); }).catch(() => {});
@@ -461,6 +555,77 @@ export default function EmissionTracking() {
 
   useEffect(() => { loadAll(); return () => { abortRef.current?.abort(); }; }, [loadAll]);
 
+  // [FEAT-SSE] Real-time updates — subscribes to backend SSE stream
+  useEffect(() => {
+    let es;
+    let retryTimeout;
+    let retries = 0;
+
+    const connect = () => {
+      es = new EventSource('/api/emissions/stream', { withCredentials: true });
+
+      es.addEventListener('emission_update', (e) => {
+        try {
+          const data = JSON.parse(e.data);
+
+          if (data.action === 'log') {
+            const r = data.record;
+            if (!r) return;
+            // [FIX-SSE-DEDUP] Skip prepend if the optimistic update from
+            // onRecordAdded already added this record, and skip records that
+            // don't belong to the year currently being viewed. The summary
+            // refresh below still runs regardless, since that's the source
+            // of truth for the scope cards / totals.
+            setRecords(prev => {
+              if (prev.some(x => x.id === r.id)) return prev;
+              const recordYear = new Date(r.date || '').getFullYear();
+              if (recordYear !== year) return prev;
+              return [normaliseRecord(r), ...prev];
+            });
+            apiFetch(`/api/emissions/summary?year=${year}`)
+              .then(sum => { if (sum) setSummary(sum); }).catch(() => {});
+          }
+
+          if (data.action === 'bulk') {
+            loadAll();
+            const { inserted = 0, duplicates = 0, errSkipped = 0 } = data;
+            const msg = [
+              `✓ ${inserted} record${inserted !== 1 ? 's' : ''} imported`,
+              duplicates > 0 ? `${duplicates} duplicate${duplicates !== 1 ? 's' : ''} skipped` : null,
+              errSkipped > 0 ? `${errSkipped} error${errSkipped !== 1 ? 's' : ''}` : null,
+            ].filter(Boolean).join(' · ');
+            toast(msg, 'success');
+          }
+
+          if (data.action === 'delete') {
+            if (data.id) {
+              setRecords(prev => prev.filter(r => r.id !== data.id));
+              apiFetch(`/api/emissions/summary?year=${year}`)
+                .then(sum => { if (sum) setSummary(sum); }).catch(() => {});
+            }
+          }
+
+          // [FEAT-APPROVALS] Optional — if the backend also emits state
+          // transition / adjustment events over SSE, reflect them live.
+          // Falls back gracefully if the backend doesn't send these yet.
+          if (data.action === 'state_change' || data.action === 'adjustment') {
+            setRecords(prev => prev.map(r => r.id === data.id ? { ...r, ...data.patch } : r));
+          }
+        } catch (_) {}
+      });
+
+      es.addEventListener('error', () => {
+        es.close();
+        const delay = Math.min(2000 * Math.pow(2, retries), 60_000);
+        retries++;
+        retryTimeout = setTimeout(connect, delay);
+      });
+    };
+
+    connect();
+    return () => { clearTimeout(retryTimeout); es?.close(); };
+  }, [year, loadAll, toast]);
+
   // ── Derived totals ─────────────────────────────────────────────────────────
   const scope1 = summary?.scope1 ?? records.filter(r => r.scope === 1).reduce((s, r) => s + r.co2e, 0);
   const scope2 = summary?.scope2 ?? records.filter(r => r.scope === 2).reduce((s, r) => s + r.co2e, 0);
@@ -481,7 +646,6 @@ export default function EmissionTracking() {
   const floorSqft           = parseInt(profile?.floor_sqft)   || null;
   const revenuePPP          = revenueCr ? revenueCr / (IMF_PPP_RATE_INR / 1e7) : null;
   const revenueIntensityPPP = revenuePPP && total ? total / revenuePPP : null;
-  const preview             = calc(form.activity, form.qty);
   const industryBenchmark   = profile?.industry ? INDUSTRY_BENCHMARKS[profile.industry] : null;
   const revenueIntensity    = revenueCr && total ? total / revenueCr : null;
   const benchmarkStatus     = industryBenchmark && revenueIntensity
@@ -489,8 +653,9 @@ export default function EmissionTracking() {
     : revenueIntensity <= industryBenchmark.medium ? 'average' : 'laggard'
     : null;
 
-  // Convenience flag
-  const corporate = isCorporate(subscriptionPlan);
+  // Convenience flags
+  const planResolved = subscriptionPlan !== 'loading';
+  const corporate    = isCorporate(subscriptionPlan);
 
   // Prev year total for Net Zero progress bars
   const prevYearTotal = prevYearEmissions
@@ -539,41 +704,6 @@ export default function EmissionTracking() {
     datasets: [{ label: 'tCO2e', data: catSource.map(r => +parseFloat(r.total_co2e).toFixed(3)), backgroundColor: '#10b98120', borderColor: '#10b981', borderWidth: 2, borderRadius: 4 }],
   };
 
-  // ── Log emission ───────────────────────────────────────────────────────────
-  const handleAdd = async (e) => {
-    e.preventDefault();
-    if (submitting) return;
-    if (!form.date || !form.activity || !form.qty) return;
-    const cleanDate  = sanitise(form.date);
-    const cleanNotes = sanitise(form.notes);
-    const qty        = safeNum(form.qty, 0.001, 1e9);
-    if (!qty) { toast('Invalid quantity', 'error'); return; }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanDate)) { toast('Invalid date format', 'error'); return; }
-    const p = calc(form.activity, qty);
-    if (!p) { toast('Unknown activity', 'error'); return; }
-    setSubmitting(true);
-    const tmp = { id: `tmp-${Date.now()}`, date: cleanDate, activity: form.activity, qty, notes: cleanNotes, verified: false, ...p };
-    setRecords(prev => [tmp, ...prev]);
-    setForm({ date: '', activity: '', qty: '', notes: '' });
-    toast(`Logged ${p.co2e.toFixed(3)} tCO2e Scope ${p.scope} ${p.source}`);
-    try {
-      const res = await apiFetch('/api/emissions/log', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ date: cleanDate, activity: form.activity, quantity: qty, unit: p.unit, scope: p.scope, category: p.cat, factor: p.factor, co2e: p.co2e, notes: cleanNotes, source: p.source }),
-      });
-      if (res?.activity) {
-        setRecords(prev => prev.map(r => r.id === tmp.id ? { ...tmp, ...res.activity, qty: parseFloat(res.activity.quantity), co2e: parseFloat(res.activity.co2e), date: (res.activity.date || '').slice(0, 10) } : r));
-        setSynced(true);
-        const ctl = new AbortController();
-        apiFetch(`/api/emissions/summary?year=${year}`, { signal: ctl.signal }).then(d => { if (d) setSummary(d); }).catch(() => {});
-      }
-    } catch {
-      setRecords(prev => prev.filter(r => r.id !== tmp.id));
-      toast('Failed to save record. Please try again.', 'error');
-    } finally { setSubmitting(false); }
-  };
-
   // ── Delete ────────────────────────────────────────────────────────────────
   const handleDeleteRequest = (id)  => setDeleteConfirm(id);
   const handleDeleteCancel  = ()    => setDeleteConfirm(null);
@@ -581,12 +711,37 @@ export default function EmissionTracking() {
     const id = deleteConfirm;
     setDeleteConfirm(null);
     const rollback = records.find(r => r.id === id);
+
+    // Optimistic remove from the records list
     setRecords(prev => prev.filter(r => r.id !== id));
+
+    // [FIX-DELETE-SYNC] Optimistically update summary too — not just the
+    // records array — so the scope cards and total footprint update
+    // instantly instead of waiting on a refetch.
+    if (rollback) {
+      setSummary(prev => {
+        if (!prev) return prev;
+        const co2e = rollback.co2e || 0;
+        return {
+          ...prev,
+          scope1: rollback.scope === 1 ? Math.max(0, (prev.scope1 || 0) - co2e) : prev.scope1,
+          scope2: rollback.scope === 2 ? Math.max(0, (prev.scope2 || 0) - co2e) : prev.scope2,
+          scope3: rollback.scope === 3 ? Math.max(0, (prev.scope3 || 0) - co2e) : prev.scope3,
+          total:  Math.max(0, (prev.total  || 0) - co2e),
+        };
+      });
+    }
+
     try {
       await apiFetch(`/api/emissions/activities/${encodeURIComponent(id)}`, { method: 'DELETE' });
       toast('Record removed');
+      // Refresh summary from the server for accuracy after the optimistic update
+      apiFetch(`/api/emissions/summary?year=${year}`)
+        .then(sum => { if (sum) setSummary(sum); }).catch(() => {});
     } catch {
+      // Roll back the optimistic changes on failure
       if (rollback) setRecords(prev => [rollback, ...prev]);
+      loadAll();
       toast('Failed to delete record', 'error');
     }
   };
@@ -617,9 +772,16 @@ export default function EmissionTracking() {
         gridEmissionFactor: CEA_GRID_EF_2024,
         gridEFVersion: 'CEA V20.0 Dec 2024 (FY 2023-24)',
         pppRate: IMF_PPP_RATE_INR, pppRateSource: 'IMF WEO April 2025',
-        ...(type === 'brsr' && brsrData?.energyData ? { energyData: brsrData.energyData } : {}),
-        ...(type === 'brsr' && brsrData?.waterData  ? { waterData:  brsrData.waterData  } : {}),
-        ...(type === 'brsr' && brsrData?.wasteData  ? { wasteData:  brsrData.wasteData  } : {}),
+        // [FIX-BRSR-MERGE] brsrData is now keyed by section: { 'section-a', 'section-b', p1..p9 }
+        // BRSR PDF renderer needs the full object, not just P6's energy/water/waste.
+        // P6's shape stays { energyData, waterData, wasteData } for backward-compat
+        // with the existing renderer; spread it flat alongside the rest.
+        ...(type === 'brsr' && brsrData ? {
+          brsrSections: brsrData,
+          ...(brsrData.p6?.energyData ? { energyData: brsrData.p6.energyData } : {}),
+          ...(brsrData.p6?.waterData  ? { waterData:  brsrData.p6.waterData  } : {}),
+          ...(brsrData.p6?.wasteData  ? { wasteData:  brsrData.p6.wasteData  } : {}),
+        } : {}),
       };
       const response = await fetch('/api/reports/generate', {
         method: 'POST', credentials: 'include',
@@ -650,47 +812,6 @@ export default function EmissionTracking() {
     } finally { setExportLoading(''); }
   };
 
-  // ── CSV Import ────────────────────────────────────────────────────────────
-  const handleCSVImport = async (file) => {
-    if (!file) return;
-    if (file.size > 5 * 1024 * 1024) { toast('File too large (max 5MB)', 'error'); return; }
-    if (!['text/csv','text/plain','application/vnd.ms-excel'].includes(file.type) && !file.name.endsWith('.csv')) { toast('Only CSV files accepted', 'error'); return; }
-    const text   = await file.text();
-    const parsed = parseCSV(text);
-    if (!parsed.length) { toast('No valid records found in CSV', 'error'); return; }
-    const batch = parsed.slice(0, 2000);
-    toast(`Importing ${batch.length} records`);
-    try {
-      const res = await apiFetch('/api/emissions/bulk', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ records: batch }) });
-      toast(`Imported ${res?.inserted || batch.length} records`);
-      loadAll();
-    } catch { toast('Import failed. Please try again.', 'error'); }
-  };
-
-  // ── Save profile ──────────────────────────────────────────────────────────
-  const handleSaveProfile = async (e) => {
-    e.preventDefault();
-    if (submitting) return;
-    const cin   = sanitise(pform.companyCin).toUpperCase();
-    const gstin = sanitise(pform.companyGstin).toUpperCase();
-    const pan   = sanitise(pform.companyPan).toUpperCase();
-    if (cin   && !/^[A-Z]{1}[0-9]{5}[A-Z]{2}[0-9]{4}[A-Z]{3}[0-9A-Z]{6}$/.test(cin))  { toast('Invalid CIN format', 'error');   return; }
-    if (gstin && !/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(gstin)) { toast('Invalid GSTIN format', 'error'); return; }
-    if (pan   && !/^[A-Z]{5}[0-9]{4}[A-Z]{1}$/.test(pan)) { toast('Invalid PAN format', 'error'); return; }
-    const revenueCrVal = safeNum(pform.revenueCr, 0, 1e8);
-    const employeesVal = safeNum(pform.employees,  0, 1e7);
-    const floorSqftVal = safeNum(pform.floorSqft,  0, 1e9);
-    setSubmitting(true);
-    try {
-      const res = await apiFetch('/api/emissions/profile', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ companyName: sanitise(pform.companyName), industry: pform.industry||null, revenueCr: revenueCrVal||0, employees: employeesVal||0, floorSqft: floorSqftVal||0, netZeroYear: parseInt(pform.netZeroYear)||2050, netZeroTargetCo2e: safeNum(pform.netZeroTargetCo2e,0)||0, reportingYear: parseInt(pform.reportingYear)||new Date().getFullYear(), companyCin: cin||null, companyGstin: gstin||null, companyPan: pan||null, companyType: sanitise(pform.companyType)||null, baseYear: parseInt(pform.baseYear)||2024 }),
-      });
-      if (res?.profile) { setProfile(res.profile); toast('Company profile saved'); }
-    } catch { toast('Failed to save profile. Please try again.', 'error'); }
-    finally { setSubmitting(false); }
-  };
-
   const intensities = [
     revenueCr && { label: 'Carbon Intensity (Revenue Rs.Cr)', val: total / revenueCr, unit: 'tCO2e/Rs.Cr', max: 5, color: total / revenueCr > 2 ? 'var(--red)' : total / revenueCr > 1 ? 'var(--ylw)' : 'var(--grn)' },
     revenuePPP && { label: 'Carbon Intensity (Revenue PPP adj. IMF 2025)', val: total / revenuePPP * 1000, unit: 'tCO2e/M$ PPP', max: 200, color: 'var(--grn)' },
@@ -699,8 +820,8 @@ export default function EmissionTracking() {
     total > 0  && { label: 'Scope 3 Share', val: scope3 / total * 100, unit: '%', max: 100, color: scope3 / total > .6 ? 'var(--red)' : scope3 / total > .4 ? 'var(--ylw)' : 'var(--grn)' },
   ].filter(Boolean);
 
-  // ── Export pre-flight checks ───────────────────────────────────────────────
-  const getExportChecks = (type) => {
+  // ── [FIX-CHECKS-MEMO] Export checks memoized ──────────────────────────────
+  const getExportChecks = useCallback((type) => {
     const base = [
       { label: 'Company name', detail: 'Used in PDF header and filename set in Company Profile tab', ok: !!profile?.company_name, required: true, fixTab: 'profile' },
       { label: `Emission records for FY ${year}`, detail: `${records.length} activities logged`, ok: records.length > 0, required: true, fixTab: 'log' },
@@ -725,9 +846,9 @@ export default function EmissionTracking() {
       { label: 'Scope 1 emissions (P6-E1)', detail: 'BRSR Core KPI direct GHG emissions', ok: records.some(r => r.scope===1), required: true, fixTab: 'log' },
       { label: 'Scope 2 emissions (P6-E1)', detail: 'BRSR Core KPI purchased electricity', ok: records.some(r => r.scope===2), required: true, fixTab: 'log' },
       { label: 'GSTIN', detail: 'GST registration BRSR regulatory identity', ok: !!profile?.company_gstin, required: false, fixTab: 'profile' },
-      { label: 'Energy data (P6-E2)', detail: 'Total GJ consumed renewable share BRSR Environmental tab', ok: !!brsrData?.energyData, required: false, fixTab: 'brsr-env' },
-      { label: 'Water data (P6-E3)', detail: 'Withdrawal consumption recycling rate BRSR Environmental tab', ok: !!brsrData?.waterData, required: false, fixTab: 'brsr-env' },
-      { label: 'Waste data (P6-E4)', detail: 'Total waste hazardous recycling rate BRSR Environmental tab', ok: !!brsrData?.wasteData, required: false, fixTab: 'brsr-env' },
+      { label: 'Energy data (P6-E2)', detail: 'Total GJ consumed · renewable share — BRSR Disclosures → Section C → P6', ok: !!brsrData?.p6?.energyData, required: false, fixTab: 'brsr-env' },
+      { label: 'Water data (P6-E3)', detail: 'Withdrawal consumption recycling rate — BRSR Disclosures → Section C → P6', ok: !!brsrData?.p6?.waterData, required: false, fixTab: 'brsr-env' },
+      { label: 'Waste data (P6-E4)', detail: 'Total waste hazardous recycling rate — BRSR Disclosures → Section C → P6', ok: !!brsrData?.p6?.wasteData, required: false, fixTab: 'brsr-env' },
       { label: 'Dual Scope 2 market-based', detail: 'BRSR ISF Dec 2024 requires both location and market-based Scope 2', ok: scope2Mkt > 0, required: false, fixTab: 'log' },
       { label: 'Net zero target year', detail: 'BRSR Core transition plan disclosure', ok: !!profile?.net_zero_year, required: false, fixTab: 'profile' },
       { label: 'Carbon credit retirements (P6-E5)', detail: 'Offset disclosures log via Audit Trail tab', ok: retirements.length > 0, required: false, fixTab: 'audit' },
@@ -756,31 +877,30 @@ export default function EmissionTracking() {
       { label: 'Previous year for trend (Metrics)', detail: `TCFD requires year-on-year metrics FY ${year-1} data`, ok: !!prevYearEmissions, required: false, fixTab: 'log' },
       { label: 'Carbon credit retirements', detail: 'TCFD Metrics offset strategy and carbon pricing exposure', ok: retirements.length > 0, required: false, fixTab: 'audit' },
       { label: 'Third-party verification', detail: 'TCFD increases credibility of metrics disclosure', ok: !!verifier, required: false, fixTab: 'audit' },
-      { label: 'BRSR environmental data', detail: 'TCFD Strategy physical risk energy water waste exposure', ok: !!brsrData, required: false, fixTab: 'brsr-env' },
+      { label: 'BRSR environmental data', detail: 'TCFD physical risk exposure — BRSR Disclosures → Section C → P6 Energy/Water/Waste', ok: !!brsrData?.p6, required: false, fixTab: 'brsr-env' },
     ];
     return base;
-  };
+  }, [profile, year, records, scope2Mkt, brsrData, verifier, prevYearEmissions, retirements]);
 
-  const exportChecks = getExportChecks(pendingExport?.type || 'ghg-protocol');
-  const canExport    = exportChecks.filter(c => c.required).every(c => c.ok);
+  const exportChecks = useMemo(
+    () => getExportChecks(pendingExport?.type || 'ghg-protocol'),
+    [getExportChecks, pendingExport?.type]
+  );
+  const canExport = exportChecks.filter(c => c.required).every(c => c.ok);
 
-  // ── [FIX-TIER-GATE] Tab click — intercepts locked tabs ────────────────────
+  // ── [FIX-SFILT-RESET] Tab click — resets filter and page ──────────────────
   const handleTabClick = (k) => {
     setTab(k);
     setPage(1);
+    setSfilt('all');
   };
 
-  // ── [FIX-PDF-GATE] PDF export click — intercepts locked PDF types ─────────
+  // ── [FIX-TOAST-DUP] PDF export click — no redundant toasts ───────────────
   const handlePdfExportClick = (type, label) => {
     if (CORPORATE_PDF_TYPES.includes(type) && !corporate) {
       setPdfUpgradeModal({ label });
       return;
     }
-    const checks          = getExportChecks(type);
-    const missingRequired = checks.filter(c => c.required && !c.ok);
-    const missingOptional = checks.filter(c => !c.required && !c.ok);
-    if (missingRequired.length > 0) toast(`Cannot export missing: ${missingRequired.map(c => c.label).join(', ')}`, 'error');
-    else if (missingOptional.length > 0) toast(`${label} will be incomplete missing: ${missingOptional.map(c => c.label).join(', ')}`, 'error');
     setPendingExport({ type, label });
     setShowExportModal(true);
   };
@@ -788,114 +908,278 @@ export default function EmissionTracking() {
   // ── CSS ───────────────────────────────────────────────────────────────────
   const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;700;800&display=swap');
-:root{--bg:#060809;--surf:#0e1318;--brd:#243040;--brd2:#2e3d50;--txt:#f0f6ff;--mut:#8ba3bc;--grn:#10b981;--red:#ef4444;--ylw:#f59e0b;--s1:#f97316;--s2:#3b82f6;--s3:#a855f7;}
-.em{min-height:100vh;background:var(--bg);font-family:'Space Mono',monospace;color:var(--txt);position:relative;overflow-x:hidden;}
-.em::after{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;background-image:linear-gradient(rgba(56,189,248,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(56,189,248,.025) 1px,transparent 1px);background-size:48px 48px;}
-.em-in{position:relative;z-index:1;max-width:1400px;margin:0 auto;padding:0px 28px;}
-.em-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--brd);animation:fU .5s ease both;}
-.em-brand-label{font-size:10px;letter-spacing:.15em;color:var(--mut);margin-top:0;}
-.em-brand-title{font-family:'Syne',sans-serif;font-size:22px;font-weight:800;}
+
+:root{
+  --bg:#050709;
+  --surf:#0b0f14;
+  --surf2:#0f1419;
+  --surf3:#131920;
+  --brd:#1c2836;
+  --brd2:#243348;
+  --txt:#eef4ff;
+  --txt2:#c8d8ea;
+  --mut:#5a7a96;
+  --grn:#10b981;
+  --grn2:#059669;
+  --red:#ef4444;
+  --ylw:#f59e0b;
+  --s1:#f97316;
+  --s2:#3b82f6;
+  --s3:#a855f7;
+  --radius:12px;
+  --radius-sm:8px;
+}
+
+/* ── Base ── */
+*{box-sizing:border-box;}
+.em{min-height:100vh;background:var(--bg);font-family:'Space Mono',monospace;color:var(--txt);position:relative;}
+.em::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:
+    radial-gradient(ellipse 800px 500px at 20% 0%,#10b98106 0%,transparent 70%),
+    radial-gradient(ellipse 600px 400px at 80% 100%,#3b82f604 0%,transparent 70%);
+}
+.em::after{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;
+  background-image:
+    linear-gradient(rgba(56,189,248,.018) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(56,189,248,.018) 1px,transparent 1px);
+  background-size:56px 56px;
+}
+.em-in{position:relative;z-index:1;max-width:1440px;margin:0 auto;padding:0 32px 40px;}
+
+/* ── Topbar ── */
+.em-top{display:flex;align-items:center;justify-content:space-between;padding:20px 0 16px;margin-bottom:4px;border-bottom:1px solid var(--brd);animation:fadeUp .5s ease both;}
+.em-brand-label{font-size:9px;letter-spacing:.18em;color:var(--mut);margin-bottom:6px;text-transform:uppercase;}
+.em-brand-title{font-family:'Syne',sans-serif;font-size:24px;font-weight:800;letter-spacing:-.02em;}
 .em-brand-title span{color:var(--grn);}
-.em-badge{padding:6px 13px;border-radius:4px;font-size:11px;letter-spacing:.08em;}
-.em-badge-grn{border:1px solid #10b98133;color:var(--grn);background:#10b98108;}
-.em-badge-mut{border:1px solid var(--brd2);color:var(--txt);background:var(--surf);}
-.em-badge-ylw{border:1px solid #f59e0b33;color:var(--ylw);background:#f59e0b08;}
-.em-live{width:7px;height:7px;border-radius:50%;background:var(--grn);box-shadow:0 0 8px var(--grn);animation:pulse 2s ease infinite;}
-.em-scopes{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px;animation:fU .5s ease .08s both;}
-.em-sc-card{border-radius:10px;padding:18px 20px;border:1px solid var(--brd);background:var(--surf);position:relative;overflow:hidden;transition:transform .2s,border-color .2s;}
-.em-sc-card:hover{transform:translateY(-2px);}
-.em-sc-card::before{content:'';position:absolute;inset:0;background:linear-gradient(135deg,var(--ac)08,transparent 60%);}
-.em-sc-lbl{font-size:10px;letter-spacing:.12em;color:var(--mut);margin-bottom:10px;position:relative;}
-.em-sc-val{font-family:'Syne',sans-serif;font-size:26px;font-weight:800;margin-bottom:2px;position:relative;}
-.em-sc-sub{font-size:11px;color:var(--mut);letter-spacing:.08em;position:relative;}
-.em-sc-bar{height:3px;border-radius:2px;margin-top:12px;background:var(--brd);position:relative;}
-.em-sc-fill{height:100%;border-radius:2px;transition:width .8s ease;}
-.em-tabs{display:flex;gap:0;margin-bottom:20px;border-bottom:1px solid var(--brd);animation:fU .5s ease .12s both;overflow-x:auto;}
-.em-tab{padding:10px 14px;font-family:'Space Mono',monospace;font-size:10px;letter-spacing:.08em;cursor:pointer;border:none;background:none;color:var(--mut);border-bottom:2px solid transparent;transition:all .2s;margin-bottom:-1px;white-space:nowrap;flex-shrink:0;}
-.em-tab:hover{color:var(--txt);}
-.em-tab.on{color:var(--grn);border-bottom-color:var(--grn);}
-.em-tab-locked{opacity:.45;}
-.em-tab-locked:hover{opacity:.65;}
-.em-tab-ccts.on{color:#14b8a6;border-bottom-color:#14b8a6;}
-.em-tab-gei.on{color:#14b8a6;border-bottom-color:#14b8a6;}
-.em-tab-sbti.on{color:#10b981;border-bottom-color:#10b981;}
-.em-tab-plan.on{color:#f97316;border-bottom-color:#f97316;}
-.em-tab-sup.on{color:#a855f7;border-bottom-color:#a855f7;}
-.em-card{background:var(--surf);border:1px solid var(--brd);border-radius:10px;padding:22px;animation:fU .5s ease .16s both;}
-.em-ctit{font-size:10px;letter-spacing:.15em;color:var(--mut);margin-bottom:18px;display:flex;align-items:center;gap:8px;}
-.em-ctit::before{content:'';width:12px;height:1px;background:var(--grn);}
+.em-brand-sub{font-size:11px;color:var(--mut);margin-top:4px;letter-spacing:.04em;}
+.em-brand-sub b{color:var(--txt2);}
+.em-topright{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;}
+.em-live{width:6px;height:6px;border-radius:50%;background:var(--grn);box-shadow:0 0 0 3px #10b98122,0 0 12px var(--grn);animation:livePulse 2.4s ease infinite;}
+.em-badge{padding:4px 10px;border-radius:4px;font-size:9px;letter-spacing:.1em;text-transform:uppercase;font-weight:700;}
+.em-badge-plan-corp{background:#f9731410;color:#f97316;border:1px solid #f9731430;}
+.em-badge-plan-growth{background:#3b82f610;color:#60a5fa;border:1px solid #3b82f630;}
+.em-badge-grn{background:#10b98110;color:var(--grn);border:1px solid #10b98130;}
+.em-badge-purple{background:#a855f710;color:#c084fc;border:1px solid #a855f730;}
+.em-badge-mut{background:var(--surf2);color:var(--txt2);border:1px solid var(--brd2);}
+.em-yr-sel{padding:6px 10px;border-radius:6px;background:var(--surf2);border:1px solid var(--brd2);color:var(--txt);font-family:'Space Mono',monospace;font-size:11px;outline:none;cursor:pointer;transition:border-color .2s;}
+.em-yr-sel:focus{border-color:var(--grn);}
+
+/* ── Alert strip ── */
+.em-alerts{display:flex;flex-direction:column;gap:6px;margin-bottom:16px;}
+.em-alert{padding:10px 16px;border-radius:var(--radius-sm);font-size:11px;display:flex;align-items:center;gap:10px;line-height:1.5;}
+.em-alert-icon{flex-shrink:0;font-size:13px;}
+.em-alg{background:#10b98108;border:1px solid #10b98128;color:#34d399;}
+.em-aly{background:#f59e0b08;border:1px solid #f59e0b28;color:#fbbf24;}
+.em-alr{background:#ef444408;border:1px solid #ef444428;color:#f87171;}
+
+/* ── Scope hero cards ── */
+.em-scopes{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px;animation:fadeUp .5s ease .06s both;}
+.em-sc-card{
+  border-radius:var(--radius);padding:22px 24px;
+  border:1px solid var(--brd);
+  background:var(--surf);
+  position:relative;overflow:hidden;
+  transition:transform .25s cubic-bezier(.2,.8,.2,1),border-color .25s,box-shadow .25s;
+  cursor:default;
+}
+.em-sc-card:hover{transform:translateY(-3px);border-color:var(--ac,var(--brd2));box-shadow:0 8px 32px #00000044,0 0 0 1px var(--ac,transparent)22;}
+.em-sc-card::before{content:'';position:absolute;inset:0;background:linear-gradient(135deg,var(--ac,#fff)06 0%,transparent 55%);pointer-events:none;}
+.em-sc-card::after{content:'';position:absolute;bottom:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--ac,var(--grn)),transparent);opacity:.5;}
+.em-sc-lbl{font-size:9px;letter-spacing:.16em;color:var(--mut);margin-bottom:14px;text-transform:uppercase;}
+.em-sc-scope{font-size:10px;letter-spacing:.08em;margin-bottom:6px;font-weight:700;}
+.em-sc-val{font-family:'Syne',sans-serif;font-size:34px;font-weight:800;letter-spacing:-.02em;margin-bottom:4px;line-height:1;}
+.em-sc-unit{font-size:10px;color:var(--mut);letter-spacing:.06em;margin-bottom:16px;}
+.em-sc-bar{height:2px;border-radius:2px;background:var(--brd);overflow:hidden;}
+.em-sc-fill{height:100%;border-radius:2px;transition:width 1.2s cubic-bezier(.2,.8,.2,1);}
+.em-sc-pct{font-size:10px;color:var(--mut);margin-top:6px;letter-spacing:.04em;}
+/* total card special */
+.em-sc-total{background:linear-gradient(135deg,#0d1a12,#0b1420);}
+.em-sc-total::after{background:linear-gradient(90deg,transparent,var(--grn),transparent);opacity:.7;}
+.em-nz-mini{margin-top:14px;padding-top:14px;border-top:1px solid var(--brd);}
+.em-nz-mini-bar{height:3px;border-radius:2px;background:var(--brd);overflow:hidden;margin:6px 0 4px;}
+.em-nz-mini-fill{height:100%;border-radius:2px;background:linear-gradient(90deg,var(--red),var(--ylw) 50%,var(--grn));transition:width 1.2s cubic-bezier(.2,.8,.2,1);}
+
+/* ── Nav ── */
+.em-nav-wrap{
+  position:sticky;top:0;z-index:100;
+  margin-bottom:24px;
+  background:linear-gradient(to bottom,var(--bg) 0%,var(--bg)ee 100%);
+  backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--brd);
+  animation:fadeUp .5s ease .1s both;
+}
+.em-nav{display:flex;align-items:stretch;overflow-x:auto;scrollbar-width:none;}
+.em-nav::-webkit-scrollbar{display:none;}
+.em-nav-pin{padding:12px 18px;font-family:'Space Mono',monospace;font-size:10px;letter-spacing:.1em;cursor:pointer;border:none;background:none;color:var(--mut);border-bottom:2px solid transparent;transition:all .2s;margin-bottom:-1px;white-space:nowrap;flex-shrink:0;font-weight:700;}
+.em-nav-pin:hover{color:var(--txt);}
+.em-nav-pin.on{color:var(--grn);border-bottom-color:var(--grn);}
+.em-nav-pin.reports.on{color:var(--s2);border-bottom-color:var(--s2);}
+.em-nav-sep{width:1px;background:var(--brd);margin:8px 6px;flex-shrink:0;}
+.em-nav-group{position:relative;flex-shrink:0;z-index:10;}
+.em-nav-grp-btn{
+  padding:12px 16px;font-family:'Space Mono',monospace;font-size:10px;
+  letter-spacing:.08em;cursor:pointer;border:none;background:none;
+  color:var(--mut);border-bottom:2px solid transparent;
+  transition:all .2s;margin-bottom:-1px;white-space:nowrap;
+  display:flex;align-items:center;gap:7px;height:100%;
+}
+.em-nav-grp-btn:hover{color:var(--txt);}
+.em-nav-grp-btn.active{color:var(--grn);border-bottom-color:var(--grn);}
+.em-nav-grp-btn .chev{
+  width:14px;height:14px;border-radius:3px;
+  background:var(--brd);display:flex;align-items:center;justify-content:center;
+  font-size:7px;opacity:.7;transition:transform .2s,background .2s;
+  flex-shrink:0;
+}
+.em-nav-grp-btn.open .chev{transform:rotate(180deg);background:var(--grn);opacity:1;color:#000;}
+.em-nav-unlock{padding:12px 14px;font-family:'Space Mono',monospace;font-size:9px;letter-spacing:.1em;cursor:pointer;border:none;background:none;color:var(--s1);border-bottom:2px solid transparent;transition:all .2s;margin-bottom:-1px;white-space:nowrap;flex-shrink:0;opacity:.7;font-weight:700;}
+.em-nav-unlock:hover{opacity:1;border-bottom-color:#f9731440;}
+
+/* ── Cards ── */
+.em-card{
+  background:var(--surf);border:1px solid var(--brd);
+  border-radius:var(--radius);padding:24px;
+  animation:fadeUp .45s ease .14s both;
+}
+.em-card-dark{background:var(--bg);border-color:var(--brd);}
+.em-ctit{
+  font-size:9px;letter-spacing:.18em;color:var(--mut);
+  margin-bottom:20px;display:flex;align-items:center;gap:10px;
+  text-transform:uppercase;
+}
+.em-ctit::before{content:'';width:16px;height:1px;background:linear-gradient(90deg,var(--grn),transparent);}
+.em-ctit-action{margin-left:auto;display:flex;gap:8px;align-items:center;}
+
+/* ── Buttons ── */
+.em-btn{padding:9px 18px;border-radius:var(--radius-sm);border:none;cursor:pointer;font-family:'Space Mono',monospace;font-size:10px;letter-spacing:.1em;font-weight:700;transition:all .2s;}
+.em-btn:disabled{opacity:.4;cursor:not-allowed;}
+.em-btn-p{background:linear-gradient(135deg,var(--grn),var(--grn2));color:#fff;box-shadow:0 4px 20px #10b98128;}
+.em-btn-p:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 6px 24px #10b98138;}
+.em-btn-g{background:var(--surf2);border:1px solid var(--brd2);color:var(--txt2);}
+.em-btn-g:hover:not(:disabled){border-color:var(--grn);color:var(--grn);background:var(--surf3);}
+.em-btn-sm{padding:6px 14px;font-size:10px;}
+.em-btn-danger{background:#ef444410;border:1px solid #ef444430;color:#f87171;}
+.em-btn-danger:hover{background:#ef444420;border-color:#ef4444;}
+
+/* ── Inputs ── */
+.em-lbl{font-size:10px;letter-spacing:.12em;color:var(--mut);margin-bottom:5px;text-transform:uppercase;}
+.em-inp,.em-sel{
+  padding:10px 14px;border-radius:var(--radius-sm);
+  background:var(--surf3);border:1px solid var(--brd);
+  color:var(--txt);font-family:'Space Mono',monospace;font-size:12px;
+  outline:none;transition:border-color .2s,box-shadow .2s;
+  -webkit-appearance:none;width:100%;
+}
+.em-inp:focus,.em-sel:focus{border-color:#10b98150;box-shadow:0 0 0 3px #10b98110;}
+.em-inp::placeholder{color:var(--mut);opacity:.6;}
+
+/* ── Grids ── */
 .em-g2{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
 .em-g3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;}
-.em-glog{display:grid;grid-template-columns:2fr 1fr;gap:16px;}
-.em-fg4{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:12px;margin-bottom:14px;}
-.em-fg3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:14px;}
-.em-fg{display:flex;flex-direction:column;gap:5px;}
-.em-lbl{font-size:11px;letter-spacing:.1em;color:var(--mut);}
-.em-inp,.em-sel{padding:10px 12px;border-radius:6px;background:#0a1018;border:1px solid var(--brd);color:var(--txt);font-family:'Space Mono',monospace;font-size:12px;outline:none;transition:border-color .2s,box-shadow .2s;-webkit-appearance:none;width:100%;box-sizing:border-box;}
-.em-inp:focus,.em-sel:focus{border-color:#10b98144;box-shadow:0 0 0 3px #10b98108;}
-.em-inp::placeholder{color:var(--mut);opacity:.9;}
-.em-btn{padding:10px 18px;border-radius:6px;border:none;cursor:pointer;font-family:'Space Mono',monospace;font-size:10px;letter-spacing:.1em;font-weight:700;transition:all .2s;}
-.em-btn:disabled{opacity:.5;cursor:not-allowed;}
-.em-btn-p{background:linear-gradient(135deg,#10b981,#059669);color:#fff;box-shadow:0 4px 14px #10b98122;}
-.em-btn-p:hover:not(:disabled){opacity:.88;transform:translateY(-1px);}
-.em-btn-g{background:var(--surf);border:1px solid var(--brd2);color:var(--txt);}
-.em-btn-g:hover:not(:disabled){border-color:#10b98144;color:var(--grn);}
-.em-btn-sm{padding:7px 14px;font-size:11px;}
-.em-btn-danger{background:#ef444414;border:1px solid #ef444444;color:#ef4444;}
-.em-prev{padding:14px 16px;border-radius:7px;background:#10b98108;border:1px solid #10b98122;display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
-.em-prev-val{font-family:'Syne',sans-serif;font-size:24px;font-weight:800;color:var(--grn);}
-.em-lh,.em-lr{display:grid;grid-template-columns:96px 1fr 60px 130px 72px 80px 72px 100px;padding:10px 14px;font-size:12px;align-items:center;}
-.em-lh{color:var(--mut);letter-spacing:.08em;border-bottom:1px solid var(--brd);font-size:11px;}
-.em-lr{border-bottom:1px solid #1a202833;transition:background .15s;border-radius:4px;}
-.em-lr:hover{background:#ffffff03;}
-.em-pill{font-size:10px;padding:4px 9px;border-radius:3px;letter-spacing:.04em;display:inline-flex;align-items:center;gap:4px;}
+.em-fg4{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:12px;margin-bottom:16px;}
+.em-fg3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px;}
+.em-fg{display:flex;flex-direction:column;gap:6px;}
+
+/* ── Ledger ── */
+.em-fps{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;}
+.em-fp{padding:5px 14px;border-radius:20px;font-size:10px;border:1px solid var(--brd);background:transparent;color:var(--mut);cursor:pointer;letter-spacing:.06em;font-family:'Space Mono',monospace;transition:all .2s;font-weight:700;}
+.em-fp:hover{color:var(--txt);border-color:var(--brd2);}
+.em-fp.fa{border-color:var(--grn);color:var(--grn);background:#10b98110;}
+.em-fp.f1{border-color:var(--s1);color:var(--s1);background:#f9731610;}
+.em-fp.f2{border-color:var(--s2);color:var(--s2);background:#3b82f610;}
+.em-fp.f3{border-color:var(--s3);color:var(--s3);background:#a855f710;}
+.em-lh,.em-lr{display:grid;grid-template-columns:96px 1fr 60px 140px 72px 80px 72px 100px;padding:11px 16px;font-size:11px;align-items:center;gap:4px;}
+.em-lh{color:var(--mut);letter-spacing:.09em;border-bottom:1px solid var(--brd);font-size:10px;text-transform:uppercase;}
+.em-lr{border-bottom:1px solid var(--brd)44;transition:background .15s;border-radius:6px;}
+.em-lr:hover{background:var(--surf2);}
+.em-pill{font-size:9px;padding:3px 8px;border-radius:4px;letter-spacing:.05em;display:inline-flex;align-items:center;gap:4px;font-weight:700;}
 .em-dot{width:5px;height:5px;border-radius:50%;flex-shrink:0;}
-.em-fps{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;}
-.em-fp{padding:6px 16px;border-radius:20px;font-size:11px;border:1px solid var(--brd);background:transparent;color:var(--txt);cursor:pointer;letter-spacing:.06em;font-family:'Space Mono',monospace;transition:all .2s;}
-.em-fp.fa{border-color:var(--grn);color:var(--grn);background:#10b98108;}
-.em-fp.f1{border-color:var(--s1);color:var(--s1);background:#f9731608;}
-.em-fp.f2{border-color:var(--s2);color:var(--s2);background:#3b82f608;}
-.em-fp.f3{border-color:var(--s3);color:var(--s3);background:#a855f708;}
-.em-irow{margin-bottom:14px;}
-.em-ihr{display:flex;justify-content:space-between;margin-bottom:5px;font-size:12px;}
-.em-itrack{height:4px;background:var(--brd);border-radius:2px;}
-.em-ifill{height:100%;border-radius:2px;transition:width 1s ease;}
-.em-alert{padding:11px 16px;border-radius:7px;font-size:11px;display:flex;align-items:center;gap:10px;margin-bottom:12px;}
-.em-alg{background:#10b98108;border:1px solid #10b98133;color:var(--grn);}
-.em-aly{background:#f59e0b08;border:1px solid #f59e0b33;color:var(--ylw);}
-.em-alr{background:#ef444408;border:1px solid #ef444433;color:var(--red);}
-.em-esg-g{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px;}
-.em-fw{padding:14px;border-radius:8px;border:1px solid var(--brd);background:#080b0e;text-align:center;transition:all .2s;}
-.em-fw:hover{border-color:#10b98144;background:#10b98108;}
-.em-nz{height:16px;border-radius:8px;background:var(--brd);position:relative;overflow:hidden;margin:12px 0;}
-.em-nzf{height:100%;border-radius:8px;background:linear-gradient(90deg,var(--red),var(--ylw),var(--grn));transition:width 1s ease;}
-.em-pg{display:flex;align-items:center;justify-content:center;gap:10px;padding-top:16px;}
-.em-pgb{padding:7px 16px;border-radius:5px;border:1px solid var(--brd2);background:var(--surf);color:var(--txt);font-family:'Space Mono',monospace;font-size:11px;cursor:pointer;transition:all .2s;}
-.em-pgb:hover:not(:disabled){border-color:#10b98144;color:var(--grn);}
-.em-pgb:disabled{opacity:.3;cursor:not-allowed;}
-.em-drop{border:2px dashed var(--brd2);border-radius:8px;padding:24px;text-align:center;cursor:pointer;transition:all .2s;margin-bottom:14px;}
+.em-pg{display:flex;align-items:center;justify-content:center;gap:10px;padding-top:18px;}
+.em-pgb{padding:6px 16px;border-radius:6px;border:1px solid var(--brd2);background:var(--surf2);color:var(--txt2);font-family:'Space Mono',monospace;font-size:10px;cursor:pointer;transition:all .2s;}
+.em-pgb:hover:not(:disabled){border-color:var(--grn);color:var(--grn);}
+.em-pgb:disabled{opacity:.25;cursor:not-allowed;}
+
+/* ── Intensity bars ── */
+.em-irow{margin-bottom:16px;}
+.em-ihr{display:flex;justify-content:space-between;margin-bottom:6px;font-size:11px;}
+.em-itrack{height:3px;background:var(--brd);border-radius:2px;overflow:hidden;}
+.em-ifill{height:100%;border-radius:2px;transition:width 1.2s cubic-bezier(.2,.8,.2,1);}
+
+/* ── ESG framework cards ── */
+.em-esg-g{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:20px;}
+.em-fw{
+  padding:16px;border-radius:var(--radius-sm);
+  border:1px solid var(--brd);background:var(--surf2);
+  text-align:center;transition:all .2s;position:relative;overflow:hidden;
+}
+.em-fw::before{content:'';position:absolute;inset:0;background:linear-gradient(135deg,#10b98104,transparent);pointer-events:none;}
+.em-fw:hover{border-color:#10b98144;transform:translateY(-1px);}
+.em-fw[style*="cursor"]:hover{background:var(--surf3);}
+
+/* ── Net zero bar ── */
+.em-nz{height:10px;border-radius:6px;background:var(--brd);position:relative;overflow:hidden;margin:10px 0;}
+.em-nzf{height:100%;border-radius:6px;background:linear-gradient(90deg,var(--grn2),var(--ylw) 60%,var(--red));transition:width 1.2s cubic-bezier(.2,.8,.2,1);}
+
+/* ── Export cards ── */
+.em-export-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px;}
+.em-export-btn{
+  padding:22px 16px;border-radius:var(--radius);
+  border:1px solid var(--brd);background:var(--surf2);
+  cursor:pointer;font-family:'Space Mono',monospace;
+  font-size:10px;letter-spacing:.06em;color:var(--txt);
+  transition:all .25s cubic-bezier(.2,.8,.2,1);text-align:center;
+  position:relative;overflow:hidden;
+}
+.em-export-btn::before{content:'';position:absolute;inset:0;background:linear-gradient(135deg,var(--ec,#fff)06,transparent 60%);pointer-events:none;transition:opacity .2s;}
+.em-export-btn:hover:not(:disabled){transform:translateY(-2px);box-shadow:0 8px 28px #00000044;}
+.em-export-btn:disabled{opacity:.4;cursor:not-allowed;}
+.em-export-lock-badge{position:absolute;top:8px;right:8px;font-size:8px;padding:2px 6px;border-radius:4px;background:#f9731414;color:#f97316;border:1px solid #f9731630;letter-spacing:.04em;font-weight:700;}
+
+/* ── Benchmark ── */
+.em-benchmark{padding:14px 18px;border-radius:var(--radius-sm);border:1px solid var(--brd);background:var(--surf2);margin-bottom:18px;}
+
+/* ── Modals ── */
+.em-confirm-overlay{position:fixed;inset:0;z-index:10000;background:#00000099;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);}
+.em-confirm-box{background:var(--surf);border:1px solid var(--brd2);border-radius:var(--radius);padding:28px;max-width:360px;width:90%;box-shadow:0 24px 80px #000000aa;}
+.em-export-modal{max-width:500px !important;width:94% !important;max-height:88vh;overflow-y:auto;}
+.em-check-row{display:flex;align-items:flex-start;gap:10px;margin-bottom:8px;padding:10px 14px;border-radius:var(--radius-sm);}
+.em-check-row-req-ok{background:#10b98108;border:1px solid #10b98128;}
+.em-check-row-req-fail{background:#ef444408;border:1px solid #ef444428;}
+.em-check-row-opt-ok{background:var(--surf2);border:1px solid var(--brd);}
+.em-check-row-opt-warn{background:var(--surf2);border:1px solid var(--brd);}
+
+/* ── Drop zone ── */
+.em-drop{border:2px dashed var(--brd2);border-radius:var(--radius-sm);padding:28px;text-align:center;cursor:pointer;transition:all .2s;margin-bottom:14px;}
 .em-drop:hover,.em-drop.over{border-color:#10b98166;background:#10b98108;}
+
+/* ── Misc ── */
 .em-yoy-pos{color:var(--red);font-size:10px;}
 .em-yoy-neg{color:var(--grn);font-size:10px;}
-.em-export-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;}
-.em-export-btn{padding:14px 10px;border-radius:8px;border:1px solid var(--brd);background:var(--surf);cursor:pointer;font-family:'Space Mono',monospace;font-size:10px;letter-spacing:.06em;color:var(--txt);transition:all .2s;text-align:center;position:relative;}
-.em-export-btn:hover:not(:disabled){transform:translateY(-2px);border-color:#10b98144;}
-.em-export-btn:disabled{opacity:.5;cursor:not-allowed;}
-.em-export-lock-badge{position:absolute;top:7px;right:7px;font-size:8px;padding:2px 5px;border-radius:3px;background:#f9731614;color:#f97316;border:1px solid #f9731633;letter-spacing:.04em;}
-.em-benchmark{padding:12px 16px;border-radius:8px;border:1px solid var(--brd);background:var(--surf);margin-bottom:16px;}
-.em-confirm-overlay{position:fixed;inset:0;z-index:1000;background:#00000088;display:flex;align-items:center;justify-content:center;}
-.em-confirm-box{background:var(--surf);border:1px solid var(--brd2);border-radius:10px;padding:24px;max-width:340px;width:90%;}
-.em-export-modal{max-width:480px !important;width:92% !important;max-height:88vh;overflow-y:auto;}
-.em-check-row{display:flex;align-items:flex-start;gap:10px;margin-bottom:8px;padding:10px 12px;border-radius:6px;}
-.em-check-row-req-ok{background:#10b98108;border:1px solid #10b98133;}
-.em-check-row-req-fail{background:#ef444408;border:1px solid #ef444433;}
-.em-check-row-opt-ok{background:var(--surf);border:1px solid #10b98122;}
-.em-check-row-opt-warn{background:var(--surf);border:1px solid var(--brd);}
-@keyframes fU{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
-@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.8)}}
-@media(max-width:1100px){.em-scopes{grid-template-columns:1fr 1fr;}}
-@media(max-width:900px){.em-g2,.em-glog{grid-template-columns:1fr;}.em-fg4{grid-template-columns:1fr 1fr;}.em-lh,.em-lr{grid-template-columns:80px 1fr 50px 70px 60px 60px;}.em-lh span:nth-child(n+7),.em-lr span:nth-child(n+7){display:none;}.em-export-grid{grid-template-columns:1fr 1fr;}}
-  `;
+.em-prev{padding:14px 18px;border-radius:var(--radius-sm);background:#10b98108;border:1px solid #10b98122;display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;}
+.em-prev-val{font-family:'Syne',sans-serif;font-size:26px;font-weight:800;color:var(--grn);}
+
+/* ── Animations ── */
+@keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+@keyframes livePulse{0%,100%{box-shadow:0 0 0 3px #10b98122,0 0 12px var(--grn)}50%{box-shadow:0 0 0 6px #10b98108,0 0 20px var(--grn)}}
+@keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+
+/* ── Chart tooltip override ── */
+.em-chart-wrap{height:260px;position:relative;}
+
+/* ── Responsive ── */
+@media(max-width:1100px){.em-scopes{grid-template-columns:1fr 1fr;}.em-export-grid{grid-template-columns:1fr 1fr;}}
+@media(max-width:900px){
+  .em-in{padding:0 16px 32px;}
+  .em-g2{grid-template-columns:1fr;}
+  .em-fg4{grid-template-columns:1fr 1fr;}
+  .em-lh,.em-lr{grid-template-columns:80px 1fr 50px 70px 60px 60px;}
+  .em-lh span:nth-child(n+7),.em-lr span:nth-child(n+7){display:none;}
+}
+@media(max-width:600px){.em-scopes{grid-template-columns:1fr;}.em-esg-g{grid-template-columns:1fr 1fr;}}
+`;
+
+  // Determine which group contains the current tab (pinned tabs esg/reports have no group)
+  const activeGroupId = TAB_GROUPS.find(g => g.tabs.some(t => t.k === tab))?.id || null;
 
   return (
     <>
@@ -922,9 +1206,9 @@ export default function EmissionTracking() {
               {pendingExport.label.toUpperCase()} PRE-EXPORT CHECK
             </div>
             <div style={{ fontSize: 11, color: 'var(--mut)', marginBottom: 18 }}>
-              FY {year} {records.length} record{records.length !== 1 ? 's' : ''} {profile?.company_name || 'No company set'}
+              FY {year} · {records.length} record{records.length !== 1 ? 's' : ''} · {profile?.company_name || 'No company set'}
             </div>
-            <div style={{ fontSize: 10, letterSpacing: '.1em', color: 'var(--mut)', marginBottom: 8 }}>REQUIRED missing items block export</div>
+            <div style={{ fontSize: 10, letterSpacing: '.1em', color: 'var(--mut)', marginBottom: 8 }}>REQUIRED — missing items block export</div>
             {exportChecks.filter(c => c.required).map(({ label, detail, ok, fixTab }) => (
               <div key={label} className={`em-check-row ${ok ? 'em-check-row-req-ok' : 'em-check-row-req-fail'}`}>
                 <span style={{ color: ok ? 'var(--grn)' : 'var(--red)', fontSize: 15, lineHeight: 1, flexShrink: 0, marginTop: 1 }}>{ok ? '✓' : '✕'}</span>
@@ -932,10 +1216,10 @@ export default function EmissionTracking() {
                   <div style={{ fontSize: 12, color: ok ? 'var(--grn)' : 'var(--red)', fontWeight: 700 }}>{label}</div>
                   <div style={{ fontSize: 11, color: 'var(--mut)', marginTop: 2 }}>{detail}</div>
                 </div>
-                {!ok && <button className="em-btn em-btn-g" style={{ padding: '4px 10px', fontSize: 10, flexShrink: 0, alignSelf: 'center' }} onClick={() => { setShowExportModal(false); if (fixTab === 'profile') navigate('/team?tab=profile'); else setTab(fixTab); }}>FIX</button>}
+                {!ok && <button className="em-btn em-btn-g" style={{ padding: '4px 10px', fontSize: 10, flexShrink: 0, alignSelf: 'center' }} onClick={() => { setShowExportModal(false); if (fixTab === 'profile') navigate('/team?tab=profile'); else handleTabClick(fixTab); }}>FIX</button>}
               </div>
             ))}
-            <div style={{ fontSize: 10, letterSpacing: '.1em', color: 'var(--mut)', margin: '14px 0 8px' }}>OPTIONAL improves report quality but does not block export</div>
+            <div style={{ fontSize: 10, letterSpacing: '.1em', color: 'var(--mut)', margin: '14px 0 8px' }}>OPTIONAL — improves report quality</div>
             {exportChecks.filter(c => !c.required).map(({ label, detail, ok, fixTab }) => (
               <div key={label} className={`em-check-row ${ok ? 'em-check-row-opt-ok' : 'em-check-row-opt-warn'}`}>
                 <span style={{ color: ok ? 'var(--grn)' : 'var(--ylw)', fontSize: 13, flexShrink: 0, marginTop: 2 }}>{ok ? '✓' : '⚠'}</span>
@@ -943,14 +1227,14 @@ export default function EmissionTracking() {
                   <div style={{ fontSize: 11, color: ok ? 'var(--txt)' : 'var(--ylw)' }}>{label}</div>
                   <div style={{ fontSize: 10, color: 'var(--mut)', marginTop: 1 }}>{detail}</div>
                 </div>
-                {!ok && <button className="em-btn em-btn-g" style={{ padding: '3px 9px', fontSize: 10, flexShrink: 0, alignSelf: 'center', opacity: .7 }} onClick={() => { setShowExportModal(false); setTab(fixTab); }}>ADD</button>}
+                {!ok && <button className="em-btn em-btn-g" style={{ padding: '3px 9px', fontSize: 10, flexShrink: 0, alignSelf: 'center', opacity: .7 }} onClick={() => { setShowExportModal(false); handleTabClick(fixTab); }}>ADD</button>}
               </div>
             ))}
             {!canExport && <div className="em-alert em-alr" style={{ marginTop: 14, fontSize: 11 }}><span>✕</span><span>Complete the required fields above to enable PDF export.</span></div>}
             <div style={{ display: 'flex', gap: 10, marginTop: 18 }}>
               <button className="em-btn em-btn-p" style={{ flex: 1, opacity: canExport ? 1 : 0.35, cursor: canExport ? 'pointer' : 'not-allowed' }} disabled={!canExport || !!exportLoading}
                 onClick={() => { setShowExportModal(false); downloadReport(pendingExport.type, pendingExport.label); }}>
-                {exportLoading ? 'GENERATING' : canExport ? `EXPORT ${pendingExport.label.toUpperCase()} PDF` : 'COMPLETE REQUIRED FIELDS FIRST'}
+                {exportLoading ? 'GENERATING…' : canExport ? `EXPORT ${pendingExport.label.toUpperCase()} PDF` : 'COMPLETE REQUIRED FIELDS FIRST'}
               </button>
               <button className="em-btn em-btn-g" onClick={() => setShowExportModal(false)}>CANCEL</button>
             </div>
@@ -967,13 +1251,18 @@ export default function EmissionTracking() {
         />
       )}
 
+      {/* ── [FEAT-LINEAGE] Source-to-number lineage modal ────────────────── */}
+      {lineageRecord && (
+        <EmissionLineage record={lineageRecord} onClose={() => setLineageRecord(null)} />
+      )}
+
       {/* ── Toast ────────────────────────────────────────────────────────── */}
       {notif && (
         <div style={{ position: 'fixed', top: 76, right: 24, zIndex: 9999, padding: '12px 20px', borderRadius: 8,
           background: notif.type === 'error' ? '#450a0a' : '#0b2a1e',
           border: `1px solid ${notif.type === 'error' ? '#ef444433' : '#10b98133'}`,
           color: notif.type === 'error' ? '#f87171' : '#10b981',
-          fontFamily: 'Space Mono,monospace', fontSize: 11, boxShadow: '0 8px 32px #00000066', animation: 'fU .3s ease' }}>
+          fontFamily: 'Space Mono,monospace', fontSize: 11, boxShadow: '0 8px 32px #00000066', animation: 'fadeUp .3s ease' }}>
           {notif.msg}
         </div>
       )}
@@ -985,202 +1274,235 @@ export default function EmissionTracking() {
           <div className="em-top">
             <div>
               <div className="em-brand-label">
-                GHG PROTOCOL · ISO 14064-1 · DEFRA 2024 · CEA V20.0 · BRSR CORE · CDP · TCFD · PAT SCHEME · CCTS 2026 · ALL 15 SCOPE 3 CATEGORIES
+                GHG Protocol · ISO 14064-1 · CEA V20.0 · BRSR Core · CDP · TCFD · PAT · CCTS 2026
               </div>
               <div className="em-brand-title">Carbon <span>Intelligence</span></div>
               {profile?.company_name && (
-                <div style={{ fontSize: 12, color: 'var(--mut)', marginTop: 3, letterSpacing: '.06em' }}>
-                  {profile.company_name}
-                  {profile.company_cin   && <span style={{ marginLeft: 8, fontSize: 10 }}>CIN: {profile.company_cin}</span>}
-                  {profile.company_gstin && <span style={{ marginLeft: 8, fontSize: 10 }}>GSTIN: {profile.company_gstin}</span>}
-                  {' '}· {profile.industry} · FY {profile.reporting_year}
+                <div className="em-brand-sub">
+                  <b>{profile.company_name}</b>
+                  {profile.company_cin && <span style={{marginLeft:10}}>CIN: {profile.company_cin}</span>}
+                  {profile.industry && <span style={{marginLeft:10}}>{profile.industry}</span>}
+                  <span style={{marginLeft:10}}>FY {profile.reporting_year}</span>
                 </div>
               )}
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <div className="em-topright">
               <div className="em-live" title="Live tracking"/>
-              {/* [FIX-PLAN-FETCH] Show plan badge */}
-              {subscriptionPlan && (
-                <span className="em-badge" style={{
-                  fontSize: 9, textTransform: 'uppercase',
-                  background: corporate ? '#f9731614' : '#3b82f614',
-                  color:      corporate ? '#f97316'   : '#3b82f6',
-                  border:     `1px solid ${corporate ? '#f9731633' : '#3b82f633'}`,
-                }}>
+              {planResolved && (
+                <span className={`em-badge ${corporate ? 'em-badge-plan-corp' : 'em-badge-plan-growth'}`}>
                   {subscriptionPlan}
                 </span>
               )}
-              {retirements.length > 0 && <span className="em-badge em-badge-grn" style={{ fontSize: 9 }}>{retirements.length} RETIREMENTS</span>}
-              {verifier && <span className="em-badge" style={{ fontSize: 9, background: '#a855f714', color: '#a855f7', border: '1px solid #a855f733' }}>ISO 14064-3 VERIFIED</span>}
-              {prevYearEmissions && <span className="em-badge em-badge-mut" style={{ fontSize: 9 }}>YoY READY</span>}
-              <select className="em-sel" style={{ width: 'auto', padding: '6px 12px', fontSize: 11 }}
-                value={year} onChange={e => { setYear(parseInt(e.target.value)); setPage(1); }}>
+              {retirements.length > 0 && <span className="em-badge em-badge-grn">{retirements.length} retirements</span>}
+              {verifier && <span className="em-badge em-badge-purple">ISO 14064-3 verified</span>}
+              {prevYearEmissions && <span className="em-badge em-badge-mut">YoY ready</span>}
+              <select className="em-yr-sel" value={year} onChange={e => { setYear(parseInt(e.target.value)); setPage(1); }}>
                 {REPORT_YEARS.map(y => <option key={y}>{y}</option>)}
               </select>
             </div>
           </div>
 
+          <div className="em-alerts">
           {!profile && (
-            <div className="em-alert em-aly" style={{ cursor: 'pointer', fontSize: 12 }} onClick={() => navigate('/team?tab=profile')}>
-              <span>⚠</span><span>Set up your <strong>company profile</strong> to unlock intensity benchmarks and regulatory exports</span>
+            <div className="em-alert em-aly" style={{ cursor: 'pointer' }} onClick={() => navigate('/team?tab=profile')}>
+              <span className="em-alert-icon">⚠</span><span>Set up your <strong>company profile</strong> to unlock intensity benchmarks and regulatory exports</span>
             </div>
           )}
           {yoyChange != null && (
             <div className={`em-alert ${yoyChange > 0 ? 'em-alr' : 'em-alg'}`}>
-              <span>{yoyChange > 0 ? '↑' : '↓'}</span>
+              <span className="em-alert-icon">{yoyChange > 0 ? '↑' : '↓'}</span>
               <span>Year-over-year: <strong>{yoyChange > 0 ? '+' : ''}{fmt(yoyChange, 1)}%</strong> vs {year - 1}.{yoyChange > 0 ? ' Action required.' : ' Great progress!'}</span>
             </div>
           )}
           {scope3 > 0 && scope3 > scope1 + scope2 && (
             <div className="em-alert em-aly">
-              <span>⚠</span>
-              <span>Scope 3 is <strong>{fmt(scope3 / total * 100, 1)}%</strong> of total supply chain requires priority action (BRSR Core KPI)</span>
+              <span className="em-alert-icon">⚠</span>
+              <span>Scope 3 is <strong>{fmt(scope3 / total * 100, 1)}%</strong> of total — supply chain requires priority action (BRSR Core KPI)</span>
             </div>
           )}
-          {brsrData && <div className="em-alert em-alg"><span>✓</span><span>BRSR environmental data loaded energy water and waste sections ready in BRSR PDF.</span></div>}
+          {brsrData && Object.keys(brsrData).length > 0 && (
+            <div className="em-alert em-alg">
+              <span className="em-alert-icon">✓</span>
+              <span>
+                BRSR progress saved — {Object.keys(brsrData).length} of 11 sections started
+                {brsrData.p6 ? ' (P6 energy/water/waste ready for PDF)' : ''}.
+                {' '}Continue in BRSR Disclosures for full filing coverage.
+              </span>
+            </div>
+          )}
+          </div>
 
-          {/* ── Scope Cards ──────────────────────────────────────────────── */}
+          {/* ── Scope Hero Cards ─────────────────────────────────────────── */}
           <div className="em-scopes">
             {[
-              { sc: 1, lbl: 'SCOPE 1 · DIRECT',     sub: 'Combustion & Fugitives',          val: scope1,    color: '#f97316' },
-              { sc: 2, lbl: 'SCOPE 2 · ENERGY',      sub: 'Location-based (CEA V20.0 2024)', val: scope2Loc, color: '#3b82f6' },
-              { sc: 3, lbl: 'SCOPE 3 · VALUE CHAIN', sub: 'All 15 GHG Protocol Categories',  val: scope3,    color: '#a855f7' },
-            ].map(({ sc, lbl, sub, val, color }) => (
+              { sc: 1, lbl: 'DIRECT EMISSIONS',    sub: 'Scope 1',  val: scope1,    color: '#f97316', pct: total ? scope1/total*100 : 0 },
+              { sc: 2, lbl: 'PURCHASED ENERGY',    sub: 'Scope 2',  val: scope2Loc, color: '#3b82f6', pct: total ? scope2Loc/total*100 : 0 },
+              { sc: 3, lbl: 'VALUE CHAIN',         sub: 'Scope 3',  val: scope3,    color: '#a855f7', pct: total ? scope3/total*100 : 0 },
+            ].map(({ sc, lbl, sub, val, color, pct }) => (
               <div key={sc} className="em-sc-card" style={{ '--ac': color }}>
                 <div className="em-sc-lbl">{lbl}</div>
-                <div style={{ fontSize: 11, color, marginBottom: 8, letterSpacing: '.04em' }}>{sub}</div>
+                <div className="em-sc-scope" style={{ color }}>{sub}</div>
                 <div className="em-sc-val" style={{ color }}>{fmt(val)}</div>
-                <div className="em-sc-sub">tCO2e · {fmt(total ? val / total * 100 : 0, 1)}%</div>
-                <div className="em-sc-bar"><div className="em-sc-fill" style={{ width: `${total ? val / total * 100 : 0}%`, background: color }}/></div>
+                <div className="em-sc-unit">tCO₂e</div>
+                <div className="em-sc-bar">
+                  <div className="em-sc-fill" style={{ width: `${pct}%`, background: color }}/>
+                </div>
+                <div className="em-sc-pct">{fmt(pct, 1)}% of total · CEA V20.0</div>
               </div>
             ))}
-            <div className="em-sc-card" style={{ '--ac': '#10b981' }}>
-              <div className="em-sc-lbl">TOTAL FOOTPRINT · {year}</div>
-              <div className="em-sc-val" style={{ color: '#10b981', fontSize: 30 }}>{fmt(total)}</div>
-              <div className="em-sc-sub">
-                tCO2e · {creditsNeeded} credits needed
-                {retirements.length > 0 && <span style={{ color: '#10b981', marginLeft: 8, fontSize: 10 }}>· {retirements.reduce((s, r) => s + parseInt(r.amount || 0), 0)}t offset</span>}
-                {yoyChange != null && <span className={yoyChange > 0 ? 'em-yoy-pos' : 'em-yoy-neg'} style={{ marginLeft: 8 }}>({yoyChange > 0 ? '+' : ''}{fmt(yoyChange, 1)}% YoY)</span>}
+            <div className="em-sc-card em-sc-total" style={{ '--ac': '#10b981' }}>
+              <div className="em-sc-lbl">TOTAL FOOTPRINT · FY {year}</div>
+              <div className="em-sc-val" style={{ color: '#10b981', fontSize: 38 }}>{fmt(total)}</div>
+              <div className="em-sc-unit">
+                tCO₂e · {creditsNeeded} credits needed
+                {retirements.length > 0 && <span style={{ color: '#10b981', marginLeft: 8 }}> · {retirements.reduce((s,r)=>s+parseInt(r.amount||0),0)}t offset</span>}
+                {yoyChange != null && <span className={yoyChange > 0 ? 'em-yoy-pos' : 'em-yoy-neg'} style={{ marginLeft: 8 }}>({yoyChange > 0 ? '+' : ''}{fmt(yoyChange,1)}% YoY)</span>}
               </div>
-              <div style={{ marginTop: 12 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--mut)', marginBottom: 5 }}>
+              <div className="em-nz-mini">
+                <div style={{ display:'flex', justifyContent:'space-between', fontSize:10, color:'var(--mut)' }}>
                   <span>NET ZERO PROGRESS</span>
-                  <span style={{ color: netZeroPct > 80 ? 'var(--red)' : netZeroPct > 50 ? 'var(--ylw)' : 'var(--grn)' }}>{fmt(netZeroPct, 1)}% of budget</span>
+                  <span style={{ color: netZeroPct > 80 ? 'var(--red)' : netZeroPct > 50 ? 'var(--ylw)' : 'var(--grn)' }}>{fmt(netZeroPct,1)}%</span>
                 </div>
-                <div className="em-nz"><div className="em-nzf" style={{ width: `${netZeroPct}%` }}/></div>
-                <div style={{ fontSize: 11, color: 'var(--mut)', textAlign: 'right' }}>Budget: {fmt(netZeroTarget)} tCO2e · Target {profile?.net_zero_year || 2050}</div>
+                <div className="em-nz-mini-bar"><div className="em-nz-mini-fill" style={{ width:`${netZeroPct}%` }}/></div>
+                <div style={{ fontSize:10, color:'var(--mut)' }}>Target {profile?.net_zero_year||2050} · Budget {fmt(netZeroTarget)} tCO₂e</div>
               </div>
             </div>
           </div>
 
-          {/* ── PDF Export Panel ─────────────────────────────────────────── */}
-          <div className="em-card" style={{ marginBottom: 16 }}>
-            <div className="em-ctit">
-              CORPORATE REGULATORY REPORTS FY {year}
-              {!corporate && subscriptionPlan && (
-                <span style={{ marginLeft: 6, fontSize: 9, padding: '2px 8px', borderRadius: 3, background: '#f9731614', color: '#f97316', border: '1px solid #f9731633', letterSpacing: '.04em' }}>
-                  GHG ONLY ON GROWTH
-                </span>
-              )}
-            </div>
-            <div className="em-export-grid">
-              {[
-                { type: 'ghg-protocol', label: 'GHG Protocol',   icon: '📊', desc: 'ISO 14064-1 · Dual Scope 2 · YoY · CEA V20.0', color: '#10b981' },
-                { type: 'brsr',         label: 'SEBI BRSR Core', icon: '🇮🇳', desc: `P6 Energy Water Waste · PPP intensity · Dec 2024 ISF${brsrData ? ' · ENV READY' : ''}`, color: '#f97316' },
-                { type: 'cdp',          label: 'CDP Climate',    icon: '🌍', desc: 'CDP prep · Dual Scope 2 · Submit via portal', color: '#3b82f6' },
-                { type: 'tcfd',         label: 'TCFD',           icon: '📋', desc: '4-pillar · Risk · Metrics · Roadmap', color: '#a855f7' },
-              ].map(({ type, label, icon, desc, color }) => {
-                // [FIX-PDF-GATE] Locked for non-corporate on BRSR/CDP/TCFD
-                const isLocked = CORPORATE_PDF_TYPES.includes(type) && !corporate;
-                return (
+          {/* ── Nav ─────────────────────────────────────────────────────── */}
+          <div className="em-nav-wrap">
+          <div className="em-nav" ref={navRef}>
+            <button className={`em-nav-pin${tab==='esg'?' on':''}`} onClick={()=>{handleTabClick('esg');setActiveGroup(null);}}>OVERVIEW</button>
+            <button className={`em-nav-pin reports${tab==='reports'?' on':''}`} onClick={()=>{handleTabClick('reports');setActiveGroup(null);}}>REPORTS</button>
+            <div className="em-nav-sep"/>
+            {TAB_GROUPS.map(group => {
+              if (group.corporate && planResolved && !corporate) return null;
+              const isLoading     = group.corporate && !planResolved;
+              const groupIsActive = activeGroupId === group.id;
+              const isOpen        = activeGroup === group.id;
+              return (
+                <div key={group.id} className="em-nav-group" ref={el=>{groupRefs.current[group.id]=el;}}>
                   <button
-                    key={type}
-                    className="em-export-btn"
-                    disabled={!!exportLoading && !isLocked}
-                    onClick={() => handlePdfExportClick(type, label)}
-                    style={{
-                      borderColor: isLocked ? `${color}22` : `${color}33`,
-                      background:  exportLoading === type ? `${color}11` : isLocked ? `${color}06` : 'var(--surf)',
-                      opacity:     isLocked ? 0.6 : 1,
+                    className={`em-nav-grp-btn${groupIsActive?' active':''}${isOpen?' open':''}`}
+                    style={{opacity:isLoading?.4:1}}
+                    onClick={()=>{
+                      if(isLoading)return;
+                      if(isOpen){setActiveGroup(null);}
+                      else{
+                        const el=groupRefs.current[group.id];
+                        if(el){const r=el.getBoundingClientRect();setDropdownPos({top:r.bottom+4,left:r.left});}
+                        setActiveGroup(group.id);
+                      }
                     }}
                   >
-                    {isLocked && <span className="em-export-lock-badge">CORPORATE</span>}
-                    <div style={{ fontSize: 24, marginBottom: 8 }}>
-                      {exportLoading === type ? '⟳' : isLocked ? '🔒' : icon}
-                    </div>
-                    <div style={{ fontWeight: 700, color: isLocked ? 'var(--mut)' : color, marginBottom: 4, letterSpacing: '.06em' }}>{label}</div>
-                    <div style={{ fontSize: 9, color: 'var(--mut)', lineHeight: 1.5 }}>
-                      {isLocked ? 'Upgrade to Corporate to unlock' : desc}
-                    </div>
+                    {group.label}<span className="chev">▾</span>
                   </button>
-                );
-              })}
-            </div>
-            <div style={{ fontSize: 9, color: 'var(--mut)', textAlign: 'center', letterSpacing: '.06em' }}>
-              Auditor-ready · Dual Scope 2 (location + market) · CEA V20.0 Dec 2024 grid EF 0.727 tCO2/MWh ·
-              {retirements.length} retirements wired · {verifier ? 'ISO 14064-3 verified' : 'Verification pending'} · DEFRA 2024 / IPCC AR6
-            </div>
-          </div>
-
-          {/* ── Tabs ─────────────────────────────────────────────────────── */}
-          <div className="em-tabs">
-            {TABS.map(([k, v]) => {
-              const isTabLocked = CORPORATE_TABS.includes(k) && !corporate;
-              return (
-                <button key={k}
-                  className={[
-                    'em-tab',
-                    tab === k        ? 'on'           : '',
-                    k === 'ccts'        ? 'em-tab-ccts'  : '',
-                    k === 'gei-report'  ? 'em-tab-gei'   : '',
-                    k === 'sbti'        ? 'em-tab-sbti'  : '',
-                    k === 'action-plan' ? 'em-tab-plan'  : '',
-                    k === 'suppliers'   ? 'em-tab-sup'   : '',
-                    isTabLocked         ? 'em-tab-locked': '',
-                  ].filter(Boolean).join(' ')}
-                  onClick={() => handleTabClick(k)}
-                  title={isTabLocked ? 'Requires Corporate plan — click to see upgrade options' : undefined}
-                >
-                  {k === 'profile' && !profile ? `${v} ⚠` : v}
-                  {isTabLocked && <span style={{ marginLeft: 4, fontSize: 9, opacity: .6 }}>🔒</span>}
-                  {k === 'ccts' && !isTabLocked && (
-                    <span style={{ marginLeft: 5, fontSize: 8, padding: '1px 5px', borderRadius: 3, background: '#14b8a622', color: '#14b8a6', border: '1px solid #14b8a633', letterSpacing: '.06em', verticalAlign: 'middle' }}>BETA</span>
-                  )}
-                </button>
+                </div>
               );
             })}
-          </div>
 
-          {loading && <div style={{ padding: 40, textAlign: 'center', color: 'var(--mut)', fontSize: 11, letterSpacing: '.1em' }}>LOADING GHG DATA</div>}
+            {/* Portal dropdown */}
+            {activeGroup && !(TAB_GROUPS.find(g=>g.id===activeGroup)?.corporate && planResolved && !corporate) &&
+              createPortal(
+                <div
+                  style={{
+                    position:'fixed', top:dropdownPos.top, left:dropdownPos.left,
+                    minWidth:200, background:'#0b0f14', border:'1px solid #243348',
+                    borderRadius:10, boxShadow:'0 16px 48px #000000cc, 0 0 0 1px #10b98112',
+                    zIndex:99999, padding:6, fontFamily:'Space Mono,monospace',
+                    animation:'fadeUp .15s ease both',
+                  }}
+                  onMouseDown={e=>e.stopPropagation()}
+                >
+                  {TAB_GROUPS.find(g=>g.id===activeGroup)?.tabs.map(({k,v})=>(
+                    <button key={k}
+                      style={{
+                        display:'block', width:'100%', padding:'11px 16px',
+                        fontFamily:'Space Mono,monospace', fontSize:11, letterSpacing:'.06em',
+                        cursor:'pointer', border:'none',
+                        background: tab===k ? '#10b98116' : 'transparent',
+                        color: tab===k ? '#10b981' : '#5a7a96',
+                        textAlign:'left', borderRadius:6, whiteSpace:'nowrap',
+                        transition:'all .15s',
+                      }}
+                      onMouseEnter={e=>{e.currentTarget.style.background='#10b98110';e.currentTarget.style.color='#eef4ff';}}
+                      onMouseLeave={e=>{e.currentTarget.style.background=tab===k?'#10b98116':'transparent';e.currentTarget.style.color=tab===k?'#10b981':'#5a7a96';}}
+                      onClick={()=>{handleTabClick(k);setActiveGroup(null);}}
+                    >
+                      {v}
+                      {k==='ccts'&&<span style={{marginLeft:6,fontSize:8,padding:'1px 5px',borderRadius:3,background:'#14b8a620',color:'#14b8a6',border:'1px solid #14b8a630',letterSpacing:'.06em',verticalAlign:'middle'}}>BETA</span>}
+                    </button>
+                  ))}
+                </div>,
+                document.body
+              )
+            }
+
+            {planResolved && !corporate && (
+              <>
+                <div className="em-nav-sep"/>
+                <button className="em-nav-unlock" onClick={()=>navigate('/billing')}>🔒 UNLOCK CORPORATE</button>
+              </>
+            )}
+          </div>
+          </div>{/* end em-nav-wrap */}
+
+          {loading && (
+            <div style={{ padding:60, textAlign:'center', color:'var(--mut)', fontSize:10, letterSpacing:'.18em', textTransform:'uppercase' }}>
+              Loading GHG Data…
+            </div>
+          )}
 
           {/* ── Full-page tab renders ─────────────────────────────────────── */}
-          {/* [FIX-TIER-GATE] Each corporate tab checks plan before rendering  */}
+          {/* [FIX-PLAN-NULL] Show skeleton while plan is still resolving      */}
 
           {!loading && tab === 'brsr-env' && (
+            !planResolved ? <PlanLoadingSkeleton /> :
             corporate
-              ? <BRSREnvironmental profile={profile} year={year} onDataReady={(d) => { setBrsrData(d); toast('BRSR environmental data saved PDF sections ready'); }} />
-              : <UpgradeLock tabLabel="BRSR Environmental" navigate={navigate} />
+              ? <BRSRDisclosures
+                  profile={profile}
+                  year={year}
+                  onDataReady={(payload, sectionKey) => {
+                    // [FIX-BRSR-MERGE] BRSRDisclosures now passes (payload, sectionKey) —
+                    // section-a, section-b, p1..p9. MUST merge by key, never replace
+                    // the whole brsrData object, or saving one section wipes another.
+                    setBrsrData(prev => ({ ...prev, [sectionKey]: payload }));
+                    // [MERGE-BRSR-LABEL] Friendly section names for the toast —
+                    // v8 had regressed to toasting the raw sectionKey (e.g. "p6 saved").
+                    const labels = {
+                      'section-a': 'Section A', 'section-b': 'Section B',
+                      p1:'P1', p2:'P2', p3:'P3', p4:'P4', p5:'P5',
+                      p6:'P6 Environmental', p7:'P7', p8:'P8', p9:'P9',
+                    };
+                    toast(`${labels[sectionKey] || sectionKey} saved`);
+                  }}
+                />
+              : <UpgradeLock tabLabel="BRSR Disclosures" navigate={navigate} />
           )}
 
           {!loading && tab === 'audit' && (
+            !planResolved ? <PlanLoadingSkeleton /> :
             corporate
-              ? <AuditTrail year={year} profile={profile} emissions={records} />
+              ? <AuditTrail year={year} profile={profile} emissions={records} retirements={retirements} />
               : <UpgradeLock tabLabel="Audit Trail" navigate={navigate} />
           )}
 
           {!loading && tab === 'pat-scheme' && (
+            !planResolved ? <PlanLoadingSkeleton /> :
             corporate
               ? <PATScheme profile={profile} />
               : <UpgradeLock tabLabel="PAT Scheme" navigate={navigate} />
           )}
 
           {!loading && tab === 'multi' && (
+            !planResolved ? <PlanLoadingSkeleton /> :
             corporate
               ? <MultiEntity profile={profile} year={year} />
               : <UpgradeLock tabLabel="Multi-Entity Consolidation" navigate={navigate} />
           )}
 
           {!loading && tab === 'ccts' && (
+            !planResolved ? <PlanLoadingSkeleton /> :
             corporate ? (
               <>
                 <div style={{ marginBottom: 12, padding: '10px 16px', borderRadius: 8, background: '#14b8a608', border: '1px solid #14b8a633', fontSize: 11, color: '#14b8a6', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1193,131 +1515,215 @@ export default function EmissionTracking() {
               </>
             ) : <UpgradeLock tabLabel="CCTS Compliance" navigate={navigate} />
           )}
+
           {!loading && tab === 'sbti' && (
+            !planResolved ? <PlanLoadingSkeleton /> :
             corporate
               ? <SBTiModule profile={profile} emissions={records} year={year} />
               : <UpgradeLock tabLabel="SBTi Targets" navigate={navigate} />
           )}
 
           {!loading && tab === 'action-plan' && (
+            !planResolved ? <PlanLoadingSkeleton /> :
             corporate
               ? <FiveYearActionPlan profile={profile} emissions={records} cctsData={cctsData} patData={patData} />
               : <UpgradeLock tabLabel="5-Year Action Plan" navigate={navigate} />
           )}
 
           {!loading && tab === 'suppliers' && (
+            !planResolved ? <PlanLoadingSkeleton /> :
             corporate
               ? <SupplierPortal profile={profile} year={year} />
               : <UpgradeLock tabLabel="Supplier Data Portal" navigate={navigate} />
           )}
 
+          {/* ── [FEAT-APPROVALS] APPROVALS TAB — full page, available on all plans ── */}
+          {!loading && tab === 'approvals' && (
+            <MakerChecker
+              records={records}
+              userRole={profile?.approval_role || 'maker'}
+              year={year}
+              onStateChange={() => loadAll()}
+            />
+          )}
+
           {!loading && !isFullPageTab(tab) && (<>
 
-            {/* ── LOG TAB ──────────────────────────────────────────────── */}
-            {tab === 'log' && (
-  <EmissionLogHub
-    EF={EF}
-    year={year}
-    onRecordAdded={(record) => {
-      setRecords(prev => [record, ...prev]);
-    }}
-    onBulkAdded={() => loadAll()}
-    profile={profile}
-  />
-)}
-            {/* ── LEDGER TAB ───────────────────────────────────────────── */}
-            {tab === 'ledger' && (
-              <div className="em-card">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-                  <div className="em-ctit" style={{ marginBottom: 0 }}>GHG INVENTORY LEDGER · {year}</div>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <span style={{ fontSize: 11, color: 'var(--mut)', alignSelf: 'center' }}>{filtered.length} records</span>
-                    <button className="em-btn em-btn-g em-btn-sm" onClick={handleExport}>EXPORT CSV</button>
+            {/* ── REPORTS TAB ──────────────────────────────────────────── */}
+            {tab === 'reports' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                <div className="em-card">
+                  <div className="em-ctit">
+                    EXPORT REPORTS · FY {year}
+                    {planResolved && !corporate && (
+                      <span style={{ marginLeft: 6, fontSize: 9, padding: '2px 8px', borderRadius: 3, background: '#f9731614', color: '#f97316', border: '1px solid #f9731633', letterSpacing: '.04em' }}>
+                        GHG PROTOCOL ONLY ON GROWTH
+                      </span>
+                    )}
+                  </div>
+                  <div className="em-export-grid">
+                    {[
+                      { type: 'ghg-protocol', label: 'GHG Protocol',   icon: '📊', desc: 'ISO 14064-1 · Dual Scope 2 · YoY · CEA V20.0 Dec 2024', color: '#10b981' },
+                      { type: 'brsr',         label: 'SEBI BRSR Core', icon: '🇮🇳', desc: `Section A · B · C (P1–P9) · PPP intensity · ISF Dec 2024${brsrData?.p6 ? ' · P6 READY' : ''}`, color: '#f97316' },
+                      { type: 'cdp',          label: 'CDP Climate',    icon: '🌍', desc: 'CDP C6 · Dual Scope 2 · Submit via CDP portal', color: '#3b82f6' },
+                      { type: 'tcfd',         label: 'TCFD',           icon: '📋', desc: '4-pillar · Governance · Strategy · Risk · Metrics', color: '#a855f7' },
+                    ].map(({ type, label, icon, desc, color }) => {
+                      const isLocked = CORPORATE_PDF_TYPES.includes(type) && planResolved && !corporate;
+                      return (
+                        <button
+                          key={type}
+                          className="em-export-btn"
+                          disabled={!!exportLoading && exportLoading !== type}
+                          onClick={() => handlePdfExportClick(type, label)}
+                          style={{
+                            borderColor: isLocked ? `${color}22` : `${color}33`,
+                            background:  exportLoading === type ? `${color}11` : isLocked ? `${color}06` : 'var(--surf)',
+                            opacity:     isLocked ? 0.6 : 1,
+                            padding: '20px 14px',
+                          }}
+                        >
+                          {isLocked && <span className="em-export-lock-badge">CORPORATE</span>}
+                          <div style={{ fontSize: 28, marginBottom: 10 }}>
+                            {exportLoading === type ? '⟳' : isLocked ? '🔒' : icon}
+                          </div>
+                          <div style={{ fontWeight: 700, color: isLocked ? 'var(--mut)' : color, marginBottom: 6, letterSpacing: '.06em', fontSize: 11 }}>{label}</div>
+                          <div style={{ fontSize: 10, color: 'var(--mut)', lineHeight: 1.6 }}>
+                            {isLocked ? 'Upgrade to Corporate to unlock' : desc}
+                          </div>
+                          {!isLocked && (
+                            <div style={{ marginTop: 12, padding: '5px 0', borderTop: `1px solid ${color}22`, fontSize: 9, color, letterSpacing: '.06em' }}>
+                              {exportLoading === type ? 'GENERATING PDF…' : 'CLICK TO EXPORT PDF'}
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div style={{ fontSize: 9, color: 'var(--mut)', textAlign: 'center', letterSpacing: '.06em', marginTop: 4 }}>
+                    Auditor-ready · Dual Scope 2 (location + market) · CEA V20.0 Dec 2024 grid EF 0.727 tCO2/MWh ·
+                    {retirements.length} retirement{retirements.length !== 1 ? 's' : ''} wired · {verifier ? 'ISO 14064-3 verified' : 'Verification pending'} · DEFRA 2024 / IPCC AR6
                   </div>
                 </div>
-                <div className="em-fps">
-                  {[['all','ALL'],['1','SCOPE 1'],['2','SCOPE 2'],['3','SCOPE 3']].map(([k, v]) => (
-                    <button key={k} className={`em-fp${sfilt===k ? k==='all' ? ' fa' : ` f${k}` : ''}`}
-                      onClick={() => { setSfilt(k); setPage(1); }}>{v}</button>
-                  ))}
-                </div>
-                <div className="em-lh">
-                  <span>DATE</span><span>ACTIVITY</span><span>S</span>
-                  <span>CATEGORY</span><span>QTY</span><span>tCO2e</span><span>SOURCE</span><span>STATUS</span>
-                </div>
-                {pageRecords.length === 0
-                  ? <div style={{ padding: 32, textAlign: 'center', color: 'var(--mut)', fontSize: 11 }}>No records log your first emission above</div>
-                  : pageRecords.map(r => {
-                      const col = SC[r.scope] || '#888';
-                      return (
-                        <div key={r.id} className="em-lr">
-                          <span style={{ color: 'var(--mut)', fontSize: 11 }}>{r.date}</span>
-                          <span style={{ fontSize: 10 }}>{r.activity}{r.notes && <span style={{ color: 'var(--mut)', fontSize: 11, display: 'block' }}>{r.notes}</span>}</span>
-                          <span><span className="em-pill" style={{ background: `${col}14`, color: col, border: `1px solid ${col}33` }}>S{r.scope}</span></span>
-                          <span style={{ fontSize: 11, color: 'var(--mut)' }}>{r.category}</span>
-                          <span style={{ fontSize: 10 }}>{fmt(r.qty || r.quantity, 1)} <span style={{ fontSize: 11, color: 'var(--mut)' }}>{r.unit}</span></span>
-                          <span style={{ color: col, fontWeight: 700 }}>{(r.co2e || 0).toFixed(3)}</span>
-                          <span style={{ fontSize: 9, color: 'var(--mut)', opacity: .7 }}>{r.source || EF[r.activity]?.source || '—'}</span>
-                          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                            <span className="em-pill" style={{ background: r.verified ? '#10b98114' : '#f59e0b14', color: r.verified ? '#10b981' : '#f59e0b', border: `1px solid ${r.verified ? '#10b98133' : '#f59e0b33'}` }}>
-                              <span className="em-dot" style={{ background: r.verified ? '#10b981' : '#f59e0b' }}/>
-                              {r.verified ? 'VERIFIED' : 'PENDING'}
-                            </span>
-                            <button onClick={() => handleDeleteRequest(r.id)}
-                              style={{ background: 'none', border: 'none', color: '#ef444444', cursor: 'pointer', fontSize: 12, padding: '2px 6px' }}
-                              onMouseEnter={e => e.currentTarget.style.color = '#ef4444'}
-                              onMouseLeave={e => e.currentTarget.style.color = '#ef444444'}
-                              aria-label="Delete record">✕</button>
-                          </span>
+
+                {/* Pre-export status checklist — always visible so users know what to fix */}
+                <div className="em-card">
+                  <div className="em-ctit">EXPORT READINESS · GHG PROTOCOL</div>
+                  <div style={{ fontSize: 11, color: 'var(--mut)', marginBottom: 14 }}>
+                    Quick check before you export. Required items block generation; optional items improve report quality.
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    {getExportChecks('ghg-protocol').map(({ label, detail, ok, required, fixTab }) => (
+                      <div key={label} className={`em-check-row ${required ? (ok ? 'em-check-row-req-ok' : 'em-check-row-req-fail') : (ok ? 'em-check-row-opt-ok' : 'em-check-row-opt-warn')}`}
+                        style={{ margin: 0 }}>
+                        <span style={{ color: ok ? 'var(--grn)' : required ? 'var(--red)' : 'var(--ylw)', fontSize: 13, flexShrink: 0 }}>
+                          {ok ? '✓' : required ? '✕' : '⚠'}
+                        </span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 11, color: ok ? 'var(--txt)' : required ? 'var(--red)' : 'var(--ylw)', fontWeight: required ? 700 : 400, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</div>
+                          <div style={{ fontSize: 10, color: 'var(--mut)', marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{detail}</div>
                         </div>
-                      );
-                    })
-                }
-                {totalPages > 1 && (
-                  <div className="em-pg">
-                    <button className="em-pgb" disabled={page === 1} onClick={() => setPage(p => p - 1)}>PREV</button>
-                    <span style={{ fontSize: 11, color: 'var(--mut)' }}>PAGE {page} / {totalPages}</span>
-                    <button className="em-pgb" disabled={page === totalPages} onClick={() => setPage(p => p + 1)}>NEXT</button>
+                        {!ok && (
+                          <button className="em-btn em-btn-g" style={{ padding: '3px 8px', fontSize: 9, flexShrink: 0 }}
+                            onClick={() => { if (fixTab === 'profile') navigate('/team?tab=profile'); else handleTabClick(fixTab); }}>
+                            FIX
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Growth upgrade nudge */}
+                {planResolved && !corporate && (
+                  <div style={{ padding: '24px', borderRadius: 10, border: '1px solid #f9731633', background: '#f9731608', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 24 }}>
+                    <div>
+                      <div style={{ fontFamily: 'Syne,sans-serif', fontSize: 15, fontWeight: 800, color: 'var(--txt)', marginBottom: 6 }}>BRSR · CDP · TCFD exports require Corporate</div>
+                      <div style={{ fontSize: 11, color: 'var(--mut)', lineHeight: 1.8 }}>
+                        Your Growth plan includes the GHG Protocol PDF. Upgrade to unlock SEBI BRSR Core, CDP Climate, and TCFD reports — mandatory for listed companies under SEBI LODR.
+                      </div>
+                    </div>
+                    <button onClick={() => navigate('/billing')}
+                      style={{ padding: '12px 24px', borderRadius: 6, border: 'none', cursor: 'pointer', background: 'linear-gradient(135deg,#f97316,#ea580c)', color: '#fff', fontFamily: 'Space Mono,monospace', fontSize: 11, fontWeight: 700, letterSpacing: '.1em', whiteSpace: 'nowrap', flexShrink: 0 }}>
+                      UPGRADE TO CORPORATE
+                    </button>
                   </div>
                 )}
               </div>
             )}
 
+            {/* ─────────────────────────────────────────────────────────────
+             * LOG TAB
+             * [FIX-REFRESH] onRecordAdded now refreshes summary after every
+             * log so scope cards, analytics, inventory, category breakdown
+             * all update immediately — not just the ledger rows.
+             * ───────────────────────────────────────────────────────────── */}
+            {tab === 'log' && (
+              <EmissionLogHub
+                EF={EF}
+                year={year}
+                onRecordAdded={async (record) => {
+                  // 1. Optimistically prepend to the ledger — instant feedback.
+                  //    SSE will also fire and dedup by id.
+                  setRecords(prev => {
+                    if (prev.some(x => x.id === record.id)) return prev;
+                    return [normaliseRecord(record), ...prev];
+                  });
+
+                  // 2. [FIX-REFRESH] Refresh summary from server — this is what drives:
+                  //    • Scope 1 / 2 / 3 hero cards
+                  //    • Total footprint card
+                  //    • Analytics monthly trend chart
+                  //    • Category breakdown chart
+                  //    • GHG inventory table totals
+                  //    • Net zero progress bar
+                  //    • Intensity metrics
+                  //    • YoY change badge
+                  //    Previously only the ledger rows updated on log — everything
+                  //    else was stale until a manual refresh or page reload.
+                  apiFetch(`/api/emissions/summary?year=${year}`)
+                    .then(sum => { if (sum) setSummary(sum); })
+                    .catch(() => {});
+                }}
+                onBulkAdded={async ({ inserted, duplicates = 0, errSkipped = 0 }) => {
+                  // Full reload — bulk changes many rows at once, too many to
+                  // patch optimistically. SSE also fires a 'bulk' event with
+                  // the toast; loadAll() here is the fallback for when SSE
+                  // hasn't connected yet or fires before loadAll completes.
+                  await loadAll();
+                }}
+                onImportError={(msg) => toast(msg, 'error')}
+                profile={profile}
+              />
+            )}
+
+            {/* ── LEDGER TAB ───────────────────────────────────────────── */}
+            {tab === 'ledger' && (
+  <div className="em-card">
+    <GHGLedger
+      records={records}
+      year={year}
+      EF={EF}
+      profile={profile}
+      onRecordsChanged={() => loadAll()}
+      onLineageOpen={(r) => setLineageRecord(r)}
+    />
+  </div>
+)}
+
             {/* ── ANALYTICS TAB ────────────────────────────────────────── */}
             {tab === 'analytics' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                <div className="em-g2">
-                  <div className="em-card">
-                    <div className="em-ctit">MONTHLY TREND BY SCOPE {year}</div>
-                    <div style={{ height: 260 }}><Line data={trendData} options={CHART_OPTS}/></div>
-                  </div>
-                  <div className="em-card">
-                    <div className="em-ctit">SCOPE DISTRIBUTION</div>
-                    <div style={{ height: 260, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                      <div style={{ width: 220, height: 220 }}>
-                        <Doughnut data={donutData} options={{ ...CHART_OPTS, scales: undefined, cutout: '68%' }}/>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-                <div className="em-card">
-                  <div className="em-ctit">EMISSIONS BY CATEGORY (tCO2e)</div>
-                  <div style={{ height: 220 }}><Bar data={catData} options={CHART_OPTS}/></div>
-                </div>
-                <div className="em-card">
-                  <div className="em-ctit">TOP 5 EMITTING ACTIVITIES</div>
-                  {[...records].sort((a, b) => b.co2e - a.co2e).slice(0, 5).map((r, i) => (
-                    <div key={r.id || i} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderBottom: '1px solid var(--brd)44', fontSize: 12 }}>
-                      <span style={{ color: 'var(--mut)' }}>
-                        <span style={{ color: SC[r.scope], marginRight: 8, fontSize: 11 }}>S{r.scope}</span>{r.activity}
-                        <span style={{ color: 'var(--mut)', fontSize: 11, display: 'block' }}>{r.date} · {r.notes}</span>
-                      </span>
-                      <span style={{ color: SC[r.scope], fontWeight: 700, flexShrink: 0, marginLeft: 12 }}>{(r.co2e || 0).toFixed(3)} t</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+  <EmissionAnalytics
+    records={records}
+    summary={summary}
+    prevYearEmissions={prevYearEmissions}
+    year={year}
+    profile={profile}
+    SC={SC}
+    CHART_OPTS={CHART_OPTS}
+    fmt={fmt}
+    onDrilldown={(scope) => { handleTabClick('ledger'); setSfilt(String(scope)); }}
+  />
+)}
 
             {/* ── INTENSITY TAB ─────────────────────────────────────────── */}
             {tab === 'intensity' && (
@@ -1326,7 +1732,7 @@ export default function EmissionTracking() {
                   <div className="em-ctit">CARBON INTENSITY METRICS</div>
                   {industryBenchmark && revenueIntensity && (
                     <div className="em-benchmark" style={{ borderColor: benchmarkStatus === 'leader' ? '#10b98133' : benchmarkStatus === 'average' ? '#f59e0b33' : '#ef444433' }}>
-                      <div style={{ fontSize: 10, color: 'var(--mut)', letterSpacing: '.1em', marginBottom: 8 }}>INDUSTRY BENCHMARK {profile.industry}</div>
+                      <div style={{ fontSize: 10, color: 'var(--mut)', letterSpacing: '.1em', marginBottom: 8 }}>INDUSTRY BENCHMARK · {profile.industry}</div>
                       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8 }}>
                         {[
                           { l: 'YOUR INTENSITY', v: `${fmt(revenueIntensity, 2)}`, c: benchmarkStatus === 'leader' ? '#10b981' : benchmarkStatus === 'average' ? '#f59e0b' : '#ef4444' },
@@ -1383,36 +1789,121 @@ export default function EmissionTracking() {
               </div>
             )}
 
-            {/* ── ESG REPORT TAB ─────────────────────────────────────────── */}
-            {/* [FIX-TIER-GATE] Corporate only                                */}
-            {tab === 'esg' && !corporate && (
-              <UpgradeLock tabLabel="ESG Report" navigate={navigate} />
+            {/* ── OVERVIEW (ESG) TAB ─────────────────────────────────────── */}
+            {tab === 'esg' && !planResolved && <PlanLoadingSkeleton />}
+
+            {tab === 'esg' && planResolved && !corporate && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+                {/* ── Empty state ── */}
+                {records.length === 0 && !loading && (
+                  <div style={{
+                    padding: '52px 40px', borderRadius: 'var(--radius)',
+                    border: '1px dashed var(--brd2)', background: 'var(--surf)',
+                    textAlign: 'center', animation: 'fadeUp .4s ease both',
+                  }}>
+                    <div style={{ fontSize: 40, marginBottom: 16, opacity: .6 }}>🌱</div>
+                    <div style={{ fontFamily: 'Syne,sans-serif', fontSize: 20, fontWeight: 800, color: 'var(--txt)', marginBottom: 8 }}>
+                      No emissions logged yet
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--mut)', marginBottom: 24, maxWidth: 380, margin: '0 auto 24px', lineHeight: 1.8 }}>
+                      Start by logging your first emission activity. Your GHG inventory, intensity metrics, framework compliance status, and net zero roadmap will all populate automatically.
+                    </div>
+                    <div style={{ display: 'flex', gap: 10, justifyContent: 'center', flexWrap: 'wrap' }}>
+                      <button className="em-btn em-btn-p" onClick={() => handleTabClick('log')}>
+                        LOG FIRST EMISSION
+                      </button>
+                      {!profile && (
+                        <button className="em-btn em-btn-g" onClick={() => navigate('/team?tab=profile')}>
+                          SET UP COMPANY PROFILE
+                        </button>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 10, color: 'var(--mut)', marginTop: 20, opacity: .6 }}>
+                      Supports Scope 1, 2 & 3 · 60+ activity types · CEA V20.0 · DEFRA 2024 · IPCC AR6
+                    </div>
+                  </div>
+                )}
+                {/* Growth users see a limited overview — GHG inventory + upgrade prompt */}
+                <div className="em-card">
+                  <div className="em-ctit">GHG OVERVIEW · FY {year}</div>
+                  {[
+                    { label: 'Scope 1 Direct Emissions',                    val: fmt(scope1),    unit: 'tCO2e', color: '#f97316' },
+                    { label: 'Scope 2 Location-based (CEA V20.0 0.727)',    val: fmt(scope2Loc), unit: 'tCO2e', color: '#3b82f6' },
+                    { label: 'Scope 2 Market-based (REC/PPA/Green Tariff)', val: fmt(scope2Mkt), unit: 'tCO2e', color: '#60a5fa' },
+                    { label: 'Scope 3 All 15 Categories',                   val: fmt(scope3),    unit: 'tCO2e', color: '#a855f7' },
+                    { label: 'TOTAL GHG EMISSIONS (location-based)',         val: fmt(total),     unit: 'tCO2e', color: 'var(--grn)', bold: true },
+                    { label: 'Carbon Credits Retired',                       val: fmt(retirements.reduce((s, r) => s + parseInt(r.amount||0), 0)), unit: 'tCO2e', color: '#10b981' },
+                    { label: 'Credits Required to Offset',                  val: String(creditsNeeded), unit: 'credits', color: 'var(--grn)' },
+                  ].map(({ label, val, unit, color, bold }) => (
+                    <div key={label} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderBottom: '1px solid var(--brd)44', fontSize: bold ? 12 : 10, fontWeight: bold ? 700 : 400 }}>
+                      <span style={{ color: 'var(--mut)' }}>{label}</span>
+                      <span style={{ color }}>{val} <span style={{ fontSize: 11, color: 'var(--mut)' }}>{unit}</span></span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ padding: '28px 24px', borderRadius: 10, border: '1px solid #f9731633', background: '#f9731608', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 24 }}>
+                  <div>
+                    <div style={{ fontFamily: 'Syne,sans-serif', fontSize: 16, fontWeight: 800, color: 'var(--txt)', marginBottom: 6 }}>Upgrade for full ESG compliance</div>
+                    <div style={{ fontSize: 11, color: 'var(--mut)', lineHeight: 1.8 }}>
+                      Corporate plan unlocks BRSR disclosures, audit trails, PAT scheme, CCTS compliance,
+                      SBTi targets, 5-year action plans, supplier portal, and multi-entity consolidation.
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => navigate('/billing')}
+                    style={{ padding: '12px 28px', borderRadius: 6, border: 'none', cursor: 'pointer', background: 'linear-gradient(135deg,#f97316,#ea580c)', color: '#fff', fontFamily: 'Space Mono,monospace', fontSize: 11, fontWeight: 700, letterSpacing: '.1em', whiteSpace: 'nowrap', flexShrink: 0 }}
+                  >
+                    UPGRADE TO CORPORATE
+                  </button>
+                </div>
+              </div>
             )}
 
-            {tab === 'esg' && corporate && (
+            {tab === 'esg' && planResolved && corporate && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+                {/* ── Empty state ── */}
+                {records.length === 0 && !loading && (
+                  <div style={{
+                    padding: '52px 40px', borderRadius: 'var(--radius)',
+                    border: '1px dashed var(--brd2)', background: 'var(--surf)',
+                    textAlign: 'center', animation: 'fadeUp .4s ease both',
+                  }}>
+                    <div style={{ fontSize: 40, marginBottom: 16, opacity: .6 }}>🌱</div>
+                    <div style={{ fontFamily: 'Syne,sans-serif', fontSize: 20, fontWeight: 800, color: 'var(--txt)', marginBottom: 8 }}>
+                      No emissions logged yet
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--mut)', marginBottom: 24, maxWidth: 380, margin: '0 auto 24px', lineHeight: 1.8 }}>
+                      Start by logging your first emission activity. Your GHG inventory, BRSR disclosures, framework compliance, and net zero roadmap will populate automatically.
+                    </div>
+                    <div style={{ display: 'flex', gap: 10, justifyContent: 'center', flexWrap: 'wrap' }}>
+                      <button className="em-btn em-btn-p" onClick={() => handleTabClick('log')}>LOG FIRST EMISSION</button>
+                      {!profile && <button className="em-btn em-btn-g" onClick={() => navigate('/team?tab=profile')}>SET UP COMPANY PROFILE</button>}
+                    </div>
+                    <div style={{ fontSize: 10, color: 'var(--mut)', marginTop: 20, opacity: .6 }}>
+                      Scope 1, 2 & 3 · BRSR Core · CDP · TCFD · PAT · CCTS · ISO 14064-1
+                    </div>
+                  </div>
+                )}
                 <div className="em-card">
                   <div className="em-ctit">FRAMEWORK COMPLIANCE STATUS</div>
                   <div className="em-esg-g">
                     {[
-                      // [FIX-ESG-STATUS] All ok values now wired to real data
                       { name: 'GHG Protocol',   sub: 'Corporate Standard + Dual S2',       ok: records.length > 0 && scope2Mkt >= 0,                                    status: records.length > 0 ? 'COMPLIANT' : 'PENDING',          nav: null },
-                      { name: 'SEBI BRSR Core', sub: 'India Dec 2024 ISF standards',        ok: records.length > 0 && !!brsrData,                                        status: records.length > 0 && brsrData ? 'COMPLIANT' : records.length > 0 ? 'GHG ONLY' : 'PENDING', nav: null },
+                      { name: 'SEBI BRSR Core', sub: 'Section A + B + C (P1–P9)', ok: records.length > 0 && !!brsrData && Object.keys(brsrData).length >= 11, status: !brsrData || Object.keys(brsrData).length === 0 ? (records.length > 0 ? 'NOT STARTED' : 'PENDING') : `${Object.keys(brsrData).length}/11 SECTIONS`, nav: 'brsr-env' },
                       { name: 'CDP',            sub: 'Prep doc submit via portal',           ok: records.length > 0,                                                      status: records.length > 0 ? 'PDF READY' : 'PENDING',          nav: null },
                       { name: 'TCFD',           sub: '4-pillar disclosure',                  ok: records.length > 0,                                                      status: records.length > 0 ? 'PDF READY' : 'PENDING',          nav: null },
                       { name: 'GRI 305',        sub: 'Emissions Standard',                   ok: records.length > 0,                                                      status: records.length > 0 ? 'COMPLIANT' : 'PENDING',          nav: null },
                       { name: 'ISO 14064-3',    sub: 'Third-party verification',             ok: !!verifier,                                                              status: verifier ? 'VERIFIED' : 'PENDING',                     nav: null },
-                      // [FIX-ESG-STATUS] SBTi: ok if net_zero_year AND net_zero_target_co2e are set
                       { name: 'SBTi',           sub: 'Science Based Targets',                ok: !!profile?.net_zero_year && !!profile?.net_zero_target_co2e,             status: profile?.net_zero_year && profile?.net_zero_target_co2e ? 'TARGET SET' : 'SET UP TARGETS', nav: 'sbti' },
-                      // [FIX-ESG-STATUS] PAT: ok if patData is loaded from API
                       { name: 'PAT Scheme',     sub: 'BEE India Energy Cycle IV',            ok: !!patData,                                                               status: patData ? 'CONFIGURED' : 'SETUP REQUIRED',             nav: 'pat-scheme' },
-                      // [FIX-ESG-STATUS] CCTS: ok if cctsData is loaded from API
                       { name: 'CCTS 2025',      sub: '9 sectors BEE/CERC/GRID-India',        ok: !!cctsData,                                                              status: cctsData ? 'CONFIGURED' : 'SETUP REQUIRED',            nav: 'ccts' },
                       { name: 'ISO 14064-1',    sub: 'GHG Inventories',                      ok: records.length > 0,                                                      status: records.length > 0 ? 'COMPLIANT' : 'PENDING',          nav: null },
                     ].map(({ name, sub, ok, status, nav }) => (
                       <div key={name} className="em-fw"
                         style={{ cursor: nav ? 'pointer' : undefined }}
-                        onClick={nav ? () => setTab(nav) : undefined}
+                        onClick={nav ? () => handleTabClick(nav) : undefined}
                       >
                         <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 4 }}>{name}</div>
                         <div style={{ fontSize: 11, color: 'var(--mut)', letterSpacing: '.06em', marginBottom: 10 }}>{sub}</div>
@@ -1423,7 +1914,7 @@ export default function EmissionTracking() {
                 </div>
                 <div className="em-g2">
                   <div className="em-card">
-                    <div className="em-ctit">ANNUAL GHG INVENTORY FY {year}</div>
+                    <div className="em-ctit">ANNUAL GHG INVENTORY · FY {year}</div>
                     {[
                       { label: 'Scope 1 Direct Emissions',                     val: fmt(scope1),    unit: 'tCO2e', color: '#f97316', bold: false },
                       { label: 'Scope 2 Location-based (CEA V20.0 0.727)',     val: fmt(scope2Loc), unit: 'tCO2e', color: '#3b82f6', bold: false },
@@ -1444,25 +1935,51 @@ export default function EmissionTracking() {
                     ))}
                   </div>
 
-                  {/* ── [FIX-NZ-BARS] Net Zero Roadmap with dynamic progress bars ── */}
+                  {/* ── [FIX-NZ-FALLBACK] Net Zero Roadmap ── */}
                   <div className="em-card">
                     <div className="em-ctit">NET ZERO ROADMAP</div>
+
+                    {/* [FIX-NZ-FALLBACK] No baseline = show clear message instead of 4 red 0% bars */}
+                    {!prevYearTotal && (
+                      <div className="em-alert em-aly" style={{ marginBottom: 16, fontSize: 11 }}>
+                        <span>⚠</span>
+                        <span>No prior-year baseline — add FY {year - 1} records to see reduction progress against your roadmap milestones.</span>
+                      </div>
+                    )}
+
                     {[
-                      { label: `2030 50% reduction (India NDC)`, reductionPct: 50  },
-                      { label: `2035 SBTi 1.5C aligned`,         reductionPct: 65  },
-                      { label: `2040 80% reduction`,              reductionPct: 80  },
-                      { label: `${profile?.net_zero_year || 2050} Net Zero`, reductionPct: 100 },
+                      { label: `2030 — 50% reduction (India NDC)`, reductionPct: 50  },
+                      { label: `2035 — SBTi 1.5°C aligned`,        reductionPct: 65  },
+                      { label: `2040 — 80% reduction`,              reductionPct: 80  },
+                      { label: `${profile?.net_zero_year || 2050} — Net Zero`, reductionPct: 100 },
                     ].map(({ label, reductionPct }) => {
-                      // Use prevYearTotal as baseline if available, else use current total
-                      // This gives a meaningful progress bar even without historic data
-                      const baseline   = prevYearTotal && prevYearTotal > 0 ? prevYearTotal : (total > 0 ? total * 1.1 : 1);
-                      const targetAbs  = baseline * (1 - reductionPct / 100);
-                      const gap        = Math.max(0, total - targetAbs);
-                      // Progress toward the reduction goal: 0% = no reduction, 100% = goal met
-                      const progressPct = baseline > 0
-                        ? Math.max(0, Math.min(100, ((baseline - total) / Math.max(baseline - targetAbs, 0.001)) * 100))
-                        : 0;
+                      if (!prevYearTotal) {
+                        // [FIX-NZ-FALLBACK] No baseline: show target absolute value only, no misleading bar
+                        const targetAbs = total > 0 ? total * (1 - reductionPct / 100) : null;
+                        return (
+                          <div key={label} className="em-irow">
+                            <div className="em-ihr">
+                              <span style={{ color: 'var(--mut)', fontSize: 11 }}>{label}</span>
+                              <span style={{ color: 'var(--mut)', fontSize: 11 }}>
+                                {targetAbs !== null ? `Target: ${fmt(targetAbs)} t` : '—'}
+                              </span>
+                            </div>
+                            <div className="em-itrack">
+                              <div className="em-ifill" style={{ width: '0%', background: 'var(--brd2)' }}/>
+                            </div>
+                            <div style={{ fontSize: 10, color: 'var(--mut)', marginTop: 3 }}>Add prior-year data to track progress</div>
+                          </div>
+                        );
+                      }
+
+                      const baseline    = prevYearTotal;
+                      const targetAbs   = baseline * (1 - reductionPct / 100);
+                      const gap         = Math.max(0, total - targetAbs);
+                      const progressPct = Math.max(0, Math.min(100,
+                        ((baseline - total) / Math.max(baseline - targetAbs, 0.001)) * 100
+                      ));
                       const barColor = progressPct >= 100 ? 'var(--grn)' : progressPct >= 50 ? 'var(--ylw)' : 'var(--red)';
+
                       return (
                         <div key={label} className="em-irow">
                           <div className="em-ihr">
@@ -1482,7 +1999,7 @@ export default function EmissionTracking() {
                       );
                     })}
                     <div style={{ marginTop: 16 }}>
-                      <button className="em-btn em-btn-g em-btn-sm" onClick={() => setTab('sbti')} style={{ width: '100%' }}>
+                      <button className="em-btn em-btn-g em-btn-sm" onClick={() => handleTabClick('sbti')} style={{ width: '100%' }}>
                         SET UP SBTi TARGETS FOR SCIENCE-BASED PATHWAY
                       </button>
                     </div>

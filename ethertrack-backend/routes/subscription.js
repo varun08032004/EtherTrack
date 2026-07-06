@@ -2,11 +2,11 @@
 // routes/subscription.js — EtherTrack v3
 // Prices updated to confirmed tier structure:
 //   Free:      ₹0
-//   Starter:   ₹1,499/mo  ₹14,990/yr  (save 17%)
-//   Growth:    ₹7,999/mo  ₹79,990/yr  (save 17%)
+//   Starter:   ₹1,499/mo  ₹14,990/yr 
+//   Growth:    ₹7,999/mo  ₹1,60,000/yr  
 //   Corporate: Contact Sales (custom)
 // Gas fees:
-//   Free: 1.5%  Starter: 1%  Growth: 0.75%  Corporate: 0.5% negotiated
+//   Free: 0.5 percent of transaction +18 percent gst from seller and 0.5 percent of transaction + 18 percent gst from buyer
 
 const express    = require('express');
 const crypto     = require('crypto');
@@ -206,7 +206,9 @@ const activatePlan = async ({ userId, plan, cycle, paymentId, renewalDate }) => 
   });
 };
 
-const issueInvoice = async ({ paymentId, plan, cycle, amountPaise, gstin, pan, user }) => {
+// [INVOICE] issueInvoice now accepts renewalDate so the PDF can show a
+// "Billing Period" (today → renewal date) on subscription invoices.
+const issueInvoice = async ({ paymentId, plan, cycle, amountPaise, gstin, pan, user, renewalDate }) => {
   try {
     const invoiceUrl = await generateGSTInvoice({
       paymentId, plan, cycle,
@@ -215,6 +217,8 @@ const issueInvoice = async ({ paymentId, plan, cycle, amountPaise, gstin, pan, u
       pan:        pan   || null,
       buyerName:  user.full_name || user.email,
       buyerEmail: user.email,
+      billingPeriodStart: new Date(),
+      billingPeriodEnd:   renewalDate || null,
     });
     if (invoiceUrl) {
       await query(
@@ -351,7 +355,7 @@ router.post('/verify',
       );
 
       await activatePlan({ userId, plan, cycle, paymentId: payment.id, renewalDate });
-      const invoiceUrl = await issueInvoice({ paymentId: payment.id, plan, cycle, amountPaise: expectedPaise, gstin, pan, user: req.user });
+      const invoiceUrl = await issueInvoice({ paymentId: payment.id, plan, cycle, amountPaise: expectedPaise, gstin, pan, user: req.user, renewalDate });
 
       await createNotification(userId, 'WALLET',
         `${PLAN_CONFIG[plan].label} Plan Activated`,
@@ -486,7 +490,7 @@ router.post('/wallet-pay',
         );
       });
 
-      const invoiceUrl = await issueInvoice({ paymentId, plan, cycle, amountPaise, gstin, pan, user: req.user });
+      const invoiceUrl = await issueInvoice({ paymentId, plan, cycle, amountPaise, gstin, pan, user: req.user, renewalDate });
 
       await createNotification(userId, 'WALLET',
         `${PLAN_CONFIG[plan].label} Plan Activated`,
@@ -572,7 +576,7 @@ router.post('/metamask-pay',
       });
 
       await activatePlan({ userId, plan, cycle, paymentId, renewalDate });
-      const invoiceUrl = await issueInvoice({ paymentId, plan, cycle, amountPaise, gstin, pan, user: req.user });
+      const invoiceUrl = await issueInvoice({ paymentId, plan, cycle, amountPaise, gstin, pan, user: req.user, renewalDate });
 
       await createNotification(userId, 'WALLET',
         `${PLAN_CONFIG[plan].label} Plan Activated via MetaMask`,

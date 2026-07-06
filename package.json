@@ -1,0 +1,12 @@
+{
+  "dependencies": {
+    "@upstash/redis": "^1.38.0",
+    "done": "^1.1.8",
+    "ethers": "^6.17.0",
+    "node-cron": "^4.6.0",
+    "oauth-1.0a": "^2.2.6",
+    "razorpay": "^2.9.6",
+    "xlsx": "^0.18.5",
+    "xml2js": "^0.6.2"
+  }
+}

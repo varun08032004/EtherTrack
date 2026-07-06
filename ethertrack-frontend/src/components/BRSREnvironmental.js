@@ -7,40 +7,33 @@
 //    [FIX-YEAR-SWITCH]   Year change now offers "Save & Switch" via inline
 //                        confirm dialog instead of blocking with a toast.
 //    [FIX-NULL-ZERO]     Numeric fields now use null (not entered) vs 0
-//                        (confirmed zero) distinction throughout. Inputs show
-//                        placeholder "NOT ENTERED" and allow explicit zero via
-//                        a "Set to 0" checkbox. API payload serialises null as
-//                        null, not 0, so BRSR PDF knows the difference.
-//    [FIX-FIELD-ERRORS]  Field-level validation errors shown inline under each
-//                        input (red border + message) rather than generic toast.
-//    [FIX-OPTIMISTIC]    Save shows per-field optimistic feedback and a
-//                        progress indicator while awaiting API response.
-//    [FIX-CONVERSION]    GJ conversion helper inline — user can enter kWh/litres/
-//                        m³/kg and get auto-converted to GJ on blur.
-//    [FIX-DEV-GATE]      JSON snapshot in Summary tab gated behind
-//                        process.env.NODE_ENV !== 'production' (passed as prop
-//                        devMode). Hidden in prod builds.
+//                        (confirmed zero) distinction throughout.
+//    [FIX-FIELD-ERRORS]  Field-level validation errors shown inline.
+//    [FIX-OPTIMISTIC]    Save shows per-field optimistic feedback.
+//    [FIX-CONVERSION]    GJ conversion helper inline.
+//    [FIX-DEV-GATE]      JSON snapshot gated behind devMode prop.
 //    [FIX-YEAR-RANGE]    REPORT_YEARS computed dynamically.
+//    [FEAT-AUTO-POPULATE] AUTO-POPULATE FROM TRADES button — fetches real
+//                        trade + emission data from /api/brsr/auto-populate/:year
+//                        and pre-fills the GHG narrative + existing BRSR fields.
 
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { apiFetch } from '../services/api';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { apiFetch, brsrAPI } from '../services/api';
 import { syncBRSRToGHGLedger } from '../services/brsr-ghg-link';
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
-// [FIX-YEAR-DYNAMIC] Dynamic year range — always includes current year ±2
+// [FIX-YEAR-DYNAMIC] Dynamic year range
 const currentYear = new Date().getFullYear();
 const REPORT_YEARS = Array.from({ length: 5 }, (_, i) => currentYear - 3 + i);
 
 const fmt = (n, d = 2) => Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: d, minimumFractionDigits: d });
 
-const IMF_PPP_RATE = 27.3; // ₹ per international dollar — IMF WEO April 2025
+const IMF_PPP_RATE = 27.3;
 
 const sanitise = (str = '', max = 1000) =>
   String(str).replace(/<[^>]*>/g, '').replace(/['"`;]/g, '').trim().slice(0, max);
 
-// [FIX-NULL-ZERO] safeNum now returns null for empty/invalid rather than 0
-// null = "not entered", 0 = "confirmed zero", positive = measured value
 const safeNum = (val, min = 0, max = 1e12) => {
   if (val === null || val === undefined || val === '') return null;
   const n = parseFloat(val);
@@ -48,10 +41,9 @@ const safeNum = (val, min = 0, max = 1e12) => {
   return n;
 };
 
-// For payload serialisation — null stays null, never silently becomes 0
 const safeNumForPayload = (val, min = 0, max = 1e12) => {
   const n = safeNum(val, min, max);
-  return n; // explicitly return null if not entered
+  return n;
 };
 
 const DISPOSAL_METHODS = [
@@ -78,19 +70,14 @@ const ENERGY_TYPES = [
   { key: 'other_ren_gj', label: 'Other Renewable',      renewable: true,  color: '#c084fc' },
 ];
 
-// [FIX-CONVERSION] GJ conversion factors for inline unit helpers
 const GJ_CONVERSIONS = {
-  kwh:     0.0036,   // 1 kWh = 0.0036 GJ
-  diesel:  0.0387,   // 1 litre diesel ≈ 0.0387 GJ
-  petrol:  0.0342,   // 1 litre petrol ≈ 0.0342 GJ
-  gas_m3:  0.0388,   // 1 m³ natural gas ≈ 0.0388 GJ
-  coal_kg: 0.026,    // 1 kg coal ≈ 0.026 GJ
-  lpg_kg:  0.0468,   // 1 kg LPG ≈ 0.0468 GJ
+  kwh:     0.0036,
+  diesel:  0.0387,
+  petrol:  0.0342,
+  gas_m3:  0.0388,
+  coal_kg: 0.026,
+  lpg_kg:  0.0468,
 };
-
-// ─────────────────────────────────────────────────────────────────────────────
-// [FIX-NULL-ZERO] Default state factories use null not 0 for "not entered"
-// ─────────────────────────────────────────────────────────────────────────────
 
 const defEnergy = () => ({
   coal_gj: null, oil_gj: null, gas_gj: null, grid_gj: null,
@@ -123,9 +110,6 @@ const defWaste = () => ({
   extended_producer_responsibility: false,
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CSS (unchanged from original + additions for field errors and conversion UI)
-// ─────────────────────────────────────────────────────────────────────────────
 const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;700;800&display=swap');
 :root{--bg:#060809;--surf:#0e1318;--brd:#1e3040;--brd2:#2e3d50;--txt:#f0f6ff;--mut:#5a7a8a;--grn:#10b981;--red:#ef4444;--ylw:#f59e0b;--s2:#3b82f6;--pur:#a855f7;--org:#f97316;}
@@ -136,7 +120,7 @@ const CSS = `
 .brsr-title{font-family:'Syne',sans-serif;font-size:20px;font-weight:800;margin-bottom:2px;}
 .brsr-title span{color:var(--grn);}
 .brsr-sub{font-size:11px;color:var(--mut);letter-spacing:.06em;}
-.brsr-yr{display:flex;gap:6px;align-items:center;}
+.brsr-yr{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
 .brsr-sel{padding:7px 12px;border-radius:5px;background:#0a1018;border:1px solid var(--brd2);color:var(--txt);font-family:'Space Mono',monospace;font-size:11px;outline:none;}
 .brsr-sel:focus{border-color:#10b98144;}
 .brsr-prog{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:20px;}
@@ -205,14 +189,14 @@ const CSS = `
 .year-switch-title{font-family:'Syne',sans-serif;font-size:16px;font-weight:700;margin-bottom:8px;}
 .year-switch-sub{font-size:11px;color:var(--mut);margin-bottom:20px;line-height:1.6;}
 .year-switch-btns{display:flex;gap:8px;justify-content:flex-end;}
+.btn-auto{padding:7px 14px;border-radius:6px;cursor:pointer;background:#10b98110;border:1px solid #10b98133;color:#10b981;font-family:'Space Mono',monospace;font-size:10px;font-weight:700;letter-spacing:.08em;transition:all .2s;display:flex;align-items:center;gap:5px;white-space:nowrap;}
+.btn-auto:hover:not(:disabled){background:#10b98120;border-color:#10b98166;}
+.btn-auto:disabled{opacity:.5;cursor:not-allowed;}
 @keyframes fU{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
 @media(max-width:900px){.g2,.g3,.g4,.metric-row{grid-template-columns:1fr 1fr;}}
 @media(max-width:600px){.g2,.g3,.g4,.metric-row{grid-template-columns:1fr;}}
 `;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// [FIX-CONVERSION] Inline GJ converter component for energy fields
-// ─────────────────────────────────────────────────────────────────────────────
 function GJConverter({ onApply }) {
   const [open, setOpen] = useState(false);
   const [vals, setVals] = useState({ kwh: '', diesel: '', gas_m3: '', coal_kg: '' });
@@ -262,15 +246,11 @@ function GJConverter({ onApply }) {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// [FIX-NULL-ZERO] NumericField component handles null vs 0 distinction
-// ─────────────────────────────────────────────────────────────────────────────
 function NumericField({ label, value, onChange, unit = '', color, hint, maxVal = 1e12, showConverter = false }) {
   const [localVal, setLocalVal] = useState(value === null ? '' : String(value));
   const [confirmedZero, setConfirmedZero] = useState(value === 0);
   const [error, setError] = useState(null);
 
-  // Sync when parent value changes (e.g. on load)
   useEffect(() => {
     setLocalVal(value === null ? '' : String(value));
     setConfirmedZero(value === 0);
@@ -291,21 +271,13 @@ function NumericField({ label, value, onChange, unit = '', color, hint, maxVal =
     setConfirmedZero(false);
     const err = validate(raw);
     setError(err);
-    if (!err) {
-      onChange(raw === '' ? null : parseFloat(raw));
-    }
+    if (!err) onChange(raw === '' ? null : parseFloat(raw));
   };
 
   const handleConfirmZero = (checked) => {
     setConfirmedZero(checked);
-    if (checked) {
-      setLocalVal('0');
-      setError(null);
-      onChange(0);
-    } else {
-      setLocalVal('');
-      onChange(null);
-    }
+    if (checked) { setLocalVal('0'); setError(null); onChange(0); }
+    else         { setLocalVal(''); onChange(null); }
   };
 
   const isNotEntered = value === null && !confirmedZero;
@@ -324,7 +296,6 @@ function NumericField({ label, value, onChange, unit = '', color, hint, maxVal =
       />
       {error && <span className="field-err">⚠ {error}</span>}
       {hint && !error && <span className="field-hint">{hint}</span>}
-      {/* [FIX-NULL-ZERO] Explicit zero confirmation — prevents accidental "zero" reporting */}
       {isNotEntered && (
         <label className="zero-confirm">
           <input type="checkbox" checked={confirmedZero} onChange={e => handleConfirmZero(e.target.checked)}/>
@@ -343,9 +314,6 @@ function NumericField({ label, value, onChange, unit = '', color, hint, maxVal =
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// [FIX-YEAR-SWITCH] Year switch modal
-// ─────────────────────────────────────────────────────────────────────────────
 function YearSwitchModal({ targetYear, onSaveAndSwitch, onDiscardAndSwitch, onCancel, saving }) {
   return (
     <div className="year-switch-modal">
@@ -368,35 +336,31 @@ function YearSwitchModal({ targetYear, onSaveAndSwitch, onDiscardAndSwitch, onCa
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MAIN COMPONENT
-// ─────────────────────────────────────────────────────────────────────────────
 export default function BRSREnvironmental({ profile, year: propYear, onDataReady, devMode = false }) {
-  const [year,    setYear]    = useState(propYear || new Date().getFullYear());
-  const [tab,     setTab]     = useState('energy');
-  const [notif,   setNotif]   = useState(null);
-  const [saving,  setSaving]  = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [dirty,   setDirty]   = useState(false);
-  const [saveProgress, setSaveProgress] = useState(0); // [FIX-OPTIMISTIC]
-  const [yearSwitchModal, setYearSwitchModal] = useState(null); // [FIX-YEAR-SWITCH] target year
+  const [year,           setYear]           = useState(propYear || new Date().getFullYear());
+  const [tab,            setTab]            = useState('energy');
+  const [notif,          setNotif]          = useState(null);
+  const [saving,         setSaving]         = useState(false);
+  const [loading,        setLoading]        = useState(true);
+  const [dirty,          setDirty]          = useState(false);
+  const [saveProgress,   setSaveProgress]   = useState(0);
+  const [yearSwitchModal,setYearSwitchModal]= useState(null);
+  const [autoPopulating, setAutoPopulating] = useState(false); // [FEAT-AUTO-POPULATE]
 
   const [energy, setEnergy] = useState(defEnergy());
   const [water,  setWater]  = useState(defWater());
   const [waste,  setWaste]  = useState(defWaste());
 
   const abortRef     = useRef(null);
-  const saveDebounce = useRef(null); // [FIX-RATE-LIMIT]
-  const lastSaveTime = useRef(0);    // [FIX-RATE-LIMIT] track last save
+  const saveDebounce = useRef(null);
+  const lastSaveTime = useRef(0);
 
   const toast = (msg, type = 'ok') => { setNotif({ msg, type }); setTimeout(() => setNotif(null), 3800); };
 
-  // ── Load ──────────────────────────────────────────────────────────
   const loadData = useCallback(async (yr) => {
     if (abortRef.current) abortRef.current.abort();
     const ctl = new AbortController();
     abortRef.current = ctl;
-
     setLoading(true);
     try {
       const res = await apiFetch(`/api/brsr/environmental?year=${yr}`, { signal: ctl.signal });
@@ -406,9 +370,7 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
         if (res.data.water)  setWater(w  => ({ ...defWater(),  ...res.data.water  }));
         if (res.data.waste)  setWaste(ww => ({ ...defWaste(),  ...res.data.waste  }));
       } else {
-        setEnergy(defEnergy());
-        setWater(defWater());
-        setWaste(defWaste());
+        setEnergy(defEnergy()); setWater(defWater()); setWaste(defWaste());
       }
       setDirty(false);
     } catch (e) {
@@ -423,12 +385,8 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
     return () => { abortRef.current?.abort(); };
   }, [loadData, year]);
 
-  // ── [FIX-YEAR-SWITCH] Year change with modal ───────────────────────
   const handleYearChange = (newYear) => {
-    if (dirty) {
-      setYearSwitchModal(newYear);
-      return;
-    }
+    if (dirty) { setYearSwitchModal(newYear); return; }
     setYear(newYear);
   };
 
@@ -438,139 +396,180 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
   const setWaterField  = (key, val) => { setWater(w  => ({ ...w,  [key]: val })); markDirty(); };
   const setWasteField  = (key, val) => { setWaste(ww => ({ ...ww, [key]: val })); markDirty(); };
 
-  // ── Derived energy metrics ─────────────────────────────────────────
-  // [FIX-NULL-ZERO] Use 0 for arithmetic only — null fields don't contribute
-  const totalRenewableGJ = ENERGY_TYPES.filter(e => e.renewable).reduce((s, e) => s + (energy[e.key] ?? 0), 0);
-  const totalNonRenGJ    = ENERGY_TYPES.filter(e => !e.renewable).reduce((s, e) => s + (energy[e.key] ?? 0), 0);
-  const totalEnergyGJ    = totalRenewableGJ + totalNonRenGJ;
-  const renewablePct     = totalEnergyGJ > 0 ? (totalRenewableGJ / totalEnergyGJ * 100) : 0;
-
-  // [FIX-NULL-ZERO] "has data" = at least one field is non-null
-  const hasEnergyData = ENERGY_TYPES.some(e => energy[e.key] !== null);
-
-  const revenueCr   = parseFloat(profile?.revenue_cr) || null;
-  const employees   = parseInt(profile?.employees, 10) || null;
-
+  // ── Derived energy metrics ─────────────────────────────────────────────────
+  const totalRenewableGJ   = ENERGY_TYPES.filter(e => e.renewable).reduce((s, e) => s + (energy[e.key] ?? 0), 0);
+  const totalNonRenGJ      = ENERGY_TYPES.filter(e => !e.renewable).reduce((s, e) => s + (energy[e.key] ?? 0), 0);
+  const totalEnergyGJ      = totalRenewableGJ + totalNonRenGJ;
+  const renewablePct       = totalEnergyGJ > 0 ? (totalRenewableGJ / totalEnergyGJ * 100) : 0;
+  const hasEnergyData      = ENERGY_TYPES.some(e => energy[e.key] !== null);
+  const revenueCr          = parseFloat(profile?.revenue_cr) || null;
   const energyIntensityInr = revenueCr && totalEnergyGJ ? totalEnergyGJ / revenueCr : null;
   const revenuePPPM        = revenueCr ? (revenueCr * 1e7) / IMF_PPP_RATE / 1e6 : null;
   const energyIntensityPPP = revenuePPPM && totalEnergyGJ ? totalEnergyGJ / revenuePPPM : null;
+  const prevEnergyTotal    = energy.prev_total_gj ?? 0;
+  const energyYoY          = prevEnergyTotal > 0 ? ((totalEnergyGJ - prevEnergyTotal) / prevEnergyTotal * 100) : null;
 
-  const prevEnergyTotal = energy.prev_total_gj ?? 0;
-  const energyYoY       = prevEnergyTotal > 0 ? ((totalEnergyGJ - prevEnergyTotal) / prevEnergyTotal * 100) : null;
+  // ── Derived water metrics ──────────────────────────────────────────────────
+  const totalWithdrawal  = ['surface_kl','groundwater_kl','thirdparty_kl','seawater_kl','rainwater_kl','municipal_kl'].reduce((s, k) => s + (water[k] ?? 0), 0);
+  const hasWaterData     = ['surface_kl','groundwater_kl','thirdparty_kl','seawater_kl','rainwater_kl','municipal_kl'].some(k => water[k] !== null);
+  const waterIntensityInr= revenueCr && totalWithdrawal ? totalWithdrawal / revenueCr : null;
+  const waterIntensityPPP= revenuePPPM && totalWithdrawal ? totalWithdrawal / revenuePPPM : null;
+  const recycleRate      = totalWithdrawal > 0 ? ((water.recycled_kl ?? 0) / totalWithdrawal * 100) : 0;
+  const prevWater        = water.prev_withdrawal_kl ?? 0;
+  const waterYoY         = prevWater > 0 ? ((totalWithdrawal - prevWater) / prevWater * 100) : null;
 
-  // ── Derived water metrics ──────────────────────────────────────────
-  const totalWithdrawal = ['surface_kl','groundwater_kl','thirdparty_kl','seawater_kl','rainwater_kl','municipal_kl']
-    .reduce((s, k) => s + (water[k] ?? 0), 0);
-  const hasWaterData      = ['surface_kl','groundwater_kl','thirdparty_kl','seawater_kl','rainwater_kl','municipal_kl'].some(k => water[k] !== null);
-  const waterIntensityInr = revenueCr && totalWithdrawal ? totalWithdrawal / revenueCr : null;
-  const waterIntensityPPP = revenuePPPM && totalWithdrawal ? totalWithdrawal / revenuePPPM : null;
-  const recycleRate       = totalWithdrawal > 0 ? ((water.recycled_kl ?? 0) / totalWithdrawal * 100) : 0;
-  const prevWater         = water.prev_withdrawal_kl ?? 0;
-  const waterYoY          = prevWater > 0 ? ((totalWithdrawal - prevWater) / prevWater * 100) : null;
-
-  // ── Derived waste metrics ──────────────────────────────────────────
-  const WASTE_KEYS = ['hazardous_kg','ewaste_kg','plastic_kg','biomedical_kg','construction_kg','battery_kg','radioactive_kg','non_hazardous_kg'];
+  // ── Derived waste metrics ──────────────────────────────────────────────────
+  const WASTE_KEYS    = ['hazardous_kg','ewaste_kg','plastic_kg','biomedical_kg','construction_kg','battery_kg','radioactive_kg','non_hazardous_kg'];
   const totalWasteKg  = WASTE_KEYS.reduce((s, k) => s + (waste[k] ?? 0), 0);
   const hasWasteData  = WASTE_KEYS.some(k => waste[k] !== null);
   const hazPct        = totalWasteKg > 0 ? ((waste.hazardous_kg ?? 0) / totalWasteKg * 100) : 0;
   const prevWaste     = waste.prev_total_kg ?? 0;
   const wasteYoY      = prevWaste > 0 ? ((totalWasteKg - prevWaste) / prevWaste * 100) : null;
-  const diversionRate = totalWasteKg > 0
-    ? (((waste.recycled_kg ?? 0) + (waste.composted_kg ?? 0) + (waste.coprocessed_kg ?? 0)) / totalWasteKg * 100)
-    : 0;
+  const diversionRate = totalWasteKg > 0 ? (((waste.recycled_kg ?? 0) + (waste.composted_kg ?? 0) + (waste.coprocessed_kg ?? 0)) / totalWasteKg * 100) : 0;
 
-  // ── Completeness score ─────────────────────────────────────────────
+  // ── Completeness ───────────────────────────────────────────────────────────
   const completeness = [
-    hasEnergyData,
-    hasWaterData,
-    hasWasteData,
+    hasEnergyData, hasWaterData, hasWasteData,
     (water.recycled_kl ?? 0) > 0 || water.recycled_kl === 0,
     waste.disposal_methods.length > 0,
     energy.reduction_initiatives.length > 10,
   ].filter(Boolean).length;
   const compPct = Math.round(completeness / 6 * 100);
 
-  // ── [FIX-RATE-LIMIT] Debounced save — min 2s between saves ────────
+  // ── [FEAT-AUTO-POPULATE] Pull real data from trades + emissions ────────────
+  const handleAutoPopulate = useCallback(async () => {
+    if (autoPopulating || saving) return;
+    setAutoPopulating(true);
+    toast('⟳ Fetching data from your trades & emissions…');
+    try {
+      const data = await brsrAPI.autoPopulate(year);
+      if (!data) { toast('No trade or emission data found for this year', 'warn'); return; }
+
+      const sv = data.suggested_form_values || {};
+
+      // Build GHG narrative for reduction_initiatives field
+      if (data.gross_emissions_tco2e > 0 || data.offsets_purchased_tco2e > 0) {
+        const parts = [];
+        if (data.gross_emissions_tco2e > 0) {
+          parts.push(
+            `FY${year} gross emissions: ${data.gross_emissions_tco2e.toFixed(2)} tCO₂e` +
+            ` (Scope 1: ${(data.scope1_tco2e || 0).toFixed(2)},` +
+            ` Scope 2: ${(data.scope2_tco2e || 0).toFixed(2)},` +
+            ` Scope 3: ${(data.scope3_tco2e || 0).toFixed(2)})`
+          );
+        }
+        if (data.offsets_purchased_tco2e > 0) {
+          parts.push(
+            `Carbon credits purchased: ${data.offsets_purchased_tco2e.toFixed(2)} tCO₂e` +
+            ` (${data.trade_count} trades,` +
+            ` ₹${(data.offset_spend_inr || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })} spend)`
+          );
+        }
+        if (data.carbon_neutral) {
+          parts.push('Status: CARBON NEUTRAL — offsets exceed gross emissions.');
+        } else if (data.net_emissions_tco2e > 0) {
+          parts.push(`Net emissions after offsets: ${data.net_emissions_tco2e.toFixed(2)} tCO₂e.`);
+        }
+        const narrative = parts.join('. ');
+        if (narrative) setEnergyField('reduction_initiatives', narrative);
+      }
+
+      // Merge existing BRSR energy/water/waste if returned from server
+      if (sv.energy && Object.keys(sv.energy).length > 0) {
+        setEnergy(e => ({ ...e, ...sv.energy }));
+        markDirty();
+      }
+      if (sv.water && Object.keys(sv.water).length > 0) {
+        setWater(w => ({ ...w, ...sv.water }));
+        markDirty();
+      }
+      if (sv.waste && Object.keys(sv.waste).length > 0) {
+        setWaste(ww => ({ ...ww, ...sv.waste }));
+        markDirty();
+      }
+
+      toast(
+        `✓ Auto-populated from ${data.trade_count || 0} trades · ${data.activity_count || 0} emission records. Review and save.`
+      );
+    } catch (err) {
+      toast('Auto-populate failed — ' + (err?.message || 'please try again'), 'err');
+    } finally {
+      setAutoPopulating(false);
+    }
+  }, [autoPopulating, saving, year]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Save ───────────────────────────────────────────────────────────────────
   const handleSave = useCallback(async (opts = {}) => {
     if (saving) return;
-
-    // [FIX-RATE-LIMIT] Debounce: ignore rapid re-calls within 500ms
     const now = Date.now();
     if (now - lastSaveTime.current < 500) return;
     lastSaveTime.current = now;
-
     if (saveDebounce.current) clearTimeout(saveDebounce.current);
 
     return new Promise((resolve) => {
       saveDebounce.current = setTimeout(async () => {
         setSaving(true);
-        setSaveProgress(10); // [FIX-OPTIMISTIC]
+        setSaveProgress(10);
 
-        // [FIX-NULL-ZERO] Build payload preserving null vs 0
         const energyPayload = {
-          ...Object.fromEntries(
-            ENERGY_TYPES.map(et => [et.key, safeNumForPayload(energy[et.key])])
-          ),
-          prev_total_gj:       safeNumForPayload(energy.prev_total_gj),
-          prev_renewable_gj:   safeNumForPayload(energy.prev_renewable_gj),
-          prev_intensity_gj_cr:safeNumForPayload(energy.prev_intensity_gj_cr, 0, 1e6),
-          total_gj:            totalEnergyGJ,
-          renewable_gj:        totalRenewableGJ,
-          intensity_gj_cr:     energyIntensityInr,
-          intensity_gj_ppp_m:  energyIntensityPPP,
-          ppp_rate:            IMF_PPP_RATE,
-          ppp_source:          'IMF WEO April 2025',
+          ...Object.fromEntries(ENERGY_TYPES.map(et => [et.key, safeNumForPayload(energy[et.key])])),
+          prev_total_gj:        safeNumForPayload(energy.prev_total_gj),
+          prev_renewable_gj:    safeNumForPayload(energy.prev_renewable_gj),
+          prev_intensity_gj_cr: safeNumForPayload(energy.prev_intensity_gj_cr, 0, 1e6),
+          total_gj:             totalEnergyGJ,
+          renewable_gj:         totalRenewableGJ,
+          intensity_gj_cr:      energyIntensityInr,
+          intensity_gj_ppp_m:   energyIntensityPPP,
+          ppp_rate:             IMF_PPP_RATE,
+          ppp_source:           'IMF WEO April 2025',
           reduction_initiatives: sanitise(energy.reduction_initiatives, 2000),
         };
-
         setSaveProgress(30);
 
         const waterPayload = {
-          surface_kl:         safeNumForPayload(water.surface_kl),
-          groundwater_kl:     safeNumForPayload(water.groundwater_kl),
-          thirdparty_kl:      safeNumForPayload(water.thirdparty_kl),
-          seawater_kl:        safeNumForPayload(water.seawater_kl),
-          rainwater_kl:       safeNumForPayload(water.rainwater_kl),
-          municipal_kl:       safeNumForPayload(water.municipal_kl),
-          consumption_kl:     safeNumForPayload(water.consumption_kl),
-          recycled_kl:        safeNumForPayload(water.recycled_kl),
-          prev_withdrawal_kl: safeNumForPayload(water.prev_withdrawal_kl),
-          prev_consumption_kl:safeNumForPayload(water.prev_consumption_kl),
-          withdrawal_kl:      totalWithdrawal,
-          intensity_kl_cr:    waterIntensityInr,
-          intensity_kl_ppp_m: waterIntensityPPP,
-          water_stress_ops:   sanitise(water.water_stress_ops, 500),
+          surface_kl:          safeNumForPayload(water.surface_kl),
+          groundwater_kl:      safeNumForPayload(water.groundwater_kl),
+          thirdparty_kl:       safeNumForPayload(water.thirdparty_kl),
+          seawater_kl:         safeNumForPayload(water.seawater_kl),
+          rainwater_kl:        safeNumForPayload(water.rainwater_kl),
+          municipal_kl:        safeNumForPayload(water.municipal_kl),
+          consumption_kl:      safeNumForPayload(water.consumption_kl),
+          recycled_kl:         safeNumForPayload(water.recycled_kl),
+          prev_withdrawal_kl:  safeNumForPayload(water.prev_withdrawal_kl),
+          prev_consumption_kl: safeNumForPayload(water.prev_consumption_kl),
+          withdrawal_kl:       totalWithdrawal,
+          intensity_kl_cr:     waterIntensityInr,
+          intensity_kl_ppp_m:  waterIntensityPPP,
+          water_stress_ops:    sanitise(water.water_stress_ops, 500),
           zero_liquid_discharge: Boolean(water.zero_liquid_discharge),
           water_treatment: Array.isArray(water.water_treatment)
             ? water.water_treatment.filter(v => typeof v === 'string').map(v => sanitise(v, 100)).slice(0, 20)
             : [],
         };
-
         setSaveProgress(50);
 
         const wastePayload = {
-          hazardous_kg:    safeNumForPayload(waste.hazardous_kg),
-          ewaste_kg:       safeNumForPayload(waste.ewaste_kg),
-          plastic_kg:      safeNumForPayload(waste.plastic_kg),
-          biomedical_kg:   safeNumForPayload(waste.biomedical_kg),
-          construction_kg: safeNumForPayload(waste.construction_kg),
-          battery_kg:      safeNumForPayload(waste.battery_kg),
-          radioactive_kg:  safeNumForPayload(waste.radioactive_kg),
-          non_hazardous_kg:safeNumForPayload(waste.non_hazardous_kg),
-          recycled_kg:     safeNumForPayload(waste.recycled_kg),
-          landfill_kg:     safeNumForPayload(waste.landfill_kg),
-          composted_kg:    safeNumForPayload(waste.composted_kg),
-          incinerated_kg:  safeNumForPayload(waste.incinerated_kg),
-          coprocessed_kg:  safeNumForPayload(waste.coprocessed_kg),
-          prev_total_kg:   safeNumForPayload(waste.prev_total_kg),
-          total_kg:        totalWasteKg,
+          hazardous_kg:     safeNumForPayload(waste.hazardous_kg),
+          ewaste_kg:        safeNumForPayload(waste.ewaste_kg),
+          plastic_kg:       safeNumForPayload(waste.plastic_kg),
+          biomedical_kg:    safeNumForPayload(waste.biomedical_kg),
+          construction_kg:  safeNumForPayload(waste.construction_kg),
+          battery_kg:       safeNumForPayload(waste.battery_kg),
+          radioactive_kg:   safeNumForPayload(waste.radioactive_kg),
+          non_hazardous_kg: safeNumForPayload(waste.non_hazardous_kg),
+          recycled_kg:      safeNumForPayload(waste.recycled_kg),
+          landfill_kg:      safeNumForPayload(waste.landfill_kg),
+          composted_kg:     safeNumForPayload(waste.composted_kg),
+          incinerated_kg:   safeNumForPayload(waste.incinerated_kg),
+          coprocessed_kg:   safeNumForPayload(waste.coprocessed_kg),
+          prev_total_kg:    safeNumForPayload(waste.prev_total_kg),
+          total_kg:         totalWasteKg,
           disposal_methods: Array.isArray(waste.disposal_methods)
             ? waste.disposal_methods.filter(v => DISPOSAL_METHODS.includes(v)).slice(0, 20)
             : [],
           waste_reduction_target: sanitise(waste.waste_reduction_target, 500),
           extended_producer_responsibility: Boolean(waste.extended_producer_responsibility),
         };
-
         setSaveProgress(70);
 
         try {
@@ -579,33 +578,23 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ year, energy: energyPayload, water: waterPayload, waste: wastePayload }),
           });
-
           setSaveProgress(90);
           toast('✓ BRSR environmental data saved');
           setDirty(false);
-
-          const brsrPayload = { energyData: energyPayload, waterData: waterPayload, wasteData: wastePayload };
-          onDataReady?.(brsrPayload);
-
+          onDataReady?.({ energyData: energyPayload, waterData: waterPayload, wasteData: wastePayload });
           try {
             const ghgResult = await syncBRSRToGHGLedger(year, waterPayload, wastePayload);
             if (ghgResult?.logged > 0) toast(`✓ Auto-logged ${ghgResult.logged} Scope 3 Cat 5 records`);
           } catch {
             toast('GHG sync failed — BRSR data saved successfully', 'warn');
           }
-
           setSaveProgress(100);
           setTimeout(() => setSaveProgress(0), 1200);
           resolve(true);
         } catch (err) {
-          // [FIX-OPTIMISTIC] Show field-level errors if API returns them
           const errBody = err?.body;
           if (errBody?.fieldErrors) {
-            // field-level errors handled by NumericField components via a context
-            // for now toast each one
-            Object.entries(errBody.fieldErrors).forEach(([field, msg]) => {
-              toast(`${field}: ${msg}`, 'err');
-            });
+            Object.entries(errBody.fieldErrors).forEach(([field, msg]) => toast(`${field}: ${msg}`, 'err'));
           } else {
             toast('Save failed. Please try again.', 'err');
           }
@@ -619,27 +608,19 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
   }, [saving, year, energy, water, waste, totalEnergyGJ, totalRenewableGJ, energyIntensityInr,
       energyIntensityPPP, totalWithdrawal, waterIntensityInr, waterIntensityPPP, totalWasteKg, onDataReady]);
 
-  // ── [FIX-YEAR-SWITCH] Save and switch handler ─────────────────────
   const handleSaveAndSwitch = async () => {
     const ok = await handleSave();
-    if (ok !== false) {
-      setYear(yearSwitchModal);
-      setYearSwitchModal(null);
-    }
+    if (ok !== false) { setYear(yearSwitchModal); setYearSwitchModal(null); }
   };
 
   const handleDiscardAndSwitch = () => {
-    setYear(yearSwitchModal);
-    setYearSwitchModal(null);
-    setDirty(false);
+    setYear(yearSwitchModal); setYearSwitchModal(null); setDirty(false);
   };
 
-  // ─────────────────────────────────────────────────────────────────────
   return (
     <>
       <style>{CSS}</style>
 
-      {/* [FIX-YEAR-SWITCH] Year switch modal */}
       {yearSwitchModal && (
         <YearSwitchModal
           targetYear={yearSwitchModal}
@@ -655,14 +636,13 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
       <div className="brsr">
         <div className="brsr-in">
 
-          {/* ── [FIX-OPTIMISTIC] Save progress bar ─────────────────── */}
           {saveProgress > 0 && (
             <div className="save-progress">
               <div className="save-progress-bar" style={{ width: `${saveProgress}%` }}/>
             </div>
           )}
 
-          {/* ── Header ──────────────────────────────────────────────── */}
+          {/* ── Header ────────────────────────────────────────────────────── */}
           <div className="brsr-hd">
             <div>
               <div className="brsr-label">SEBI BRSR CORE · DEC 2024 ISF CIRCULAR · PRINCIPLE 6 ENVIRONMENTAL KPIs</div>
@@ -675,18 +655,25 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
             </div>
             <div className="brsr-yr">
               <label className="brsr-lbl">FY</label>
-              {/* [FIX-YEAR-DYNAMIC] Dynamic year range */}
               <select className="brsr-sel" value={year} onChange={e => handleYearChange(parseInt(e.target.value, 10))}>
                 {REPORT_YEARS.map(y => <option key={y}>{y}</option>)}
               </select>
               {dirty && <span style={{ fontSize: 10, color: '#f59e0b', marginLeft: 6 }}>UNSAVED</span>}
+              {/* [FEAT-AUTO-POPULATE] Auto-populate button */}
+              <button
+                className="btn-auto"
+                onClick={handleAutoPopulate}
+                disabled={autoPopulating || saving}
+                title="Pre-fill GHG narrative from your actual trade history and emission activities"
+              >
+                {autoPopulating ? '⟳ LOADING…' : '⚡ AUTO-POPULATE FROM TRADES'}
+              </button>
               <button className="btn btn-p btn-sm" onClick={() => handleSave()} disabled={saving}>
                 {saving ? 'SAVING…' : 'SAVE ALL →'}
               </button>
             </div>
           </div>
 
-          {/* ── SEBI ISF Dec 2024 notice ─────────────────────────────── */}
           <div className="brsr-alert al-g">
             <span>✓</span>
             <span>
@@ -696,7 +683,16 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
             </span>
           </div>
 
-          {/* ── [FIX-NULL-ZERO] Null vs zero notice ─────────────────── */}
+          {/* [FEAT-AUTO-POPULATE] Explain what the button does */}
+          <div className="brsr-alert al-y">
+            <span>⚡</span>
+            <span>
+              <strong>AUTO-POPULATE FROM TRADES:</strong> Click the button above to pre-fill the GHG narrative
+              from your actual EtherTrack trade history and emission activity records.
+              Data is pulled for FY{year} — review all fields before saving.
+            </span>
+          </div>
+
           <div className="brsr-alert al-y">
             <span>ℹ</span>
             <span>
@@ -715,12 +711,12 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
             </span>
           </div>
 
-          {/* ── Progress cards ───────────────────────────────────────── */}
+          {/* ── Progress cards ─────────────────────────────────────────────── */}
           <div className="brsr-prog">
             {[
-              { key: 'energy', label: 'P6-E2 ENERGY',  val: hasEnergyData ? `${fmt(totalEnergyGJ, 0)} GJ`      : 'NOT ENTERED', done: hasEnergyData,  color: '#f97316' },
-              { key: 'water',  label: 'P6-E3 WATER',   val: hasWaterData  ? `${fmt(totalWithdrawal, 0)} KL`    : 'NOT ENTERED', done: hasWaterData,   color: '#3b82f6' },
-              { key: 'waste',  label: 'P6-E4 WASTE',   val: hasWasteData  ? `${fmt(totalWasteKg / 1000, 2)} MT` : 'NOT ENTERED', done: hasWasteData,  color: '#a855f7' },
+              { key: 'energy', label: 'P6-E2 ENERGY', val: hasEnergyData ? `${fmt(totalEnergyGJ, 0)} GJ`       : 'NOT ENTERED', done: hasEnergyData, color: '#f97316' },
+              { key: 'water',  label: 'P6-E3 WATER',  val: hasWaterData  ? `${fmt(totalWithdrawal, 0)} KL`     : 'NOT ENTERED', done: hasWaterData,  color: '#3b82f6' },
+              { key: 'waste',  label: 'P6-E4 WASTE',  val: hasWasteData  ? `${fmt(totalWasteKg / 1000, 2)} MT` : 'NOT ENTERED', done: hasWasteData,  color: '#a855f7' },
             ].map(({ key, label, val, done, color }) => (
               <div key={key} className={`brsr-prog-item${tab === key ? ' active' : ''}${done ? ' done' : ''}`}
                 onClick={() => setTab(key)}>
@@ -733,14 +729,9 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
             ))}
           </div>
 
-          {/* ── Tabs ─────────────────────────────────────────────────── */}
+          {/* ── Tabs ───────────────────────────────────────────────────────── */}
           <div className="brsr-tabs">
-            {[
-              ['energy',  'P6-E2 ENERGY'],
-              ['water',   'P6-E3 WATER'],
-              ['waste',   'P6-E4 WASTE'],
-              ['summary', 'SUMMARY & EXPORT'],
-            ].map(([k, v]) => (
+            {[['energy','P6-E2 ENERGY'],['water','P6-E3 WATER'],['waste','P6-E4 WASTE'],['summary','SUMMARY & EXPORT']].map(([k, v]) => (
               <button key={k} className={`brsr-tab${tab === k ? ' on' : ''}`} onClick={() => setTab(k)}>{v}</button>
             ))}
           </div>
@@ -753,20 +744,15 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
 
           {!loading && (
             <>
-              {/* ══ ENERGY TAB ══════════════════════════════════════════ */}
+              {/* ══ ENERGY TAB ══════════════════════════════════════════════ */}
               {tab === 'energy' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                   <div className="metric-row">
                     {[
-                      { label: 'TOTAL ENERGY',  val: hasEnergyData ? `${fmt(totalEnergyGJ, 0)} GJ` : '—', sub: 'All sources combined', color: '#f97316' },
-                      { label: 'RENEWABLE',     val: hasEnergyData ? `${fmt(totalRenewableGJ, 0)} GJ` : '—', sub: `${fmt(renewablePct, 1)}% of total`, color: '#10b981' },
-                      { label: 'NON-RENEWABLE', val: hasEnergyData ? `${fmt(totalNonRenGJ, 0)} GJ` : '—', sub: 'Fossil + grid', color: '#ef4444' },
-                      {
-                        label: 'INTENSITY (₹Cr)',
-                        val: energyIntensityInr ? `${fmt(energyIntensityInr, 2)} GJ/₹Cr` : '—',
-                        sub: energyIntensityPPP ? `${fmt(energyIntensityPPP, 2)} GJ/$M PPP` : 'Set revenue in profile',
-                        color: '#3b82f6',
-                      },
+                      { label: 'TOTAL ENERGY',  val: hasEnergyData ? `${fmt(totalEnergyGJ, 0)} GJ`      : '—', sub: 'All sources combined',                                                           color: '#f97316' },
+                      { label: 'RENEWABLE',     val: hasEnergyData ? `${fmt(totalRenewableGJ, 0)} GJ`   : '—', sub: `${fmt(renewablePct, 1)}% of total`,                                              color: '#10b981' },
+                      { label: 'NON-RENEWABLE', val: hasEnergyData ? `${fmt(totalNonRenGJ, 0)} GJ`      : '—', sub: 'Fossil + grid',                                                                  color: '#ef4444' },
+                      { label: 'INTENSITY (₹Cr)', val: energyIntensityInr ? `${fmt(energyIntensityInr, 2)} GJ/₹Cr` : '—', sub: energyIntensityPPP ? `${fmt(energyIntensityPPP, 2)} GJ/$M PPP` : 'Set revenue in profile', color: '#3b82f6' },
                     ].map(({ label, val, sub, color }) => (
                       <div key={label} className="metric-tile">
                         <div className="metric-tile-lbl">{label}</div>
@@ -779,8 +765,7 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
                   {energyIntensityPPP && (
                     <div className="brsr-alert al-g">
                       <span>✓</span>
-                      <span>
-                        <strong>PPP-adjusted energy intensity (mandatory):</strong>{' '}
+                      <span><strong>PPP-adjusted energy intensity (mandatory):</strong>{' '}
                         {fmt(energyIntensityPPP, 2)} GJ per $M international dollar (PPP).
                         Revenue: ₹{revenueCr} Cr = ~${revenuePPPM?.toFixed(1)}M PPP (IMF ₹{IMF_PPP_RATE}/intl.$).
                       </span>
@@ -816,29 +801,17 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
                     <div style={{ fontSize: 10, letterSpacing: '.1em', color: '#ef4444', marginBottom: 8 }}>NON-RENEWABLE SOURCES</div>
                     <div className="g2">
                       {ENERGY_TYPES.filter(e => !e.renewable).map(et => (
-                        <NumericField
-                          key={et.key}
-                          label={et.label}
-                          unit="GJ"
-                          color={et.color}
-                          value={energy[et.key]}
-                          onChange={val => setEnergyField(et.key, val)}
-                          showConverter={et.key === 'grid_gj' || et.key === 'oil_gj' || et.key === 'gas_gj'}
-                        />
+                        <NumericField key={et.key} label={et.label} unit="GJ" color={et.color}
+                          value={energy[et.key]} onChange={val => setEnergyField(et.key, val)}
+                          showConverter={et.key === 'grid_gj' || et.key === 'oil_gj' || et.key === 'gas_gj'}/>
                       ))}
                     </div>
                     <div className="divider"/>
                     <div style={{ fontSize: 10, letterSpacing: '.1em', color: '#10b981', marginBottom: 8 }}>RENEWABLE SOURCES</div>
                     <div className="g2">
                       {ENERGY_TYPES.filter(e => e.renewable).map(et => (
-                        <NumericField
-                          key={et.key}
-                          label={et.label}
-                          unit="GJ"
-                          color={et.color}
-                          value={energy[et.key]}
-                          onChange={val => setEnergyField(et.key, val)}
-                        />
+                        <NumericField key={et.key} label={et.label} unit="GJ" color={et.color}
+                          value={energy[et.key]} onChange={val => setEnergyField(et.key, val)}/>
                       ))}
                     </div>
                   </div>
@@ -858,7 +831,7 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
                     <div className="brsr-fg">
                       <label className="brsr-lbl">ENERGY REDUCTION INITIATIVES (BRSR narrative)</label>
                       <textarea className="brsr-inp" rows={3} maxLength={2000}
-                        placeholder="e.g. LED lighting retrofit, HVAC optimisation, solar rooftop 200kWp, VFD installation on motors…"
+                        placeholder="e.g. LED lighting retrofit, HVAC optimisation, solar rooftop 200kWp… or click ⚡ AUTO-POPULATE FROM TRADES above"
                         value={energy.reduction_initiatives}
                         onChange={e => setEnergyField('reduction_initiatives', e.target.value)}
                         style={{ resize: 'vertical' }}/>
@@ -870,7 +843,7 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
                 </div>
               )}
 
-              {/* ══ WATER TAB ═══════════════════════════════════════════ */}
+              {/* ══ WATER TAB ═══════════════════════════════════════════════ */}
               {tab === 'water' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                   <div className="metric-row">
@@ -878,12 +851,7 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
                       { label: 'TOTAL WITHDRAWAL', val: hasWaterData ? `${fmt(totalWithdrawal, 0)} KL` : '—', sub: 'All sources', color: '#3b82f6' },
                       { label: 'CONSUMPTION', val: water.consumption_kl !== null ? `${fmt(water.consumption_kl, 0)} KL` : '—', sub: 'Net consumed', color: '#60a5fa' },
                       { label: 'RECYCLED / REUSED', val: water.recycled_kl !== null ? `${fmt(water.recycled_kl, 0)} KL` : '—', sub: `${fmt(recycleRate, 1)}% recycling rate`, color: '#10b981' },
-                      {
-                        label: 'INTENSITY (₹Cr)',
-                        val: waterIntensityInr ? `${fmt(waterIntensityInr, 1)} KL/₹Cr` : '—',
-                        sub: waterIntensityPPP ? `${fmt(waterIntensityPPP, 1)} KL/$M PPP` : 'Set revenue in profile',
-                        color: '#a855f7',
-                      },
+                      { label: 'INTENSITY (₹Cr)', val: waterIntensityInr ? `${fmt(waterIntensityInr, 1)} KL/₹Cr` : '—', sub: waterIntensityPPP ? `${fmt(waterIntensityPPP, 1)} KL/$M PPP` : 'Set revenue in profile', color: '#a855f7' },
                     ].map(({ label, val, sub, color }) => (
                       <div key={label} className="metric-tile">
                         <div className="metric-tile-lbl">{label}</div>
@@ -896,8 +864,7 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
                   {waterIntensityPPP && (
                     <div className="brsr-alert al-g">
                       <span>✓</span>
-                      <span>
-                        <strong>PPP-adjusted water intensity (mandatory):</strong>{' '}
+                      <span><strong>PPP-adjusted water intensity (mandatory):</strong>{' '}
                         {fmt(waterIntensityPPP, 1)} KL per $M international dollar (PPP).
                       </span>
                     </div>
@@ -972,13 +939,13 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
                 </div>
               )}
 
-              {/* ══ WASTE TAB ═══════════════════════════════════════════ */}
+              {/* ══ WASTE TAB ═══════════════════════════════════════════════ */}
               {tab === 'waste' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                   <div className="metric-row">
                     {[
-                      { label: 'TOTAL WASTE',           val: hasWasteData ? `${fmt(totalWasteKg / 1000, 2)} MT` : '—', sub: 'All categories', color: '#a855f7' },
-                      { label: 'HAZARDOUS',             val: waste.hazardous_kg !== null ? `${fmt((waste.hazardous_kg ?? 0) / 1000, 2)} MT` : '—', sub: `${fmt(hazPct, 1)}% of total`, color: '#ef4444' },
+                      { label: 'TOTAL WASTE',            val: hasWasteData ? `${fmt(totalWasteKg / 1000, 2)} MT` : '—', sub: 'All categories', color: '#a855f7' },
+                      { label: 'HAZARDOUS',              val: waste.hazardous_kg !== null ? `${fmt((waste.hazardous_kg ?? 0) / 1000, 2)} MT` : '—', sub: `${fmt(hazPct, 1)}% of total`, color: '#ef4444' },
                       { label: 'DIVERTED FROM LANDFILL', val: hasWasteData ? `${fmt(diversionRate, 1)}%` : '—', sub: 'Recycled + composted', color: '#10b981' },
                       { label: 'YoY CHANGE',             val: wasteYoY !== null ? `${wasteYoY > 0 ? '+' : ''}${fmt(wasteYoY, 1)}%` : '—', sub: `vs FY ${year-1}`, color: wasteYoY !== null ? (wasteYoY > 0 ? '#ef4444' : '#10b981') : '#5a7a8a' },
                     ].map(({ label, val, sub, color }) => (
@@ -995,13 +962,13 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
                     <div className="g2">
                       {[
                         { key: 'hazardous_kg',    label: 'Hazardous Waste',              color: '#ef4444' },
-                        { key: 'ewaste_kg',        label: 'E-Waste (E-Waste Rules 2022)', color: '#f97316' },
-                        { key: 'plastic_kg',       label: 'Plastic (PWM Rules 2022)',     color: '#a855f7' },
-                        { key: 'biomedical_kg',    label: 'Bio-medical Waste',            color: '#ec4899' },
-                        { key: 'construction_kg',  label: 'C&D Waste',                    color: '#78716c' },
-                        { key: 'battery_kg',       label: 'Battery Waste',                color: '#eab308' },
-                        { key: 'radioactive_kg',   label: 'Radioactive Waste',            color: '#22d3ee' },
-                        { key: 'non_hazardous_kg', label: 'Non-Hazardous Waste',          color: '#10b981' },
+                        { key: 'ewaste_kg',       label: 'E-Waste (E-Waste Rules 2022)', color: '#f97316' },
+                        { key: 'plastic_kg',      label: 'Plastic (PWM Rules 2022)',     color: '#a855f7' },
+                        { key: 'biomedical_kg',   label: 'Bio-medical Waste',            color: '#ec4899' },
+                        { key: 'construction_kg', label: 'C&D Waste',                    color: '#78716c' },
+                        { key: 'battery_kg',      label: 'Battery Waste',                color: '#eab308' },
+                        { key: 'radioactive_kg',  label: 'Radioactive Waste',            color: '#22d3ee' },
+                        { key: 'non_hazardous_kg',label: 'Non-Hazardous Waste',          color: '#10b981' },
                       ].map(({ key, label, color }) => (
                         <NumericField key={key} label={label} unit="kg" color={color}
                           value={waste[key]} onChange={val => setWasteField(key, val)}/>
@@ -1056,27 +1023,27 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
                 </div>
               )}
 
-              {/* ══ SUMMARY TAB ═════════════════════════════════════════ */}
+              {/* ══ SUMMARY TAB ════════════════════════════════════════════ */}
               {tab === 'summary' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                   <div className="brsr-card">
                     <div className="brsr-ctit">BRSR CORE P6 COMPLIANCE STATUS — SEBI DEC 2024 ISF</div>
                     {[
-                      { label: 'P6-E2 Energy — Total GJ',                val: hasEnergyData ? `${fmt(totalEnergyGJ, 0)} GJ` : 'NOT ENTERED',                ok: hasEnergyData },
-                      { label: 'P6-E2 Renewable Energy Share',            val: hasEnergyData ? `${fmt(renewablePct, 1)}%` : '—',                             ok: hasEnergyData },
-                      { label: 'P6-E2 Intensity (₹Cr)',                   val: energyIntensityInr ? `${fmt(energyIntensityInr, 2)} GJ/₹Cr` : '—',           ok: !!energyIntensityInr },
-                      { label: 'P6-E2 Intensity (PPP — ISF mandatory)',   val: energyIntensityPPP ? `${fmt(energyIntensityPPP, 2)} GJ/$M PPP` : '—',        ok: !!energyIntensityPPP },
-                      { label: 'P6-E3 Water Withdrawal',                  val: hasWaterData ? `${fmt(totalWithdrawal, 0)} KL` : 'NOT ENTERED',              ok: hasWaterData },
-                      { label: 'P6-E3 Water Intensity (₹Cr)',             val: waterIntensityInr ? `${fmt(waterIntensityInr, 1)} KL/₹Cr` : '—',            ok: !!waterIntensityInr },
-                      { label: 'P6-E3 Water Intensity (PPP — ISF)',       val: waterIntensityPPP ? `${fmt(waterIntensityPPP, 1)} KL/$M PPP` : '—',         ok: !!waterIntensityPPP },
-                      { label: 'P6-E3 Water Recycling Rate',              val: hasWaterData ? `${fmt(recycleRate, 1)}%` : '—',                              ok: hasWaterData },
-                      { label: 'P6-E4 Total Waste (MT)',                  val: hasWasteData ? `${fmt(totalWasteKg / 1000, 2)} MT` : 'NOT ENTERED',         ok: hasWasteData },
-                      { label: 'P6-E4 Hazardous Waste',                   val: waste.hazardous_kg !== null ? `${fmt((waste.hazardous_kg ?? 0) / 1000, 3)} MT` : 'NOT ENTERED', ok: waste.hazardous_kg !== null },
-                      { label: 'P6-E4 Waste Diversion Rate',              val: hasWasteData ? `${fmt(diversionRate, 1)}%` : '—',                           ok: hasWasteData },
-                      { label: 'Reduction Initiatives Narrative',         val: energy.reduction_initiatives.length > 10 ? 'Provided' : 'MISSING',           ok: energy.reduction_initiatives.length > 10 },
-                      { label: 'EPR Registration',                        val: waste.extended_producer_responsibility ? 'Registered' : 'Not applicable / pending', ok: true },
-                      { label: 'PPP Rate Applied (IMF WEO Apr 2025)',     val: `₹${IMF_PPP_RATE} per international $`,                                      ok: true },
-                      { label: 'Grid EF Applied (CEA V20.0 Dec 2024)',    val: '0.727 tCO₂/MWh',                                                           ok: true },
+                      { label: 'P6-E2 Energy — Total GJ',              val: hasEnergyData ? `${fmt(totalEnergyGJ, 0)} GJ` : 'NOT ENTERED',                                                           ok: hasEnergyData },
+                      { label: 'P6-E2 Renewable Energy Share',          val: hasEnergyData ? `${fmt(renewablePct, 1)}%` : '—',                                                                       ok: hasEnergyData },
+                      { label: 'P6-E2 Intensity (₹Cr)',                 val: energyIntensityInr ? `${fmt(energyIntensityInr, 2)} GJ/₹Cr` : '—',                                                    ok: !!energyIntensityInr },
+                      { label: 'P6-E2 Intensity (PPP — ISF mandatory)', val: energyIntensityPPP ? `${fmt(energyIntensityPPP, 2)} GJ/$M PPP` : '—',                                                  ok: !!energyIntensityPPP },
+                      { label: 'P6-E3 Water Withdrawal',                val: hasWaterData ? `${fmt(totalWithdrawal, 0)} KL` : 'NOT ENTERED',                                                        ok: hasWaterData },
+                      { label: 'P6-E3 Water Intensity (₹Cr)',           val: waterIntensityInr ? `${fmt(waterIntensityInr, 1)} KL/₹Cr` : '—',                                                      ok: !!waterIntensityInr },
+                      { label: 'P6-E3 Water Intensity (PPP — ISF)',     val: waterIntensityPPP ? `${fmt(waterIntensityPPP, 1)} KL/$M PPP` : '—',                                                    ok: !!waterIntensityPPP },
+                      { label: 'P6-E3 Water Recycling Rate',            val: hasWaterData ? `${fmt(recycleRate, 1)}%` : '—',                                                                        ok: hasWaterData },
+                      { label: 'P6-E4 Total Waste (MT)',                val: hasWasteData ? `${fmt(totalWasteKg / 1000, 2)} MT` : 'NOT ENTERED',                                                    ok: hasWasteData },
+                      { label: 'P6-E4 Hazardous Waste',                 val: waste.hazardous_kg !== null ? `${fmt((waste.hazardous_kg ?? 0) / 1000, 3)} MT` : 'NOT ENTERED',                       ok: waste.hazardous_kg !== null },
+                      { label: 'P6-E4 Waste Diversion Rate',            val: hasWasteData ? `${fmt(diversionRate, 1)}%` : '—',                                                                     ok: hasWasteData },
+                      { label: 'Reduction Initiatives Narrative',       val: energy.reduction_initiatives.length > 10 ? 'Provided' : 'MISSING',                                                     ok: energy.reduction_initiatives.length > 10 },
+                      { label: 'EPR Registration',                      val: waste.extended_producer_responsibility ? 'Registered' : 'Not applicable / pending',                                     ok: true },
+                      { label: 'PPP Rate Applied (IMF WEO Apr 2025)',   val: `₹${IMF_PPP_RATE} per international $`,                                                                                ok: true },
+                      { label: 'Grid EF Applied (CEA V20.0 Dec 2024)', val: '0.727 tCO₂/MWh',                                                                                                      ok: true },
                     ].map(({ label, val, ok }) => (
                       <div key={label} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid var(--brd)44', fontSize: 12 }}>
                         <span style={{ color: 'var(--mut)' }}>{label}</span>
@@ -1091,7 +1058,6 @@ export default function BRSREnvironmental({ profile, year: propYear, onDataReady
                     </div>
                   </div>
 
-                  {/* [FIX-DEV-GATE] JSON snapshot only in devMode */}
                   {devMode && (
                     <div className="brsr-card">
                       <div className="brsr-ctit">DATA SNAPSHOT — DEV MODE ONLY</div>

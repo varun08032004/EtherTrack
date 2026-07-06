@@ -28,6 +28,42 @@ const n0     = v   => Number(v || 0).toFixed(0);
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 
+// ── NEW: Razorpay SDK loader ──────────────────────────────────────
+const loadRazorpay = () => new Promise(resolve => {
+  if (window.Razorpay) return resolve(true);
+  const s = document.createElement('script');
+  s.src = 'https://checkout.razorpay.com/v1/checkout.js';
+  s.onload  = () => resolve(true);
+  s.onerror = () => resolve(false);
+  document.body.appendChild(s);
+});
+
+// ── NEW: ChainVerifiedBadge ───────────────────────────────────────
+function ChainVerifiedBadge({ chainStatus, chainTxHash }) {
+  if (!chainStatus) return null;
+  const cfg = {
+    confirmed: { bg: '#0d2e1f', border: '#22c55e33', text: '#22c55e', label: '⛓ ON-CHAIN' },
+    pending:   { bg: '#1a1200', border: '#facc1533', text: '#facc15', label: '⏳ LOGGING...' },
+    on_chain:  { bg: '#0d2e1f', border: '#22c55e33', text: '#22c55e', label: '⛓ ON-CHAIN' },
+    failed:    { bg: '#1a0707', border: '#f8717133', text: '#f87171', label: '⚠ LOG FAILED' },
+  }[chainStatus] || { bg: '#1a1200', border: '#facc1533', text: '#facc15', label: '⏳ PENDING' };
+  return (
+    <a
+      href={chainTxHash ? `https://amoy.polygonscan.com/tx/${chainTxHash}` : '#'}
+      target="_blank" rel="noopener noreferrer"
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 4,
+        padding: '2px 7px', borderRadius: 3,
+        background: cfg.bg, border: `1px solid ${cfg.border}`,
+        color: cfg.text, fontSize: 8, letterSpacing: '.06em',
+        textDecoration: 'none', cursor: chainTxHash ? 'pointer' : 'default',
+      }}
+    >
+      {cfg.label}{chainTxHash && <span style={{ opacity: 0.5 }}>↗</span>}
+    </a>
+  );
+}
+
 function buildPriceHistory(tradeHistory, tokenId) {
   const relevant = tradeHistory
     .filter(t => t.tokenId === tokenId)
@@ -343,7 +379,6 @@ function OrderForm({
       <div className="cc-panel" style={{ marginBottom: 10 }}>
         <div className="cc-panel-title">PLACE ORDER</div>
 
-        {/* Unified gating prompt — visible to anyone not ready to trade */}
         <ConnectPrompt isKYCVerified={isKYCVerified} walletAddress={walletAddress} navigate={navigate}/>
 
         <div style={{ display: 'flex', gap: 4, marginBottom: 12 }}>
@@ -397,11 +432,12 @@ function OrderForm({
               />
             )}
 
-            {/* Payment mode — only show if user can actually trade */}
             {canTrade && (
               <div style={{ marginBottom: 10 }}>
                 <div style={{ fontSize: 9, color: '#86efac44', letterSpacing: '.1em', marginBottom: 6 }}>PAY WITH</div>
                 <div style={{ display: 'flex', gap: 6 }}>
+
+                  {/* INR Wallet */}
                   <button
                     onClick={() => setPaymentMode('inr')}
                     style={{
@@ -423,6 +459,25 @@ function OrderForm({
                       </div>
                     )}
                   </button>
+
+                  {/* NEW: Razorpay Direct */}
+                  <button
+                    onClick={() => setPaymentMode('razorpay')}
+                    style={{
+                      flex: 1, padding: '10px 6px', borderRadius: 8,
+                      border: `1px solid ${paymentMode === 'razorpay' ? '#60a5fa55' : '#0f2a1a'}`,
+                      background: paymentMode === 'razorpay' ? '#0a1628' : '#060a07',
+                      cursor: 'pointer', fontFamily: 'DM Mono,monospace',
+                      transition: 'all 0.2s', textAlign: 'center',
+                    }}
+                  >
+                    <div style={{ fontSize: 16, marginBottom: 3 }}>💳</div>
+                    <div style={{ fontSize: 9, color: paymentMode === 'razorpay' ? '#60a5fa' : '#4ade8044', fontWeight: 600, letterSpacing: '.08em' }}>UPI/CARD</div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: '#60a5fa88', marginTop: 3 }}>RAZORPAY</div>
+                    <div style={{ fontSize: 8, color: '#60a5fa44', marginTop: 2 }}>NO CAP</div>
+                  </button>
+
+                  {/* MetaMask ETH */}
                   <button
                     onClick={() => setPaymentMode('eth')}
                     style={{
@@ -457,7 +512,6 @@ function OrderForm({
               </div>
             )}
 
-            {/* Trade summary */}
             {qty > 0 && selected && !qtyOverMax && canTrade && (
               <div style={{ background: '#040706', borderRadius: 6, padding: '9px 11px', marginBottom: 10 }}>
                 <div className="cc-fee-row"><span>Subtotal</span><span>{fmt(n0(tradeTotalInr))}</span></div>
@@ -475,6 +529,11 @@ function OrderForm({
                     <span style={{ color: inrSufficient ? '#22c55e' : '#f87171' }}>
                       ₹{Math.round(tradeNetInr).toLocaleString('en-IN')}
                     </span>
+                  </div>
+                ) : paymentMode === 'razorpay' ? (
+                  <div className="cc-fee-tot">
+                    <span>TOTAL (UPI/CARD)</span>
+                    <span style={{ color: '#60a5fa' }}>₹{Math.round(tradeNetInr).toLocaleString('en-IN')}</span>
                   </div>
                 ) : (
                   <>
@@ -501,7 +560,9 @@ function OrderForm({
                   ? { background: 'linear-gradient(135deg,#1a1a1a,#2a2a2a)', color: '#86efac33' }
                   : paymentMode === 'inr' && !inrSufficient
                     ? { background: 'linear-gradient(135deg,#374151,#4b5563)' }
-                    : {}
+                    : paymentMode === 'razorpay'
+                      ? { background: 'linear-gradient(135deg,#1d4ed8,#1e40af)' }
+                      : {}
               }
             >
               {txPending     ? '⏳ PROCESSING...'
@@ -511,7 +572,9 @@ function OrderForm({
                  ? inrSufficient
                    ? `🇮🇳 BUY ${qty || '—'} · ₹${Math.round(tradeNetInr).toLocaleString('en-IN')}`
                    : '⚠ INSUFFICIENT BALANCE'
-                 : `🦊 BUY ${qty || '—'} CREDITS`
+                 : paymentMode === 'razorpay'
+                   ? `💳 BUY ${qty || '—'} · ₹${Math.round(tradeNetInr).toLocaleString('en-IN')}`
+                   : `🦊 BUY ${qty || '—'} CREDITS`
               }
             </button>
           </>
@@ -594,7 +657,6 @@ export default function CarbonCredits() {
   const navigate = useNavigate();
   const { addNotification, NOTIF_TYPES } = useNotifications();
 
-  // Auth/trade-specific data — may be undefined for unauthed users
   const {
     buyCredit, placeBuyOrder, cancelBuyOrder,
     ammPools, loadAMMPools, ammSwapETHForCredits, ammSwapCreditsForETH,
@@ -603,7 +665,6 @@ export default function CarbonCredits() {
     refreshTradeHistory,
   } = usePortfolio();
 
-  // PUBLIC market data — no auth, fires immediately for everyone
   const {
     listings,
     buyOrders,
@@ -707,8 +768,8 @@ export default function CarbonCredits() {
     .cc-btn-red{background:linear-gradient(135deg,#dc2626,#b91c1c);color:#fff;}
     .cc-bids-head{display:grid;grid-template-columns:60px 1fr 80px 100px 70px 70px;gap:8px;font-size:8px;color:#86efac44;letter-spacing:.12em;padding:0 0 8px;border-bottom:1px solid #0f2a1a;}
     .cc-bids-row{display:grid;grid-template-columns:60px 1fr 80px 100px 70px 70px;gap:8px;font-size:10px;padding:10px 0;border-bottom:1px solid #0f2a1a08;align-items:center;}
-    .cc-hist-head{display:grid;grid-template-columns:1fr 60px 80px 90px 80px 80px;gap:8px;font-size:8px;color:#86efac44;letter-spacing:.12em;padding:0 0 8px;border-bottom:1px solid #0f2a1a;}
-    .cc-hist-row{display:grid;grid-template-columns:1fr 60px 80px 90px 80px 80px;gap:8px;font-size:10px;padding:9px 0;border-bottom:1px solid #0f2a1a08;cursor:pointer;align-items:center;}
+    .cc-hist-head{display:grid;grid-template-columns:1fr 60px 80px 90px 80px 70px 90px;gap:8px;font-size:8px;color:#86efac44;letter-spacing:.12em;padding:0 0 8px;border-bottom:1px solid #0f2a1a;}
+    .cc-hist-row{display:grid;grid-template-columns:1fr 60px 80px 90px 80px 70px 90px;gap:8px;font-size:10px;padding:9px 0;border-bottom:1px solid #0f2a1a08;cursor:pointer;align-items:center;}
     .cc-hist-row:hover{background:#0d2e1f18;}
     .cc-chart-wrap{background:#040706;border-radius:8px;padding:16px;border:1px solid #0f2a1a;margin-bottom:12px;}
     .cc-amm-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
@@ -722,7 +783,9 @@ export default function CarbonCredits() {
     .cc-modal-f{padding:14px 20px;border-top:1px solid #0f2a1a;display:flex;gap:8px;}
     .cc-btn-ok{flex:1;padding:11px;border-radius:7px;border:none;cursor:pointer;font-family:'DM Mono',monospace;font-size:11px;font-weight:500;letter-spacing:.08em;}
     .cc-btn-cn{flex:1;padding:11px;border-radius:7px;border:1px solid #0f2a1a;background:transparent;color:#86efac55;cursor:pointer;font-family:'DM Mono',monospace;font-size:11px;}
-    .cc-toast{position:fixed;bottom:24px;right:24px;z-index:9999;background:#080c0a;border-radius:8px;padding:11px 18px;font-size:11px;font-family:'DM Mono',monospace;letter-spacing:.05em;box-shadow:0 8px 40px rgba(0,0,0,.6);animation:slideIn .3s ease;}
+    .cc-toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);z-index:9999;background:#080c0a;border-radius:10px;padding:16px 28px;font-size:12px;font-family:'DM Mono',monospace;letter-spacing:.04em;box-shadow:0 8px 40px rgba(0,0,0,.9);animation:slideIn .3s ease;min-width:340px;max-width:540px;text-align:center;border-width:1px;border-style:solid;}
+    .cc-toast-error{position:fixed;top:24px;left:50%;transform:translateX(-50%);z-index:9999;background:#1a0707;border:1px solid #f8717166;border-radius:10px;padding:16px 28px;font-size:12px;font-family:'DM Mono',monospace;letter-spacing:.04em;box-shadow:0 8px 40px rgba(0,0,0,.9);animation:slideDown .3s ease;min-width:340px;max-width:540px;text-align:center;color:#f87171;}
+    @keyframes slideDown{from{opacity:0;transform:translateX(-50%) translateY(-12px);}to{opacity:1;transform:translateX(-50%) translateY(0);}}
     .cc-pending{position:fixed;bottom:80px;right:24px;z-index:9999;background:#080c0a;border:1px solid #22c55e33;border-radius:8px;padding:12px 18px;font-size:11px;color:#22c55e;font-family:'DM Mono',monospace;display:flex;align-items:center;gap:10px;}
     .cc-spin{width:12px;height:12px;border:2px solid #22c55e22;border-top-color:#22c55e;border-radius:50%;animation:spin 1s linear infinite;}
     .dot-live{display:inline-block;width:5px;height:5px;border-radius:50%;background:#22c55e;margin-right:5px;animation:livepulse 1.5s infinite;}
@@ -736,7 +799,7 @@ export default function CarbonCredits() {
     @media(max-width:768px){.cc-market-layout{grid-template-columns:1fr;}.cc-trade-layout{grid-template-columns:1fr;}.cc-stats{grid-template-columns:repeat(2,1fr);}.cc-tbl-head>*:nth-child(n+5),.cc-tbl-row>*:nth-child(n+5){display:none;}.cc-amm-grid{grid-template-columns:1fr;}}
   `, []);
 
-  // ── INR balance — only fetch if logged in ─────────────────────
+  // ── INR balance ───────────────────────────────────────────────
   useEffect(() => {
     if (!walletAddress && !isKYCVerified) return;
     const fetchINRBalance = async () => {
@@ -757,7 +820,7 @@ export default function CarbonCredits() {
     } catch {}
   }, []);
 
-  // ── Price histories from public trade history ─────────────────
+  // ── Price histories ───────────────────────────────────────────
   useEffect(() => {
     if (!listings.length) return;
     const h = {};
@@ -815,7 +878,8 @@ export default function CarbonCredits() {
 
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type });
-    setTimeout(() => setToast({ msg: '', type: 'success' }), 4500);
+    const duration = type === 'error' ? 7000 : type === 'info' ? 3000 : 6000;
+    setTimeout(() => setToast({ msg: '', type: 'success' }), duration);
   };
 
   const toggleWatchlist = id =>
@@ -907,13 +971,12 @@ export default function CarbonCredits() {
 
   // ── fetchBatchId ──────────────────────────────────────────────
   const fetchBatchId = async tokenId => {
-  try {
-    const data = await apiFetch(`/api/portfolio/batch-by-token/${tokenId}`);
-    return data?.batchId || null; // keep as UUID string, do NOT parseInt
-  } catch { return null; }
-};
+    try {
+      const data = await apiFetch(`/api/portfolio/batch-by-token/${tokenId}`);
+      return data?.batchId || null;
+    } catch { return null; }
+  };
 
-  // ── recordTrade ───────────────────────────────────────────────
   // ── recordTrade ───────────────────────────────────────────────
   const recordTrade = async ({ txHash, paymentMode, listing, qty, pricePerCreditINR }) => {
     try {
@@ -949,48 +1012,113 @@ export default function CarbonCredits() {
     setConfirmModal({ type: 'buy', listing: selected, qty: +qty, orderMode, tradePrice, tradePriceINR, tradeTotalInr, tradeFeeInr, tradeNetInr, tradeNetEth, paymentMode });
   };
 
-  // ── handleConfirmBuy ──────────────────────────────────────────
+  // ── handleConfirmBuy — 3 paths ────────────────────────────────
   const handleConfirmBuy = async () => {
-  const o = confirmModal;
-  setConfirmModal(null);
-  setTxPending(true);
-  const idempotencyKey = uuidv4();
-  try {
-    if (o.paymentMode === 'inr') {
-      showToast('⏳ Processing trade...', 'info');
-      const tradeData = await tradesAPI.record({
-        batchId:           o.listing.batchId || null,
-        listingId:         o.listing.listingIdOnchain || null,
-        quantity:          parseInt(o.qty),
-        paymentMode:       'inr',
-        txHash:            null,
-        pricePerCreditINR: parseFloat(o.tradePriceINR),
-        idempotencyKey:    idempotencyKey,
-      });
-      if (!tradeData.success) throw Object.assign(new Error(tradeData.error || 'Trade settlement failed'), { isSettlementError: true });
-      if (tradeData.buyerBalance !== undefined) setInrBalance(parseFloat(tradeData.buyerBalance));
-      else await refreshINRBalance();
-      addNotification({ type: NOTIF_TYPES.TRADE, title: 'Buy Executed ✅', message: `${o.qty} × ${o.listing.projectName} — ₹${Math.round(o.tradeNetInr).toLocaleString('en-IN')} from INR wallet` });
-      showToast(`✅ ${o.qty} credits purchased!`);
-      setQty(''); setLimitPrice('');
-      refetchMarket();
-      refreshTradeHistory();
-    } else {
-      showToast('⏳ Confirm in MetaMask...', 'info');
-      const r = await buyCredit(o.listing.listingIdOnchain, o.qty, Number(o.tradeNetEth || 0).toFixed(8));
-      await recordTrade({ txHash: r.txHash, paymentMode: 'eth', listing: o.listing, qty: o.qty, pricePerCreditINR: o.tradePriceINR });
-      addNotification({ type: NOTIF_TYPES.TRADE, title: 'Buy Executed ✅', message: `${o.qty} × ${o.listing.projectName} — ${Number(o.tradeNetEth || 0).toFixed(4)} ETH` });
-      showToast(`✅ ${o.qty} credits purchased!`);
-      setQty(''); setLimitPrice('');
-      refetchMarket();
-      refreshTradeHistory();
-      navigate(`/transaction-status?hash=${r.txHash}`);
-    }
-  } catch (e) {
-    if (e.code === 4001) showToast('❌ Rejected in MetaMask', 'error');
-    else showToast(`❌ ${e.reason || e.message || 'Transaction failed'}`, 'error');
-  } finally { setTxPending(false); }
-};
+    const o = confirmModal;
+    setConfirmModal(null);
+    setTxPending(true);
+    const idempotencyKey = uuidv4();
+    try {
+      // PATH A: INR Wallet
+      if (o.paymentMode === 'inr') {
+        showToast('⏳ Processing trade...', 'info');
+        const tradeData = await tradesAPI.record({
+          batchId:           o.listing.batchId || null,
+          listingId:         o.listing.listingIdOnchain || null,
+          quantity:          parseInt(o.qty),
+          paymentMode:       'inr',
+          txHash:            null,
+          pricePerCreditINR: parseFloat(o.tradePriceINR),
+          idempotencyKey:    idempotencyKey,
+        });
+        if (!tradeData.success) throw Object.assign(new Error(tradeData.error || 'Trade settlement failed'), { isSettlementError: true });
+        if (tradeData.buyerBalance !== undefined) setInrBalance(parseFloat(tradeData.buyerBalance));
+        else await refreshINRBalance();
+        addNotification({ type: NOTIF_TYPES.TRADE, title: 'Buy Executed ✅', message: `${o.qty} × ${o.listing.projectName} — ₹${Math.round(o.tradeNetInr).toLocaleString('en-IN')} from INR wallet` });
+        showToast(`🎉 Congratulations! ${o.qty} credit${o.qty > 1 ? 's' : ''} purchased successfully.
+Invoice sent to your email — check Trade History to download your GST invoice.`);
+        setQty(''); setLimitPrice('');
+        refetchMarket();
+        refreshTradeHistory();
+
+      // PATH B: Razorpay Direct (NEW)
+      } else if (o.paymentMode === 'razorpay') {
+        showToast('⏳ Opening Razorpay...', 'info');
+        const loaded = await loadRazorpay();
+        if (!loaded) throw new Error('Razorpay SDK failed to load. Please try again.');
+
+        const orderData = await tradesAPI.checkoutOrder({
+          batchId:           o.listing.batchId,
+          listingId:         o.listing.listingIdOnchain || null,
+          quantity:          parseInt(o.qty),
+          pricePerCreditINR: parseFloat(o.tradePriceINR),
+        });
+        if (!orderData?.orderId) throw new Error('Failed to create payment order');
+
+        await new Promise((resolve, reject) => {
+          const rzp = new window.Razorpay({
+            key:         orderData.keyId,
+            amount:      orderData.amount,
+            currency:    'INR',
+            name:        'EtherTrack',
+            description: `${o.qty} × ${o.listing.projectName}`,
+            order_id:    orderData.orderId,
+            theme:       { color: '#22c55e' },
+            modal:       { ondismiss: () => reject(new Error('Payment cancelled')) },
+            handler: async (response) => {
+              try {
+                showToast('⏳ Verifying payment...', 'info');
+                const result = await tradesAPI.checkoutVerify({
+                  razorpay_order_id:   response.razorpay_order_id,
+                  razorpay_payment_id: response.razorpay_payment_id,
+                  razorpay_signature:  response.razorpay_signature,
+                  idempotencyKey,
+                });
+                if (!result?.success) throw new Error(result?.error || 'Settlement failed');
+                addNotification({ type: NOTIF_TYPES.TRADE, title: 'Buy Executed ✅', message: `${o.qty} × ${o.listing.projectName} — ₹${Math.round(o.tradeNetInr).toLocaleString('en-IN')} via Razorpay` });
+                showToast(`🎉 Congratulations! ${o.qty} credit${o.qty > 1 ? 's' : ''} purchased successfully.
+Invoice sent to your email — check Trade History to download your GST invoice.`);
+                setQty(''); setLimitPrice('');
+                refetchMarket(); refreshTradeHistory();
+                resolve(result);
+              } catch (e) { reject(e); }
+            },
+          });
+          rzp.on('payment.failed', r => reject(new Error(r.error?.description || 'Payment failed')));
+          rzp.open();
+        });
+
+      // PATH C: ETH on-chain
+      } else {
+        showToast('⏳ Confirm in MetaMask...', 'info');
+        const r = await buyCredit(o.listing.listingIdOnchain, o.qty, Number(o.tradeNetEth || 0).toFixed(8));
+        await recordTrade({ txHash: r.txHash, paymentMode: 'eth', listing: o.listing, qty: o.qty, pricePerCreditINR: o.tradePriceINR });
+        addNotification({ type: NOTIF_TYPES.TRADE, title: 'Buy Executed ✅', message: `${o.qty} × ${o.listing.projectName} — ${Number(o.tradeNetEth || 0).toFixed(4)} ETH` });
+        showToast(`🎉 Trade confirmed on-chain! ${o.qty} credit${o.qty > 1 ? 's' : ''} are now yours.
+Check your email for invoice or visit Trade History to download your GST PDF.`);
+        setQty(''); setLimitPrice('');
+        refetchMarket();
+        refreshTradeHistory();
+        navigate(`/transaction-status?hash=${r.txHash}`);
+      }
+    } catch (e) {
+      if (e.code === 4001 || e.message === 'Payment cancelled') {
+        showToast('❌ Payment cancelled — no charges made.', 'error');
+      } else if (e.message?.toLowerCase().includes('insufficient') || e.message?.toLowerCase().includes('balance')) {
+        showToast('❌ Insufficient balance — please top up your wallet and try again.', 'error');
+      } else if (e.message?.toLowerCase().includes('price') || e.message?.toLowerCase().includes('mismatch')) {
+        showToast('❌ Price changed — please refresh the page and try again.', 'error');
+      } else if (e.message?.toLowerCase().includes('kyc')) {
+        showToast('❌ KYC required — complete your KYC verification to trade.', 'error');
+      } else if (e.message?.toLowerCase().includes('network') || e.message?.toLowerCase().includes('timeout')) {
+        showToast('❌ Network error — please check your connection and try again.', 'error');
+      } else if (e.isSettlementError) {
+        showToast(`❌ Settlement failed: ${e.message}\nPlease contact support if this persists.`, 'error');
+      } else {
+        showToast(`❌ Trade failed: ${e.reason || e.message || 'Unknown error — please try again or contact support.'}`, 'error');
+      }
+    } finally { setTxPending(false); }
+  };
 
   const handlePlaceBid = () => {
     if (!isKYCVerified)                               { showToast('❌ Complete KYC first', 'error'); return; }
@@ -1264,6 +1392,7 @@ export default function CarbonCredits() {
                           <span style={{ color: '#f0fdf4' }}>{t.amount} credits</span>
                           <span style={{ color: '#60a5fa88' }}>{t.priceINR ? fmt(t.priceINR) : `${t.totalEth} ETH`}</span>
                           <span style={{ color: '#86efac44', fontSize: 9 }}>{t.time}</span>
+                          <ChainVerifiedBadge chainStatus={t.chain_status} chainTxHash={t.chain_tx_hash}/>
                         </div>
                       ))
                   }
@@ -1398,7 +1527,7 @@ export default function CarbonCredits() {
                 ? <div style={{ textAlign: 'center', padding: '48px', color: '#86efac33', fontSize: 11 }}>No trades yet.</div>
                 : <>
                     <div className="cc-hist-head">
-                      <span>TX ID</span><span>TYPE</span><span>AMOUNT</span><span>PRICE (INR)</span><span>TIME</span><span>STATUS</span>
+                      <span>TX ID</span><span>TYPE</span><span>AMOUNT</span><span>PRICE (INR)</span><span>TIME</span><span>STATUS</span><span>CHAIN</span>
                     </div>
                     {tradeHistory.map((t, i) => (
                       <div key={i} className="cc-hist-row" onClick={() => t.txHash && navigate(`/transaction-status?hash=${t.txHash}`)}>
@@ -1408,6 +1537,7 @@ export default function CarbonCredits() {
                         <span style={{ color: '#60a5fa88' }}>{t.priceINR ? fmt(t.priceINR) : `${t.totalEth} ETH`}</span>
                         <span style={{ color: '#86efac44', fontSize: 9 }}>{t.time}</span>
                         <span style={{ fontSize: 8, padding: '2px 7px', borderRadius: 3, background: '#0d2e1f', color: '#22c55e', border: '1px solid #16a34a33' }}>{t.status}</span>
+                        <ChainVerifiedBadge chainStatus={t.chain_status} chainTxHash={t.chain_tx_hash}/>
                       </div>
                     ))}
                   </>
@@ -1517,16 +1647,29 @@ export default function CarbonCredits() {
               <button style={{ background: 'none', border: 'none', color: '#86efac44', cursor: 'pointer', fontSize: 16 }} onClick={() => setConfirmModal(null)}>✕</button>
             </div>
             <div className="cc-modal-b" style={{ maxHeight: '70vh', overflowY: 'auto' }}>
-              <div style={{ padding: '10px 14px', borderRadius: 8, marginBottom: 14, background: confirmModal.paymentMode === 'inr' ? '#0d2e1f' : '#1a1200', border: `1px solid ${confirmModal.paymentMode === 'inr' ? '#22c55e33' : '#f59e0b33'}`, display: 'flex', alignItems: 'center', gap: 10 }}>
-                <span style={{ fontSize: 20 }}>{confirmModal.paymentMode === 'inr' ? '🇮🇳' : '🦊'}</span>
+              <div style={{
+                padding: '10px 14px', borderRadius: 8, marginBottom: 14,
+                background: confirmModal.paymentMode === 'inr' ? '#0d2e1f' : confirmModal.paymentMode === 'razorpay' ? '#0a1628' : '#1a1200',
+                border: `1px solid ${confirmModal.paymentMode === 'inr' ? '#22c55e33' : confirmModal.paymentMode === 'razorpay' ? '#60a5fa33' : '#f59e0b33'}`,
+                display: 'flex', alignItems: 'center', gap: 10,
+              }}>
+                <span style={{ fontSize: 20 }}>
+                  {confirmModal.paymentMode === 'inr' ? '🇮🇳' : confirmModal.paymentMode === 'razorpay' ? '💳' : '🦊'}
+                </span>
                 <div>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: confirmModal.paymentMode === 'inr' ? '#22c55e' : '#f59e0b' }}>
-                    {confirmModal.paymentMode === 'inr' ? 'PAYING FROM INR WALLET — ATOMIC SETTLEMENT' : 'PAYING WITH METAMASK (ETH)'}
+                  <div style={{ fontSize: 11, fontWeight: 700, color: confirmModal.paymentMode === 'inr' ? '#22c55e' : confirmModal.paymentMode === 'razorpay' ? '#60a5fa' : '#f59e0b' }}>
+                    {confirmModal.paymentMode === 'inr'
+                      ? 'PAYING FROM INR WALLET — ATOMIC SETTLEMENT'
+                      : confirmModal.paymentMode === 'razorpay'
+                        ? 'PAYING VIA RAZORPAY — UPI / CARD / NETBANKING'
+                        : 'PAYING WITH METAMASK (ETH)'}
                   </div>
                   <div style={{ fontSize: 9, color: '#86efac44', marginTop: 2 }}>
                     {confirmModal.paymentMode === 'inr'
                       ? `₹${inrBalance.toLocaleString('en-IN')} available → ₹${Math.round(confirmModal.tradeNetInr).toLocaleString('en-IN')} will be deducted`
-                      : 'MetaMask will prompt for ETH transaction'
+                      : confirmModal.paymentMode === 'razorpay'
+                        ? 'Razorpay checkout will open. Seller receives funds directly to bank.'
+                        : 'MetaMask will prompt for ETH transaction'
                     }
                   </div>
                 </div>
@@ -1555,6 +1698,8 @@ export default function CarbonCredits() {
               <div className="cc-fee-row"><span>Platform fee (0.5%)</span><span style={{ color: '#facc15' }}>{fmt(n0(confirmModal.tradeFeeInr))}</span></div>
               {confirmModal.paymentMode === 'inr' ? (
                 <div className="cc-fee-tot"><span>TOTAL (INR WALLET)</span><span style={{ color: '#22c55e' }}>₹{Math.round(confirmModal.tradeNetInr).toLocaleString('en-IN')}</span></div>
+              ) : confirmModal.paymentMode === 'razorpay' ? (
+                <div className="cc-fee-tot"><span>TOTAL (RAZORPAY)</span><span style={{ color: '#60a5fa' }}>₹{Math.round(confirmModal.tradeNetInr).toLocaleString('en-IN')}</span></div>
               ) : (
                 <>
                   <div className="cc-fee-row"><span>ETH to send</span><span style={{ color: '#60a5fa88' }}>{Number(confirmModal.tradeNetEth || 0).toFixed(6)} ETH</span></div>
@@ -1566,10 +1711,21 @@ export default function CarbonCredits() {
               <button className="cc-btn-cn" onClick={() => setConfirmModal(null)}>CANCEL</button>
               <button
                 className="cc-btn-ok"
-                style={{ background: confirmModal.paymentMode === 'inr' ? 'linear-gradient(135deg,#16a34a,#15803d)' : 'linear-gradient(135deg,#f59e0b,#d97706)', color: '#fff' }}
+                style={{
+                  background: confirmModal.paymentMode === 'inr'
+                    ? 'linear-gradient(135deg,#16a34a,#15803d)'
+                    : confirmModal.paymentMode === 'razorpay'
+                      ? 'linear-gradient(135deg,#1d4ed8,#1e40af)'
+                      : 'linear-gradient(135deg,#f59e0b,#d97706)',
+                  color: '#fff',
+                }}
                 onClick={handleConfirmBuy}
               >
-                {confirmModal.paymentMode === 'inr' ? '🇮🇳 CONFIRM & PAY →' : '🦊 CONFIRM IN METAMASK →'}
+                {confirmModal.paymentMode === 'inr'
+                  ? '🇮🇳 CONFIRM & PAY →'
+                  : confirmModal.paymentMode === 'razorpay'
+                    ? '💳 OPEN RAZORPAY →'
+                    : '🦊 CONFIRM IN METAMASK →'}
               </button>
             </div>
           </div>
@@ -1718,11 +1874,24 @@ export default function CarbonCredits() {
       )}
 
       {txPending && <div className="cc-pending"><div className="cc-spin"/>Waiting for confirmation...</div>}
-      {toast.msg && (
-        <div className="cc-toast" style={{ borderColor: toast.type === 'error' ? '#f8717144' : toast.type === 'info' ? '#60a5fa44' : '#22c55e44', color: toast.type === 'error' ? '#f87171' : toast.type === 'info' ? '#60a5fa' : '#22c55e' }}>
-          {toast.msg}
+
+      {toast.msg && toast.type === 'error' ? (
+        <div className="cc-toast-error">
+          {toast.msg.split('\n').map((line, i) => (
+            <div key={i} style={{ fontWeight: i === 0 ? 600 : 400, fontSize: i === 0 ? 12 : 10, opacity: i === 0 ? 1 : 0.75, marginBottom: i === 0 && toast.msg.includes('\n') ? 5 : 0 }}>
+              {line}
+            </div>
+          ))}
         </div>
-      )}
+      ) : toast.msg ? (
+        <div className="cc-toast" style={{ borderColor: toast.type === 'info' ? '#60a5fa44' : '#22c55e44', color: toast.type === 'info' ? '#60a5fa' : '#22c55e' }}>
+          {toast.msg.split('\n').map((line, i) => (
+            <div key={i} style={{ fontWeight: i === 0 ? 600 : 400, fontSize: i === 0 ? 13 : 10, opacity: i === 0 ? 1 : 0.7, marginBottom: i === 0 && toast.msg.includes('\n') ? 6 : 0 }}>
+              {line}
+            </div>
+          ))}
+        </div>
+      ) : null}
     </>
   );
 }

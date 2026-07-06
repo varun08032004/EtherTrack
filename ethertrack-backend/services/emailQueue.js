@@ -1,61 +1,41 @@
-// services/emailQueue.js — EtherTrack · Async email queue via BullMQ - 08/06/2026
+// services/emailQueue.js — EtherTrack · In-memory email queue (zero Redis commands)
+// Replaces BullMQ to stay within Upstash free tier on testnet.
+// Retries up to 3x with exponential backoff. Jobs survive process restart
+// via a lightweight JSON file journal (no Redis needed).
 'use strict';
 
-const { Queue, Worker, QueueEvents } = require('bullmq');
-const IORedis    = require('ioredis');
 const nodemailer = require('nodemailer');
 const logger     = require('./logger');
+const fs         = require('fs');
+const path       = require('path');
+const crypto     = require('crypto');
 
-// ── Redis connection for BullMQ ───────────────────────────────────────────────
-const connection = new IORedis(process.env.REDIS_URL || 'redis://localhost:6379', {
-  maxRetriesPerRequest: null, // required by BullMQ
-  tls: process.env.REDIS_URL?.startsWith('rediss://') ? {} : undefined,
-});
-
-connection.on('connect', () => console.log('[emailQueue] ✅ Redis connected'));
-connection.on('error',   (e) => console.warn('[emailQueue] Redis error:', e.message));
+// ── Journal file (survives restarts, no Redis) ────────────────────────────────
+// On production swap this path to a persistent volume, or just remove journaling
+// entirely if you're OK losing in-flight emails on restart (fine for testnet).
+const JOURNAL_PATH = path.join(__dirname, '../data/email-queue.json');
+const USE_JOURNAL  = process.env.EMAIL_QUEUE_JOURNAL !== 'false';
 
 // ── From addresses ────────────────────────────────────────────────────────────
 const SUPPORT_FROM = process.env.SMTP_SUPPORT_FROM || 'support@ethertrack.in';
 const ADMIN_FROM   = process.env.SMTP_ADMIN_FROM   || 'admin@ethertrack.in';
-
-// Templates that go from admin@ethertrack.in
 const ADMIN_TEMPLATES = new Set(['kyc-admin-new']);
-
-// ── Queue definition ──────────────────────────────────────────────────────────
-const EMAIL_QUEUE_NAME = 'ethertrack-emails';
-
-const emailQueue = new Queue(EMAIL_QUEUE_NAME, {
-  connection,
-  defaultJobOptions: {
-    attempts:    3,
-    backoff: { type: 'exponential', delay: 30_000 },
-    removeOnComplete: { count: 500 },
-    removeOnFail:     { count: 200 },
-  },
-});
 
 // ── Nodemailer transport ──────────────────────────────────────────────────────
 const createTransport = () => nodemailer.createTransport({
   host:   process.env.SMTP_HOST,
   port:   parseInt(process.env.SMTP_PORT) || 587,
   secure: process.env.SMTP_SECURE === 'true',
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
+  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
   pool:           true,
-  maxConnections: 5,
+  maxConnections: 3,
   maxMessages:    100,
   rateDelta:      1000,
-  rateLimit:      10,
+  rateLimit:      5,
 });
 
 let transport = null;
-const getTransport = () => {
-  if (!transport) transport = createTransport();
-  return transport;
-};
+const getTransport = () => { if (!transport) transport = createTransport(); return transport; };
 
 // ── HTML email templates ──────────────────────────────────────────────────────
 const TEMPLATES = {
@@ -179,68 +159,185 @@ const TEMPLATES = {
   }),
 };
 
-// ── Enqueue helper ────────────────────────────────────────────────────────────
-const enqueueEmail = async ({ to, subject, template, data }) => {
-  if (!to || !template) throw new Error('enqueueEmail: to and template are required');
-  const jobData = { to, subject, template, data, enqueuedAt: new Date().toISOString() };
-  const job = await emailQueue.add(`email:${template}`, jobData, {
-    jobId: `email-${template}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+// ── In-memory queue ───────────────────────────────────────────────────────────
+// Simple FIFO array. Zero Redis commands. Retries with exponential backoff.
+const queue   = [];   // { id, to, template, data, attempts, nextRetry, enqueuedAt }
+let isRunning = false;
+let workerTimer = null;
+
+const MAX_ATTEMPTS    = 3;
+const BACKOFF_BASE_MS = 30_000;  // 30s, 60s, 120s
+const POLL_INTERVAL_MS = process.env.NODE_ENV === 'production' ? 5_000 : 10_000;
+
+// ── Journal helpers (optional, keeps queue across restarts) ───────────────────
+const ensureDataDir = () => {
+  const dir = path.dirname(JOURNAL_PATH);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+};
+
+const saveJournal = () => {
+  if (!USE_JOURNAL) return;
+  try {
+    ensureDataDir();
+    fs.writeFileSync(JOURNAL_PATH, JSON.stringify(queue, null, 2));
+  } catch (e) {
+    logger.warn({ err: e.message }, 'emailQueue.journal_write_failed');
+  }
+};
+
+const loadJournal = () => {
+  if (!USE_JOURNAL) return;
+  try {
+    if (!fs.existsSync(JOURNAL_PATH)) return;
+    const raw = fs.readFileSync(JOURNAL_PATH, 'utf8');
+    const saved = JSON.parse(raw);
+    // Re-queue pending/failed jobs that haven't exhausted retries
+    for (const job of saved) {
+      if (job.attempts < MAX_ATTEMPTS) {
+        job.nextRetry = Date.now(); // retry immediately on restart
+        queue.push(job);
+      }
+    }
+    if (queue.length > 0) {
+      logger.info({ count: queue.length }, 'emailQueue.journal_restored');
+    }
+    fs.unlinkSync(JOURNAL_PATH); // clear journal; will rewrite on next save
+  } catch (e) {
+    logger.warn({ err: e.message }, 'emailQueue.journal_load_failed');
+  }
+};
+
+// ── Core send logic ───────────────────────────────────────────────────────────
+const sendNow = async (job) => {
+  const tmplFn = TEMPLATES[job.template];
+  if (!tmplFn) throw new Error(`Unknown email template: ${job.template}`);
+
+  const { subject, html } = tmplFn(job.data);
+  const from = ADMIN_TEMPLATES.has(job.template)
+    ? `"EtherTrack Admin" <${ADMIN_FROM}>`
+    : `"EtherTrack" <${SUPPORT_FROM}>`;
+
+  await getTransport().sendMail({
+    from, to: job.to, subject, html,
+    headers: { 'X-Mailer': 'EtherTrack v2', 'X-Job-ID': job.id, 'X-Template': job.template },
   });
-  logger.info({ jobId: job.id, template, to: to.replace(/(.{2}).*(@)/, '$1***$2') }, 'email.enqueued');
+};
+
+// ── Worker loop ───────────────────────────────────────────────────────────────
+const tick = async () => {
+  if (isRunning) return;
+  const now = Date.now();
+
+  // Find jobs ready to process (not currently running, retry time reached)
+  const ready = queue.filter(j => !j.running && j.nextRetry <= now);
+  if (ready.length === 0) return;
+
+  isRunning = true;
+  try {
+    // Process up to 3 at a time (concurrency cap without Redis limiter overhead)
+    const batch = ready.slice(0, 3);
+    await Promise.allSettled(batch.map(async (job) => {
+      job.running = true;
+      job.attempts += 1;
+      try {
+        await sendNow(job);
+        logger.info(
+          { jobId: job.id, template: job.template, attempt: job.attempts },
+          'email.sent'
+        );
+        // Remove from queue on success
+        const idx = queue.indexOf(job);
+        if (idx !== -1) queue.splice(idx, 1);
+      } catch (err) {
+        job.running = false;
+        if (job.attempts >= MAX_ATTEMPTS) {
+          logger.error(
+            { jobId: job.id, template: job.template, attempts: job.attempts, err: err.message },
+            'email.job_failed_permanent'
+          );
+          const idx = queue.indexOf(job);
+          if (idx !== -1) queue.splice(idx, 1); // drop it after max retries
+        } else {
+          const delay = BACKOFF_BASE_MS * Math.pow(2, job.attempts - 1);
+          job.nextRetry = Date.now() + delay;
+          logger.warn(
+            { jobId: job.id, template: job.template, attempt: job.attempts, nextRetryMs: delay },
+            'email.job_retrying'
+          );
+        }
+      }
+    }));
+  } finally {
+    isRunning = false;
+    saveJournal();
+  }
+};
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+/**
+ * Enqueue an email. Same interface as old BullMQ version.
+ * @param {{ to: string, template: string, data: object }} opts
+ * @returns {string} jobId
+ */
+const enqueueEmail = async ({ to, template, data }) => {
+  if (!to || !template) throw new Error('enqueueEmail: to and template are required');
+
+  const job = {
+    id:          `email-${template}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    to,
+    template,
+    data,
+    attempts:    0,
+    nextRetry:   Date.now(), // process immediately
+    enqueuedAt:  new Date().toISOString(),
+    running:     false,
+  };
+
+  queue.push(job);
+  saveJournal();
+  logger.info(
+    { jobId: job.id, template, to: to.replace(/(.{2}).*(@)/, '$1***$2') },
+    'email.enqueued'
+  );
+
+  // Kick the worker immediately instead of waiting for next poll
+  setImmediate(tick);
   return job.id;
 };
 
-// ── Worker ────────────────────────────────────────────────────────────────────
+/**
+ * Start the background worker loop.
+ * Call once at app startup (replaces startEmailWorker + attachQueueMonitoring).
+ */
 const startEmailWorker = () => {
-  const worker = new Worker(
-    EMAIL_QUEUE_NAME,
-    async (job) => {
-      const { to, template, data } = job.data;
-      const tmplFn = TEMPLATES[template];
-      if (!tmplFn) throw new Error(`Unknown email template: ${template}`);
-      const { subject, html } = tmplFn(data);
-
-      const from = ADMIN_TEMPLATES.has(template)
-        ? `"EtherTrack Admin" <${ADMIN_FROM}>`
-        : `"EtherTrack" <${SUPPORT_FROM}>`;
-
-      const t = getTransport();
-      await t.sendMail({
-        from,
-        to,
-        subject,
-        html,
-        headers: {
-          'X-Mailer':   'EtherTrack v2',
-          'X-Job-ID':   job.id,
-          'X-Template': template,
-        },
-      });
-      logger.info({ jobId: job.id, template, attempt: job.attemptsMade + 1 }, 'email.sent');
-    },
-    {
-      connection,
-      concurrency: 5,
-      limiter: { max: 10, duration: 1000 },
-    }
-  );
-
-  worker.on('failed', (job, err) => {
-    logger.error(
-      { jobId: job?.id, template: job?.data?.template, attempt: job?.attemptsMade, err },
-      'email.job_failed'
-    );
-  });
-  worker.on('error', (err) => logger.error({ err }, 'email.worker_error'));
-  logger.info('email.worker_started');
-  return worker;
+  loadJournal(); // restore any jobs from last run
+  workerTimer = setInterval(tick, POLL_INTERVAL_MS);
+  // Ensure timer doesn't block process exit
+  if (workerTimer.unref) workerTimer.unref();
+  logger.info({ pollIntervalMs: POLL_INTERVAL_MS }, 'email.worker_started (in-memory, zero Redis)');
+  return { stop: () => clearInterval(workerTimer) };
 };
 
-// ── Queue monitoring ──────────────────────────────────────────────────────────
+/**
+ * No-op — kept for API compatibility with old code that calls attachQueueMonitoring().
+ */
 const attachQueueMonitoring = () => {
-  const queueEvents = new QueueEvents(EMAIL_QUEUE_NAME, { connection });
-  queueEvents.on('stalled', ({ jobId }) => logger.warn({ jobId }, 'email.job_stalled'));
-  return queueEvents;
+  logger.info('email.monitoring: in-memory queue (no QueueEvents needed)');
+  return { close: () => {} };
 };
 
-module.exports = { enqueueEmail, startEmailWorker, attachQueueMonitoring, emailQueue };
+/**
+ * Expose queue state for admin/debug endpoints.
+ */
+const getQueueStats = () => ({
+  pending:  queue.filter(j => !j.running).length,
+  running:  queue.filter(j =>  j.running).length,
+  total:    queue.length,
+});
+
+// Flush journal on clean shutdown
+process.on('SIGTERM', saveJournal);
+process.on('SIGINT',  saveJournal);
+
+module.exports = { enqueueEmail, startEmailWorker, attachQueueMonitoring, getQueueStats };

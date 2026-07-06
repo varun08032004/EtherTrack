@@ -11,10 +11,11 @@
   },
   "dependencies": {
     "@sentry/node": "^10.53.1",
+    "@supabase/supabase-js": "^2.108.2",
+    "@upstash/redis": "^1.38.0",
     "axios": "^1.6.2",
     "bcrypt": "^6.0.0",
     "bcryptjs": "^2.4.3",
-    "bullmq": "^5.77.6",
     "compression": "^1.8.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
@@ -27,13 +28,13 @@
     "firebase-admin": "^13.10.0",
     "form-data": "^4.0.0",
     "helmet": "^7.1.0",
-    "ioredis": "^5.11.1",
     "joi": "^18.2.1",
     "jsonwebtoken": "^9.0.2",
     "multer": "^1.4.5-lts.1",
     "node-cache": "^5.1.2",
     "node-cron": "^4.2.1",
     "nodemailer": "^8.0.9",
+    "oauth-1.0a": "^2.2.6",
     "pdf-lib": "^1.17.1",
     "pdfkit": "^0.19.1",
     "pg": "^8.11.3",
@@ -47,7 +48,8 @@
     "resend": "^2.0.0",
     "socket.io": "^4.8.3",
     "speakeasy": "^2.0.0",
-    "uuid": "^9.0.0"
+    "uuid": "^9.0.0",
+    "xml2js": "^0.6.2"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"

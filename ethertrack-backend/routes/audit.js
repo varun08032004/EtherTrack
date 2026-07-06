@@ -1,19 +1,7 @@
-// routes/audit.js — GHG Audit Trail, Blockchain-anchored (Sepolia) v2
-// ── Production fixes:
-//    [FIX-ORG-SCOPE]    Profile now scoped to org_id when user belongs to an org
-//    [FIX-DELETE-VER]   DELETE /api/audit/verifiers/:id route added
-//    [FIX-STATEMENTS]   GET/POST /api/audit/statements routes added
-//    [FIX-ROUTE-NAME]   GET /api/audit/logs (plural) added as alias for /log
-//    [FIX-MIGRATION]    Migration SQL provided at bottom
-//    [FIX-INPUT-VALID]  All inputs sanitised server-side before DB/chain write
-// ── Architecture:
-//    PRIMARY  → Sepolia testnet via ethers.js relayer wallet
-//    FALLBACK → Postgres (chain_status = pending, retry available)
-//    HASH CHAIN → SHA-256, server-side, same algorithm as contract
-// ── ENV VARS:
-//    RELAYER_PRIVATE_KEY   — relayer wallet private key
-//    SEPOLIA_RPC_URL       — Alchemy/Infura Sepolia endpoint
-//    AUDIT_CONTRACT_ADDRESS — deployed AuditTrail.sol address
+// routes/audit.js — GHG Audit Trail, Blockchain-anchored (Sepolia) v4
+// [FEAT-LEDGER-CHAIN] Added GET /chain and POST /chain for GHGLedger.jsx
+//                     Uses ghg_ledger_chain table (lightweight per-user chain)
+//                     separate from ghg_audit_log (Sepolia-anchored full trail).
 
 'use strict';
 
@@ -25,17 +13,15 @@ const ethers  = require('ethers');
 const path    = require('path');
 const multer  = require('multer');
 
-// ── Chain config ─────────────────────────────────────────────────────────────
 const CHAIN_CONFIG = {
   name:        'sepolia',
   chainId:     11155111,
-  rpcUrl:      process.env.SEPOLIA_RPC_URL || 'https://rpc.sepolia.org',
+  rpcUrl:      process.env.SEPOLIA_RPC_URL || process.env.ALCHEMY_RPC || 'https://rpc.sepolia.org',
   explorerTx:  'https://sepolia.etherscan.io/tx',
   explorerAddr:'https://sepolia.etherscan.io/address',
   symbol:      'ETH',
 };
 
-// ── AuditTrail.sol ABI ────────────────────────────────────────────────────────
 const AUDIT_ABI = [
   'function logEntry(string companyId, uint16 year, uint8 action, string message, string metaJson, bytes32 entryHash) returns (uint256)',
   'function lockInventory(string companyId, uint16 year)',
@@ -52,7 +38,6 @@ const ACTION_MAP = {
   SIGN:   5, LOCK:   6, IMPORT: 7, COMMENT: 8,
 };
 
-// ── Chain init ────────────────────────────────────────────────────────────────
 let provider   = null;
 let relayer    = null;
 let contract   = null;
@@ -85,19 +70,17 @@ const initChain = () => {
 };
 initChain();
 
-// ── Multer for statement uploads ──────────────────────────────────────────────
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits:  { fileSize: 10 * 1024 * 1024 }, // 10MB
+  limits:  { fileSize: 10 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowed = ['.pdf', '.doc', '.docx', '.xlsx', '.png', '.jpg', '.jpeg'];
     const ext     = path.extname(file.originalname).toLowerCase();
     if (allowed.includes(ext)) cb(null, true);
-    else cb(new Error(`File type ${ext} not allowed. Allowed: ${allowed.join(', ')}`));
+    else cb(new Error(`File type ${ext} not allowed`));
   },
 });
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
 const safeYear = (val, fallback = null) => {
   const n = parseInt(val, 10);
   if (!Number.isFinite(n) || n < 2000 || n > 2100) return fallback;
@@ -115,11 +98,11 @@ const toBytes32 = (hexStr) => {
 
 const parseChainError = (err) => {
   const msg = err?.message || String(err);
-  if (msg.includes('insufficient funds'))  return 'Relayer wallet has insufficient ETH — top up Sepolia faucet';
-  if (msg.includes('nonce too low'))       return 'Transaction nonce conflict — will retry automatically';
+  if (msg.includes('insufficient funds'))  return 'Relayer wallet has insufficient ETH';
+  if (msg.includes('nonce too low'))       return 'Transaction nonce conflict — will retry';
   if (msg.includes('network') || msg.includes('ECONNREFUSED') || msg.includes('timeout'))
-    return `${CHAIN_CONFIG.name} RPC unreachable — check SEPOLIA_RPC_URL`;
-  if (msg.includes('Inventory locked'))    return 'Inventory is locked on-chain — no more entries allowed';
+    return `${CHAIN_CONFIG.name} RPC unreachable`;
+  if (msg.includes('Inventory locked'))    return 'Inventory is locked on-chain';
   return `Chain error: ${msg.slice(0, 120)}`;
 };
 
@@ -132,21 +115,19 @@ const dbErr = (res, context = 'Operation', err = null) => {
   });
 };
 
-// ── [FIX-ORG-SCOPE] Resolve org or user scope ─────────────────────────────────
 const resolveScope = async (userId) => {
   const { rows } = await query(
     `SELECT org_id FROM users WHERE id = $1 LIMIT 1`,
     [userId]
   );
-  const orgId    = rows[0]?.org_id || null;
-  const scopeId  = orgId || userId;
+  const orgId   = rows[0]?.org_id || null;
+  const scopeId = orgId || userId;
   return { orgId, scopeId };
 };
 
-// ── Get previous hash for chain linking ───────────────────────────────────────
 const getPrevHash = async (scopeId, year) => {
   const { rows } = await query(
-    `SELECT hash FROM audit_log
+    `SELECT hash FROM ghg_audit_log
      WHERE scope_id = $1 AND year = $2
      ORDER BY created_at DESC LIMIT 1`,
     [scopeId, year]
@@ -154,7 +135,6 @@ const getPrevHash = async (scopeId, year) => {
   return rows[0]?.hash || '0'.repeat(64);
 };
 
-// ── Core: write entry to chain + Postgres ─────────────────────────────────────
 const insertAuditEntry = async (userId, year, action, message, meta = {}) => {
   const { scopeId } = await resolveScope(userId);
   const prevHash    = await getPrevHash(scopeId, year);
@@ -167,7 +147,6 @@ const insertAuditEntry = async (userId, year, action, message, meta = {}) => {
   let chainStatus = 'pending';
   let chainError  = null;
 
-  // 1. Write to blockchain
   if (chainReady) {
     try {
       const actionCode = ACTION_MAP[action] || ACTION_MAP.COMMENT;
@@ -191,9 +170,8 @@ const insertAuditEntry = async (userId, year, action, message, meta = {}) => {
     }
   }
 
-  // 2. Always write to Postgres
   const { rows } = await query(
-    `INSERT INTO audit_log
+    `INSERT INTO ghg_audit_log
        (user_id, scope_id, year, action, message, meta, hash, prev_hash, created_at,
         chain_status, tx_hash, block_number, gas_used, chain_error, chain_name)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
@@ -213,9 +191,7 @@ const insertAuditEntry = async (userId, year, action, message, meta = {}) => {
   return entry;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /api/audit/log  (and /api/audit/logs alias)
-// ─────────────────────────────────────────────────────────────────────────────
+// ── GET /api/audit/log (and /logs alias) ─────────────────────────────────
 const getLogHandler = async (req, res) => {
   const year = safeYear(req.query.year, new Date().getFullYear());
   if (req.query.year !== undefined && safeYear(req.query.year) === null)
@@ -228,7 +204,7 @@ const getLogHandler = async (req, res) => {
       query(
         `SELECT id, year, action, message, meta, hash, prev_hash, created_at,
                 chain_status, tx_hash, block_number, gas_used, chain_error, chain_name
-         FROM audit_log
+         FROM ghg_audit_log
          WHERE scope_id = $1 AND year = $2
          ORDER BY created_at DESC`,
         [scopeId, year]
@@ -250,8 +226,8 @@ const getLogHandler = async (req, res) => {
       entries,
       count:        entries.length,
       locked:       lockRow.rows.length > 0,
-      lockTxHash:   lockTx  || null,
-      lockExplorer: lockTx  ? `${CHAIN_CONFIG.explorerTx}/${lockTx}` : null,
+      lockTxHash:   lockTx || null,
+      lockExplorer: lockTx ? `${CHAIN_CONFIG.explorerTx}/${lockTx}` : null,
       year,
       chain: {
         name:     CHAIN_CONFIG.name,
@@ -267,11 +243,9 @@ const getLogHandler = async (req, res) => {
 };
 
 router.get('/log',  authenticate, getLogHandler);
-router.get('/logs', authenticate, getLogHandler); // [FIX-ROUTE-NAME] alias
+router.get('/logs', authenticate, getLogHandler);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /api/audit/log — manual comment
-// ─────────────────────────────────────────────────────────────────────────────
+// ── POST /api/audit/log ───────────────────────────────────────────────────
 router.post('/log', authenticate, async (req, res) => {
   const year    = safeYear(req.body.year, new Date().getFullYear());
   const action  = req.body.action  || 'COMMENT';
@@ -288,9 +262,9 @@ router.post('/log', authenticate, async (req, res) => {
   try {
     const entry = await insertAuditEntry(req.user.id, year, action, message, meta);
     res.json({
-      message:    'Entry logged',
+      message:     'Entry logged',
       entry,
-      onChain:    entry.chain_status === 'confirmed',
+      onChain:     entry.chain_status === 'confirmed',
       explorerUrl: entry.explorerUrl || null,
     });
   } catch (err) {
@@ -298,14 +272,140 @@ router.post('/log', authenticate, async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /api/audit/retry-chain/:id
-// ─────────────────────────────────────────────────────────────────────────────
+// ── GET /api/audit/chain ──────────────────────────────────────────────────
+// Lightweight per-user ledger chain (ghg_ledger_chain table).
+// Used by GHGLedger.jsx Chain Log panel.
+router.get('/chain', authenticate, async (req, res) => {
+  const year  = safeYear(req.query.year, new Date().getFullYear());
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+
+  if (req.query.year !== undefined && year === null)
+    return res.status(400).json({ error: 'Invalid year — must be 2000–2100' });
+
+  try {
+    const { scopeId } = await resolveScope(req.user.id);
+
+    const { rows } = await query(
+      `SELECT id, action, record_count, record_ids, activities,
+              co2e_delta, actor, hash, prev_hash, created_at
+       FROM ghg_ledger_chain
+       WHERE scope_id = $1 AND year = $2
+       ORDER BY created_at DESC
+       LIMIT $3`,
+      [scopeId, year, limit]
+    );
+
+    const entries = rows.map(r => ({
+      id:          r.id,
+      action:      r.action,
+      recordCount: r.record_count,
+      recordIds:   r.record_ids   || [],
+      activities:  r.activities   || [],
+      co2eDelta:   parseFloat(r.co2e_delta || 0),
+      actor:       r.actor,
+      hash:        r.hash,
+      prevHash:    r.prev_hash,
+      timestamp:   r.created_at,
+    }));
+
+    res.json({ entries, count: entries.length, year });
+  } catch (err) {
+    dbErr(res, 'Fetch ledger chain', err);
+  }
+});
+
+// ── POST /api/audit/chain ─────────────────────────────────────────────────
+// Writes a new entry to ghg_ledger_chain after every add/delete in GHGLedger.
+router.post('/chain', authenticate, async (req, res) => {
+  const { action, year: yearRaw, actor, recordIds, activities, co2eDelta, recordCount } = req.body;
+
+  const year = safeYear(yearRaw, new Date().getFullYear());
+
+  if (!['add', 'delete'].includes(action))
+    return res.status(400).json({ error: "action must be 'add' or 'delete'" });
+  if (yearRaw !== undefined && year === null)
+    return res.status(400).json({ error: 'Invalid year — must be 2000–2100' });
+  if (!Array.isArray(recordIds) || recordIds.length === 0)
+    return res.status(400).json({ error: 'recordIds must be a non-empty array' });
+
+  const cleanActor      = sanitiseText(actor || req.user.email || String(req.user.id), 200);
+  const cleanActivities = (Array.isArray(activities) ? activities : []).map(a => sanitiseText(a, 200));
+  const cleanCo2e       = parseFloat(co2eDelta) || 0;
+  const cleanCount      = parseInt(recordCount, 10) || recordIds.length;
+  const ts              = new Date().toISOString();
+
+  try {
+    const { scopeId } = await resolveScope(req.user.id);
+
+    // Get prev hash for chain linking
+    const { rows: prev } = await query(
+      `SELECT hash FROM ghg_ledger_chain
+       WHERE scope_id = $1 AND year = $2
+       ORDER BY created_at DESC LIMIT 1`,
+      [scopeId, year]
+    );
+    const prevHash = prev[0]?.hash || '0'.repeat(64);
+
+    // SHA-256 hash this entry
+    const hash = sha256(JSON.stringify({
+      userId: req.user.id, scopeId, year, action,
+      recordIds, activities: cleanActivities,
+      co2eDelta: cleanCo2e, actor: cleanActor, ts, prevHash,
+    }));
+
+    const { rows } = await query(
+      `INSERT INTO ghg_ledger_chain
+         (user_id, scope_id, year, action, record_count, record_ids,
+          activities, co2e_delta, actor, hash, prev_hash, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       RETURNING *`,
+      [
+        req.user.id, scopeId, year, action,
+        cleanCount, recordIds, cleanActivities,
+        cleanCo2e, cleanActor, hash, prevHash, ts,
+      ]
+    );
+
+    const entry = rows[0];
+
+    // Also write to full ghg_audit_log (non-blocking — fires and forgets)
+    insertAuditEntry(
+      req.user.id, year,
+      action === 'add' ? 'CREATE' : 'DELETE',
+      action === 'add'
+        ? `${cleanCount} emission record${cleanCount !== 1 ? 's' : ''} added — ${cleanCo2e.toFixed(3)} tCO₂e`
+        : `${cleanCount} emission record${cleanCount !== 1 ? 's' : ''} deleted — ${cleanCo2e.toFixed(3)} tCO₂e removed`,
+      { record_ids: recordIds, activities: cleanActivities, co2e_delta: cleanCo2e, ledger_hash: hash }
+    ).catch(err => {
+      console.warn('[Audit] Full audit log write failed after chain entry:', err?.message);
+    });
+
+    res.status(201).json({
+      message: 'Chain entry recorded',
+      entry: {
+        id:          entry.id,
+        action:      entry.action,
+        recordCount: entry.record_count,
+        recordIds:   entry.record_ids   || [],
+        activities:  entry.activities   || [],
+        co2eDelta:   parseFloat(entry.co2e_delta || 0),
+        actor:       entry.actor,
+        hash:        entry.hash,
+        prevHash:    entry.prev_hash,
+        timestamp:   entry.created_at,
+      },
+    });
+  } catch (err) {
+    dbErr(res, 'Write ledger chain entry', err);
+  }
+});
+
+// ── POST /api/audit/retry-chain/:id ──────────────────────────────────────
 router.post('/retry-chain/:id', authenticate, async (req, res) => {
   try {
     const { scopeId } = await resolveScope(req.user.id);
     const { rows }    = await query(
-      `SELECT * FROM audit_log WHERE id = $1 AND scope_id = $2`,
+      `SELECT * FROM ghg_audit_log WHERE id = $1 AND scope_id = $2`,
       [req.params.id, scopeId]
     );
     if (!rows.length) return res.status(404).json({ error: 'Entry not found' });
@@ -314,7 +414,7 @@ router.post('/retry-chain/:id', authenticate, async (req, res) => {
     if (entry.chain_status === 'confirmed')
       return res.json({ message: 'Already confirmed on-chain', entry });
     if (!chainReady)
-      return res.status(503).json({ error: 'Blockchain not available — check RELAYER_PRIVATE_KEY and SEPOLIA_RPC_URL' });
+      return res.status(503).json({ error: 'Blockchain not available' });
 
     const meta       = typeof entry.meta === 'string' ? JSON.parse(entry.meta) : (entry.meta || {});
     const actionCode = ACTION_MAP[entry.action] || ACTION_MAP.COMMENT;
@@ -330,7 +430,7 @@ router.post('/retry-chain/:id', authenticate, async (req, res) => {
     const receipt = await tx.wait(1);
 
     const { rows: updated } = await query(
-      `UPDATE audit_log SET
+      `UPDATE ghg_audit_log SET
          chain_status = 'confirmed',
          tx_hash      = $3,
          block_number = $4,
@@ -350,16 +450,14 @@ router.post('/retry-chain/:id', authenticate, async (req, res) => {
   } catch (err) {
     const chainError = parseChainError(err);
     await query(
-      `UPDATE audit_log SET chain_error = $2 WHERE id = $1`,
+      `UPDATE ghg_audit_log SET chain_error = $2 WHERE id = $1`,
       [req.params.id, chainError]
     ).catch(() => {});
     dbErr(res, chainError, err);
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /api/audit/verifiers?year=2025
-// ─────────────────────────────────────────────────────────────────────────────
+// ── GET /api/audit/verifiers ──────────────────────────────────────────────
 router.get('/verifiers', authenticate, async (req, res) => {
   const year = safeYear(req.query.year, new Date().getFullYear());
   if (req.query.year !== undefined && safeYear(req.query.year) === null)
@@ -382,21 +480,19 @@ router.get('/verifiers', authenticate, async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /api/audit/verifiers
-// ─────────────────────────────────────────────────────────────────────────────
+// ── POST /api/audit/verifiers ─────────────────────────────────────────────
 router.post('/verifiers', authenticate, async (req, res) => {
   const year = safeYear(req.body.year, new Date().getFullYear());
   if (req.body.year !== undefined && safeYear(req.body.year) === null)
     return res.status(400).json({ error: 'Invalid year — must be 2000–2100' });
 
-  const verifier_name    = sanitiseText(req.body.verifier_name    || '', 200);
-  const verifier_org     = sanitiseText(req.body.verifier_org     || '', 200);
-  const verifier_email   = sanitiseText(req.body.verifier_email   || '', 200).toLowerCase();
-  const assurance_level  = req.body.assurance_level || 'limited';
-  const scope            = sanitiseText(req.body.scope            || '1+2+3', 20);
-  const engagement_ref   = sanitiseText(req.body.engagement_ref   || '', 100);
-  const notes            = sanitiseText(req.body.notes            || '', 500);
+  const verifier_name   = sanitiseText(req.body.verifier_name   || '', 200);
+  const verifier_org    = sanitiseText(req.body.verifier_org    || '', 200);
+  const verifier_email  = sanitiseText(req.body.verifier_email  || '', 200).toLowerCase();
+  const assurance_level = req.body.assurance_level || 'limited';
+  const scope           = sanitiseText(req.body.scope           || '1+2+3', 20);
+  const engagement_ref  = sanitiseText(req.body.engagement_ref  || '', 100);
+  const notes           = sanitiseText(req.body.notes           || '', 500);
 
   if (!verifier_name || !verifier_email)
     return res.status(400).json({ error: 'verifier_name and verifier_email are required' });
@@ -407,7 +503,6 @@ router.post('/verifiers', authenticate, async (req, res) => {
 
   try {
     const { scopeId } = await resolveScope(req.user.id);
-
     const { rows } = await query(
       `INSERT INTO audit_verifiers
          (user_id, scope_id, year, verifier_name, verifier_org, verifier_email,
@@ -417,8 +512,7 @@ router.post('/verifiers', authenticate, async (req, res) => {
       [
         req.user.id, scopeId, year,
         verifier_name, verifier_org || null, verifier_email,
-        assurance_level, scope,
-        engagement_ref || null, notes || null,
+        assurance_level, scope, engagement_ref || null, notes || null,
       ]
     );
 
@@ -440,9 +534,7 @@ router.post('/verifiers', authenticate, async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PATCH /api/audit/verifiers/:id
-// ─────────────────────────────────────────────────────────────────────────────
+// ── PATCH /api/audit/verifiers/:id ───────────────────────────────────────
 router.patch('/verifiers/:id', authenticate, async (req, res) => {
   const { status, verification_ref, verification_date } = req.body;
 
@@ -463,9 +555,9 @@ router.patch('/verifiers/:id', authenticate, async (req, res) => {
        RETURNING *`,
       [
         req.params.id, scopeId,
-        status             || null,
-        verification_ref   ? sanitiseText(verification_ref, 100) : null,
-        verification_date  || null,
+        status            || null,
+        verification_ref  ? sanitiseText(verification_ref, 100) : null,
+        verification_date || null,
       ]
     );
 
@@ -492,9 +584,7 @@ router.patch('/verifiers/:id', authenticate, async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// [FIX-DELETE-VER] DELETE /api/audit/verifiers/:id
-// ─────────────────────────────────────────────────────────────────────────────
+// ── DELETE /api/audit/verifiers/:id ──────────────────────────────────────
 router.delete('/verifiers/:id', authenticate, async (req, res) => {
   try {
     const { scopeId } = await resolveScope(req.user.id);
@@ -506,7 +596,6 @@ router.delete('/verifiers/:id', authenticate, async (req, res) => {
     );
     if (!rows.length) return res.status(404).json({ error: 'Verifier not found' });
 
-    // Log removal to audit trail
     await insertAuditEntry(
       req.user.id, rows[0].year, 'DELETE',
       `Verifier removed: ${rows[0].verifier_name}`,
@@ -519,9 +608,7 @@ router.delete('/verifiers/:id', authenticate, async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /api/audit/lock
-// ─────────────────────────────────────────────────────────────────────────────
+// ── POST /api/audit/lock ──────────────────────────────────────────────────
 router.post('/lock', authenticate, async (req, res) => {
   const year = safeYear(req.body.year, new Date().getFullYear());
   if (req.body.year !== undefined && safeYear(req.body.year) === null)
@@ -533,12 +620,11 @@ router.post('/lock', authenticate, async (req, res) => {
 
   if (chainReady) {
     try {
-      const { scopeId }  = await resolveScope(req.user.id);
-      const tx           = await contract.lockInventory(String(scopeId), year, { gasLimit: 100_000 });
-      const receipt      = await tx.wait(1);
-      chainTxHash        = receipt.hash;
-      chainExplorer      = `${CHAIN_CONFIG.explorerTx}/${chainTxHash}`;
-      console.log(`[Audit] Inventory locked on-chain | tx: ${chainTxHash}`);
+      const { scopeId } = await resolveScope(req.user.id);
+      const tx          = await contract.lockInventory(String(scopeId), year, { gasLimit: 100_000 });
+      const receipt     = await tx.wait(1);
+      chainTxHash       = receipt.hash;
+      chainExplorer     = `${CHAIN_CONFIG.explorerTx}/${chainTxHash}`;
     } catch (err) {
       chainLockError = parseChainError(err);
       console.error(`[Audit] Chain lock failed: ${chainLockError}`);
@@ -575,9 +661,7 @@ router.post('/lock', authenticate, async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /api/audit/verify-chain?year=2025
-// ─────────────────────────────────────────────────────────────────────────────
+// ── GET /api/audit/verify-chain ───────────────────────────────────────────
 router.get('/verify-chain', authenticate, async (req, res) => {
   const year = safeYear(req.query.year, new Date().getFullYear());
   if (req.query.year !== undefined && safeYear(req.query.year) === null)
@@ -588,7 +672,7 @@ router.get('/verify-chain', authenticate, async (req, res) => {
 
     const { rows } = await query(
       `SELECT id, hash, prev_hash, action, created_at, chain_status, tx_hash
-       FROM audit_log
+       FROM ghg_audit_log
        WHERE scope_id = $1 AND year = $2
        ORDER BY created_at ASC`,
       [scopeId, year]
@@ -639,9 +723,7 @@ router.get('/verify-chain', authenticate, async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /api/audit/chain-status
-// ─────────────────────────────────────────────────────────────────────────────
+// ── GET /api/audit/chain-status ───────────────────────────────────────────
 router.get('/chain-status', authenticate, async (req, res) => {
   if (!chainReady) {
     return res.json({
@@ -649,7 +731,7 @@ router.get('/chain-status', authenticate, async (req, res) => {
       reason: !process.env.RELAYER_PRIVATE_KEY
         ? 'RELAYER_PRIVATE_KEY not configured'
         : !process.env.AUDIT_CONTRACT_ADDRESS
-        ? 'AUDIT_CONTRACT_ADDRESS not configured — deploy contract first'
+        ? 'AUDIT_CONTRACT_ADDRESS not configured'
         : 'Chain initialization failed',
       chain: CHAIN_CONFIG.name,
     });
@@ -678,9 +760,7 @@ router.get('/chain-status', authenticate, async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// [FIX-STATEMENTS] GET /api/audit/statements?year=2025
-// ─────────────────────────────────────────────────────────────────────────────
+// ── GET /api/audit/statements ─────────────────────────────────────────────
 router.get('/statements', authenticate, async (req, res) => {
   const year = safeYear(req.query.year, new Date().getFullYear());
   if (req.query.year !== undefined && safeYear(req.query.year) === null)
@@ -702,9 +782,7 @@ router.get('/statements', authenticate, async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// [FIX-STATEMENTS] POST /api/audit/statements — upload verification statement
-// ─────────────────────────────────────────────────────────────────────────────
+// ── POST /api/audit/statements ────────────────────────────────────────────
 router.post('/statements',
   authenticate,
   (req, res, next) => {
@@ -726,7 +804,6 @@ router.post('/statements',
     try {
       const { scopeId } = await resolveScope(req.user.id);
 
-      // Store file bytes in DB (or replace with S3 upload in production)
       const { rows } = await query(
         `INSERT INTO audit_statements
            (user_id, scope_id, year, filename, file_data, file_size, mime_type,
@@ -745,7 +822,6 @@ router.post('/statements',
         ]
       );
 
-      // Log to audit trail
       await insertAuditEntry(
         req.user.id, year, 'SIGN',
         `Verification statement uploaded: ${req.file.originalname}${verifier_name ? ` by ${verifier_name}` : ''}`,
@@ -759,103 +835,6 @@ router.post('/statements',
   }
 );
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Export insertAuditEntry for use in emissions.js and other routes
-// ─────────────────────────────────────────────────────────────────────────────
 module.exports = router;
 module.exports.insertAuditEntry = insertAuditEntry;
-
-/*
-── MIGRATION SQL ──────────────────────────────────────────────────────────────
-
--- 1. audit_log table
-CREATE TABLE IF NOT EXISTS audit_log (
-  id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id      UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  scope_id     TEXT        NOT NULL,  -- org_id or user_id (UUID as text)
-  year         INTEGER     NOT NULL,
-  action       VARCHAR(20) NOT NULL,
-  message      TEXT        NOT NULL,
-  meta         JSONB       DEFAULT '{}',
-  hash         VARCHAR(64) NOT NULL,
-  prev_hash    VARCHAR(64) NOT NULL,
-  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  chain_status VARCHAR(20) DEFAULT 'pending',
-  tx_hash      VARCHAR(66),
-  block_number BIGINT,
-  gas_used     VARCHAR(30),
-  chain_error  TEXT,
-  chain_name   VARCHAR(20) DEFAULT 'sepolia'
-);
-CREATE INDEX IF NOT EXISTS audit_log_scope_year_idx ON audit_log (scope_id, year);
-CREATE INDEX IF NOT EXISTS audit_log_user_idx        ON audit_log (user_id);
-
--- 2. audit_verifiers table
-CREATE TABLE IF NOT EXISTS audit_verifiers (
-  id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id           UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  scope_id          TEXT        NOT NULL,
-  year              INTEGER     NOT NULL,
-  verifier_name     VARCHAR(200) NOT NULL,
-  verifier_org      VARCHAR(200),
-  verifier_email    VARCHAR(200) NOT NULL,
-  assurance_level   VARCHAR(20)  NOT NULL DEFAULT 'limited',
-  scope             VARCHAR(20)  NOT NULL DEFAULT '1+2+3',
-  engagement_ref    VARCHAR(100),
-  notes             VARCHAR(500),
-  status            VARCHAR(20)  NOT NULL DEFAULT 'pending',
-  verification_ref  VARCHAR(100),
-  verification_date DATE,
-  verified_at       TIMESTAMPTZ,
-  invited_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS audit_verifiers_scope_year_idx ON audit_verifiers (scope_id, year);
-
--- 3. inventory_locks table
-CREATE TABLE IF NOT EXISTS inventory_locks (
-  id        UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id   UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  scope_id  TEXT        NOT NULL,
-  year      INTEGER     NOT NULL,
-  locked_by VARCHAR(200),
-  tx_hash   VARCHAR(66),
-  locked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  CONSTRAINT inventory_locks_scope_year_key UNIQUE (scope_id, year)
-);
-
--- 4. audit_statements table
-CREATE TABLE IF NOT EXISTS audit_statements (
-  id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id       UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  scope_id      TEXT         NOT NULL,
-  year          INTEGER      NOT NULL,
-  filename      VARCHAR(255) NOT NULL,
-  file_data     BYTEA,          -- or store S3 URL instead
-  file_size     INTEGER,
-  mime_type     VARCHAR(100),
-  description   VARCHAR(500),
-  verifier_name VARCHAR(200),
-  uploaded_by   VARCHAR(200),
-  uploaded_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS audit_statements_scope_year_idx ON audit_statements (scope_id, year);
-
--- 5. Migration if upgrading from old schema with user_id instead of scope_id:
-ALTER TABLE audit_log         ADD COLUMN IF NOT EXISTS scope_id TEXT;
-ALTER TABLE audit_verifiers   ADD COLUMN IF NOT EXISTS scope_id TEXT;
-ALTER TABLE inventory_locks   ADD COLUMN IF NOT EXISTS scope_id TEXT;
-
-UPDATE audit_log       SET scope_id = user_id::text WHERE scope_id IS NULL;
-UPDATE audit_verifiers SET scope_id = user_id::text WHERE scope_id IS NULL;
-UPDATE inventory_locks SET scope_id = user_id::text WHERE scope_id IS NULL;
-
-ALTER TABLE audit_log       ALTER COLUMN scope_id SET NOT NULL;
-ALTER TABLE audit_verifiers ALTER COLUMN scope_id SET NOT NULL;
-ALTER TABLE inventory_locks ALTER COLUMN scope_id SET NOT NULL;
-
--- Drop old user_id unique constraint on inventory_locks and add scope_id one:
-ALTER TABLE inventory_locks DROP CONSTRAINT IF EXISTS inventory_locks_user_id_year_key;
-ALTER TABLE inventory_locks ADD CONSTRAINT inventory_locks_scope_year_key UNIQUE (scope_id, year);
-
-──────────────────────────────────────────────────────────────────────────────
-*/
+module.exports.resolveScope     = resolveScope;

@@ -1,74 +1,40 @@
 /**
  * Dashboard.jsx — EtherTrack v6 PRODUCTION
- * ─────────────────────────────────────────────────────────────────────────────
  *
- * Architecture:
- *   Dashboard (error boundary wrapper)
- *     └─ DashboardInner (orchestrator — reads hooks, passes slices to cards)
- *          ├─ useEthRate()          — ETH/INR rate, circuit breaker, stale detection
- *          ├─ useWalletBalance()    — MetaMask + fallback RPC
- *          ├─ useDashboardData()    — all API data, retry, polling
- *          ├─ useRefreshCooldown()  — button countdown, no cascade re-renders
- *          │
- *          ├─ Ticker               — CSS animation, IntersectionObserver, no RAF
- *          ├─ SessionExpiredModal  — focus trap, createPortal
- *          ├─ KYCSuccessBanner / KYCExpiryWarning
- *          ├─ PageSkeleton         — shown while critical data loads
- *          │
- *          └─ [12 card components] — each memo-wrapped, receives own state slice only
- *               PortfolioValueCard · INRWalletCard · ETHWalletCard · PlatformTradesCard
- *               MarketCard · QuickActionsCard · EmissionOffsetCard
- *               PortfolioBreakdownCard · NetworkStatusCard · NewsCard · RecentTradesCard
- *
- * All critical audit fixes applied:
- *   ✅ No hardcoded ethRate fallback — null until fetched, skeleton shown
- *   ✅ CSS Modules — no 'unsafe-inline' CSP requirement
- *   ✅ DashboardInner split into hooks + card components (was 900-line God Component)
- *   ✅ SessionExpiredModal has focus trap + proper aria attributes
- *   ✅ Circuit breaker on all external API families
- *   ✅ Exponential backoff with jitter via withRetry()
- *   ✅ Fallback RPC chain: MetaMask → Alchemy → Infura → public
- *   ✅ safeOpen() validates against allowlisted news domains (not just https:)
- *   ✅ RAF ticker replaced with CSS animation + IntersectionObserver
- *   ✅ tickerItems: 2 copies (CSS) instead of 3 (DOM), stable id-based keys
- *   ✅ Priority loading: critical data first (stats/trades/inr), secondary after
- *   ✅ Health check polls every 15 s (was 60 s)
- *   ✅ NETWORK_DISPLAY_NAME / CONTRACT_DISPLAY_NAME from env (not hardcoded)
- *   ✅ fmt() guards against NaN/undefined
- *   ✅ Financial calculations extracted to pure testable functions
- *   ✅ console.warn → Sentry for hostname-blocked wallet connect
- *   ✅ Refresh cooldown initialises from localStorage (survives F5)
- *   ✅ All state scoped — a rate tick doesn't re-render the news list
+ * [FEAT-ESG-SUMMARY]        EmissionOffsetCard receives esgData, esgError, esgTs
+ * [FIX-PORTFOLIO-BREAKDOWN] PortfolioBreakdownCard now receives allActiveCredits
+ *                           (myCredits + myBoughtCredits) instead of only myCredits.
+ *                           Bought credits were silently excluded because activeCredits
+ *                           was derived from myCredits alone.
  */
 
 import React, { useContext, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-import { AuthContext }           from '../../App';                          // FIX: was ../App
-import { usePortfolio }          from '../../context/PortfolioContext';     // FIX: was ../context/PortfolioContext
+import { AuthContext }           from '../../App';
+import { usePortfolio }          from '../../context/PortfolioContext';
 
-import { DashboardErrorBoundary }   from './DashboardErrorBoundary';        // FIX: was ./dashboard/DashboardErrorBoundary
+import { DashboardErrorBoundary }   from './DashboardErrorBoundary';
 import { SessionExpiredModal,
          KYCSuccessBanner,
          KYCExpiryWarning,
          PageSkeleton,
-         Clock }                    from './DashboardPrimitives';           // FIX: was ./dashboard/DashboardPrimitives (merged Clock import too)
+         Clock }                    from './DashboardPrimitives';
 import {
   PortfolioValueCard, INRWalletCard, ETHWalletCard, PlatformTradesCard,
   MarketCard, QuickActionsCard, EmissionOffsetCard,
   PortfolioBreakdownCard, NetworkStatusCard, NewsCard, RecentTradesCard,
-} from './DashboardCards';                                                  // FIX: was ./dashboard/DashboardCards
-import { Ticker }                   from './Ticker';                        // FIX: was ./dashboard/Ticker
+} from './DashboardCards';
+import { Ticker }                   from './Ticker';
 
-import { useEthRate }           from '../../hooks/useEthRate';              // FIX: was ../hooks/useEthRate
-import { useWalletBalance }     from '../../hooks/useWalletBalance';        // FIX: was ../hooks/useWalletBalance
-import { useDashboardData }     from '../../hooks/useDashboardData';        // FIX: was ../hooks/useDashboardData
-import { useRefreshCooldown }   from '../../hooks/useRefreshCooldown';      // FIX: was ../hooks/useRefreshCooldown
+import { useEthRate }           from '../../hooks/useEthRate';
+import { useWalletBalance }     from '../../hooks/useWalletBalance';
+import { useDashboardData }     from '../../hooks/useDashboardData';
+import { useRefreshCooldown }   from '../../hooks/useRefreshCooldown';
 
-import { calcPnL, getGreeting } from '../../utils/dashboard';              // FIX: was ../utils/dashboard
-import s from './Dashboard.module.css';                                     // FIX: was ./dashboard/Dashboard.module.css
+import { calcPnL, getGreeting } from '../../utils/dashboard';
+import s from './Dashboard.module.css';
 
-// ── Status region — announces refresh state to screen readers ──────────────
 function RefreshStatus({ isRefreshing }) {
   return (
     <div aria-live="polite" aria-atomic="true" className={s.srOnly}>
@@ -77,45 +43,51 @@ function RefreshStatus({ isRefreshing }) {
   );
 }
 
-// ── DashboardInner ─────────────────────────────────────────────────────────
 function DashboardInner() {
   const { user, dbUser, kycCompleted } = useContext(AuthContext);
   const navigate = useNavigate();
   const {
-    myCredits, stats, listings, walletAddress,
+    myCredits, myBoughtCredits, stats, listings, walletAddress,
     isKYCVerified, loading,
   } = usePortfolio();
 
-  // ── Domain hooks (each manages its own re-render surface) ──────────────
   const { rate: ethRate, isStale: ethRateIsStale, ageMin: ethRateAgeMin, forceRefresh: refreshEthRate } = useEthRate();
   const { balance: walletBal, error: walletError, connectWallet, refetch: refetchWallet } = useWalletBalance(walletAddress);
   const { state: ds, actions }   = useDashboardData();
   const { cooldown, start: startCooldown, canRefresh } = useRefreshCooldown();
 
-  // ── Derived display values ─────────────────────────────────────────────
-  const isKYC       = kycCompleted || isKYCVerified;
-  const displayName = dbUser?.full_name || user?.displayName || user?.email?.split('@')[0] || 'Trader';
-  const firstName   = displayName.split(' ')[0];
-  const greeting    = getGreeting(new Date().getHours());
+  const isKYC        = kycCompleted || isKYCVerified;
+  const displayName  = dbUser?.full_name || user?.displayName || user?.email?.split('@')[0] || 'Trader';
+  const firstName    = displayName.split(' ')[0];
+  const greeting     = getGreeting(new Date().getHours());
   const kycExpiresAt = dbUser?.kyc_expires_at || null;
   const isPageReady  = !ds.statsLoading && !ds.tradesLoading;
 
-  // Portfolio maths — pure, memoized
   const totalCreditsOwned   = stats?.totalCredits || 0;
   const totalPortfolioValue = stats?.totalValue   || 0;
   const totalRetiredCount   = stats?.retiredCount || 0;
   const costBasis           = stats?.costBasis    || 0;
+
   const pnlResult = useMemo(
     () => calcPnL(totalPortfolioValue, costBasis),
     [totalPortfolioValue, costBasis],
   );
 
-  const activeCredits = useMemo(
-    () => myCredits.filter((c) => c.status !== 'RETIRED'),
-    [myCredits],
-  );
+  // [FIX-PORTFOLIO-BREAKDOWN] Include both owned and bought credits.
+  // Previously only myCredits (owned/minted) was used, so bought credits
+  // never appeared in the breakdown chart.
+  const allActiveCredits = useMemo(() => {
+    const owned  = myCredits.filter(c => c.status !== 'RETIRED');
+    const bought = (myBoughtCredits || []).map(b => ({
+      ...b,
+      status:       'HELD',
+      isBought:     true,
+      heldCredits:  b.quantity || b.credits || 0,
+      credits:      b.quantity || b.credits || 0,
+    }));
+    return [...owned, ...bought];
+  }, [myCredits, myBoughtCredits]);
 
-  // ── Refresh handler ────────────────────────────────────────────────────
   const handleRefresh = useCallback(async () => {
     if (!canRefresh) return;
     startCooldown();
@@ -131,7 +103,6 @@ function DashboardInner() {
       <div className={s.d} role="main" aria-label="EtherTrack Dashboard">
         <div className={s.dw}>
 
-          {/* Live ticker */}
           <Ticker listings={listings} ethRate={ethRate} />
 
           {/* Topbar */}
@@ -229,14 +200,21 @@ function DashboardInner() {
               <QuickActionsCard isKYC={isKYC} alertCount={ds.alertCount} />
 
               {/* Row 3 — Emissions + Portfolio + Network */}
+              {/* [FEAT-ESG-SUMMARY] esgData wired in */}
               <EmissionOffsetCard
                 emissionsData={ds.emissionsData}
                 emissionsError={ds.emissionsError}
                 emissionsTs={ds.emissionsTs}
                 totalRetiredCount={totalRetiredCount}
                 onRetry={actions.fetchEmissions}
+                esgData={ds.esgData}
+                esgError={ds.esgError}
+                esgTs={ds.esgTs}
               />
-              <PortfolioBreakdownCard activeCredits={activeCredits} />
+
+              {/* [FIX-PORTFOLIO-BREAKDOWN] allActiveCredits includes bought credits */}
+              <PortfolioBreakdownCard activeCredits={allActiveCredits} />
+
               <NetworkStatusCard
                 networkStatus={ds.networkStatus}
                 ethRate={ethRate}
@@ -271,7 +249,6 @@ function DashboardInner() {
   );
 }
 
-// ── Public export ──────────────────────────────────────────────────────────
 export default function Dashboard() {
   return (
     <DashboardErrorBoundary>

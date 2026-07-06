@@ -1,5 +1,11 @@
 // routes/portfolio.js — EtherTrack Corporate Edition
 // PRODUCTION HARDENED — all critical/high/medium issues resolved
+//
+// [FIX-LISTED-QTY] confirm-listing now accepts & stores `quantity` into the
+// new carbon_batches.listed_quantity column; confirm-delisting zeroes it;
+// mapCreditRow reads it directly instead of deriving listed = total - held
+// (which mathematically equals "credits sold", not "credits still listed",
+// and could never produce the correct partial-delist remainder).
 'use strict';
 
 const router      = require('express').Router();
@@ -284,12 +290,19 @@ router.post(
 // ─────────────────────────────────────────────────────────────────
 // POST /api/portfolio/confirm-listing
 // Called by frontend after MetaMask confirms the list TX on-chain.
-// Writes listing_id_onchain + price back to carbon_batches so the
-// market query (which filters on listing_id_onchain IS NOT NULL) can
-// surface the credit.
+// Writes listing_id_onchain + price + listed_quantity back to
+// carbon_batches so the market query (which filters on
+// listing_id_onchain IS NOT NULL) can surface the credit with the
+// CORRECT remaining amount, and so the delist modal shows the right
+// number instead of the original/total quantity.
+//
+// [FIX-LISTED-QTY] `quantity` is now required in the request body — the
+// frontend must send how many credits were listed (see CarbonCredits.jsx /
+// PortfolioV3.jsx handleListForSale, which now includes `quantity: qty` in
+// its confirm-listing call).
 // ─────────────────────────────────────────────────────────────────
 router.post('/confirm-listing', authenticate, async (req, res) => {
-  const { batchId, listingIdOnchain, txHash, pricePerCreditInr } = req.body;
+  const { batchId, listingIdOnchain, txHash, pricePerCreditInr, quantity } = req.body;
 
   if (!batchId) {
     return res.status(400).json({ error: 'batchId required' });
@@ -297,16 +310,24 @@ router.post('/confirm-listing', authenticate, async (req, res) => {
   if (listingIdOnchain === undefined || listingIdOnchain === null) {
     return res.status(400).json({ error: 'listingIdOnchain required' });
   }
+  if (quantity === undefined || quantity === null) {
+    return res.status(400).json({ error: 'quantity required — how many credits were listed on-chain' });
+  }
 
   const listingId = parseInt(listingIdOnchain, 10);
   if (isNaN(listingId) || listingId < 0) {
     return res.status(400).json({ error: 'Invalid listingIdOnchain — must be a non-negative integer' });
   }
 
+  const listedQty = parseInt(quantity, 10);
+  if (isNaN(listedQty) || listedQty <= 0) {
+    return res.status(400).json({ error: 'Invalid quantity — must be a positive integer' });
+  }
+
   try {
     // Ownership check — only the batch owner can confirm listing
     const { rows } = await query(
-      `SELECT id, user_id, admin_status, token_id FROM carbon_batches WHERE id = $1`,
+      `SELECT id, user_id, admin_status, token_id, available_credits FROM carbon_batches WHERE id = $1`,
       [batchId]
     );
     if (!rows.length) {
@@ -318,19 +339,25 @@ router.post('/confirm-listing', authenticate, async (req, res) => {
     if (rows[0].admin_status !== 'approved') {
       return res.status(400).json({ error: 'Batch is not approved' });
     }
+    if (listedQty > rows[0].available_credits) {
+      return res.status(400).json({
+        error: `Cannot list ${listedQty} credits — only ${rows[0].available_credits} held`,
+      });
+    }
 
-    // Write listing_id_onchain and price back to DB
+    // Write listing_id_onchain, price, and listed_quantity back to DB
     await query(
       `UPDATE carbon_batches
        SET listing_id_onchain   = $1,
            price_per_credit_inr = COALESCE($2, price_per_credit_inr),
+           listed_quantity      = $3,
            updated_at           = NOW()
-       WHERE id = $3 AND user_id = $4`,
-      [listingId, pricePerCreditInr || null, batchId, req.user.id]
+       WHERE id = $4 AND user_id = $5`,
+      [listingId, pricePerCreditInr || null, listedQty, batchId, req.user.id]
     );
 
-    console.log(`[confirm-listing] batch=${batchId} listingId=${listingId} price=${pricePerCreditInr} tx=${txHash}`);
-    res.json({ success: true, listingIdOnchain: listingId });
+    console.log(`[confirm-listing] batch=${batchId} listingId=${listingId} qty=${listedQty} price=${pricePerCreditInr} tx=${txHash}`);
+    res.json({ success: true, listingIdOnchain: listingId, listedQuantity: listedQty });
   } catch (e) {
     console.error('[confirm-listing]', e.message);
     res.status(500).json({ error: 'Failed to confirm listing' });
@@ -340,7 +367,15 @@ router.post('/confirm-listing', authenticate, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────
 // POST /api/portfolio/confirm-delisting
 // Called by frontend after MetaMask confirms the delist TX on-chain.
-// Clears listing_id_onchain so the credit disappears from the market.
+// Clears listing_id_onchain AND zeroes listed_quantity so the credit
+// disappears from the market and the "still listed" figure resets.
+//
+// [FIX-LISTED-QTY] Previously only cleared listing_id_onchain, leaving
+// listed_quantity stale. This is safe to always zero because a full
+// on-chain cancelListing() always deactivates the WHOLE listing — there's
+// no partial cancel on-chain. The frontend's "partial delist" flow does a
+// full cancel + a brand new listCredit() for the remainder, which will
+// call confirm-listing again with the new (correct) quantity.
 // ─────────────────────────────────────────────────────────────────
 router.post('/confirm-delisting', authenticate, async (req, res) => {
   const { batchId } = req.body;
@@ -364,6 +399,7 @@ router.post('/confirm-delisting', authenticate, async (req, res) => {
     await query(
       `UPDATE carbon_batches
        SET listing_id_onchain = NULL,
+           listed_quantity    = 0,
            updated_at         = NOW()
        WHERE id = $1 AND user_id = $2`,
       [batchId, req.user.id]
@@ -419,6 +455,8 @@ router.get('/my-submissions', authenticate, async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────
 // GET /api/portfolio/my-credits
+// [FIX-LISTED-QTY] cb.listed_quantity added to the SELECT so mapCreditRow
+// can read the real tracked value instead of deriving it.
 // ─────────────────────────────────────────────────────────────────
 router.get('/my-credits', authenticate, async (req, res) => {
   try {
@@ -426,6 +464,7 @@ router.get('/my-credits', authenticate, async (req, res) => {
       `SELECT cb.id, cb.project_name, cb.project_location, cb.country,
               cb.standard, cb.project_type, cb.developer,
               cb.quantity, cb.total_credits, cb.available_credits, cb.retired_credits,
+              cb.listed_quantity,
               cb.vintage_year, cb.expiry_date, cb.registry_serial,
               cb.doc_ipfs_hash, cb.admin_status, cb.admin_notes,
               cb.status, cb.token_id, cb.tx_hash_mint,
@@ -978,10 +1017,14 @@ function parseSdgTags(raw) {
   try { return JSON.parse(raw || '[]'); } catch { return []; }
 }
 
+// [FIX-LISTED-QTY] listed is now read directly from the tracked column
+// instead of being derived as `total_credits - available_credits`, which
+// mathematically equals "credits sold" (not "credits still listed") and
+// could never produce a correct partial-delist remainder.
 function mapCreditRow(r) {
-  const held   = Number(r.available_credits ?? r.quantity ?? 0);
-  const total  = Number(r.total_credits ?? r.quantity ?? 0);
-  const listed = Math.max(0, total - held);
+  const listed = Number(r.listed_quantity ?? 0);
+  const total  = Number(r.available_credits ?? r.quantity ?? 0);
+  const held   = Math.max(0, total - listed);
 
   let status = 'HELD';
   if (r.status === 'exhausted' || r.status === 'expired') status = 'RETIRED';

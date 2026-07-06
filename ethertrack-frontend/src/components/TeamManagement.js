@@ -24,122 +24,80 @@ const VERIFIER_OPTIONS = [
   { code:'OTHER',    name:'Other Verifier', logo:'⚪', desc:'Enter verifier details manually' },
 ];
 
-// ── Plan definitions ──────────────────────────────────────────
 const PLAN_META = {
   free: {
-    key:       'free',
-    label:     'FREE',
-    price:     '₹0',
-    priceNote: 'forever',
-    color:     '#86efac',
-    bg:        '#0a1a0e',
-    border:    '#22c55e22',
-    seats:     1,
-    badge:     '🛒',
-    tagline:   'For carbon credit buyers',
-    features: [
-      { text:'Marketplace browse & buy credits',  on: true  },
-      { text:'Portfolio management (sell credits)',on: false },
-      { text:'Scope 1, 2 & 3 emissions logging',  on: false },
-      { text:'GHG inventory ledger + CSV export',  on: false },
-      { text:'Analytics dashboard',               on: false },
-      { text:'GHG Protocol PDF report',           on: false },
-      { text:'BRSR / CDP / TCFD reports',         on: false },
-      { text:'Audit trail + verifier',            on: false },
-      { text:'GEI / PAT / CCTS / SBTi',          on: false },
-      { text:'Multi-entity + supplier portal',    on: false },
+    key:'free', label:'FREE', price:'₹0', priceNote:'forever', color:'#86efac', bg:'#0a1a0e', border:'#22c55e22', seats:1, badge:'🛒', tagline:'For carbon credit buyers',
+    features:[
+      { text:'Marketplace browse & buy credits', on:true },
+      { text:'Portfolio management (sell credits)', on:false },
+      { text:'Scope 1, 2 & 3 emissions logging', on:false },
+      { text:'GHG inventory ledger + CSV export', on:false },
+      { text:'Analytics dashboard', on:false },
+      { text:'GHG Protocol PDF report', on:false },
+      { text:'BRSR / CDP / TCFD reports', on:false },
+      { text:'Audit trail + verifier', on:false },
+      { text:'GEI / PAT / CCTS / SBTi', on:false },
+      { text:'Multi-entity + supplier portal', on:false },
     ],
-    cta:       null,
-    ctaLabel:  null,
+    cta:null, ctaLabel:null,
   },
   starter: {
-    key:       'starter',
-    label:     'STARTER',
-    price:     '₹1,000',
-    priceNote: 'per month',
-    color:     '#60a5fa',
-    bg:        '#060e18',
-    border:    '#60a5fa22',
-    seats:     3,
-    badge:     '💼',
-    tagline:   'For carbon credit sellers',
-    features: [
-      { text:'Everything in Free',                on: true  },
-      { text:'Portfolio management (sell credits)',on: true  },
-      { text:'Credit retirement & export',        on: true  },
-      { text:'Scope 1, 2 & 3 emissions logging',  on: false },
-      { text:'GHG inventory ledger + CSV export',  on: false },
-      { text:'Analytics dashboard',               on: false },
-      { text:'GHG Protocol PDF report',           on: false },
-      { text:'BRSR / CDP / TCFD reports',         on: false },
-      { text:'Audit trail + verifier',            on: false },
-      { text:'Multi-entity + supplier portal',    on: false },
+    key:'starter', label:'STARTER', price:'₹1,000', priceNote:'per month', color:'#60a5fa', bg:'#060e18', border:'#60a5fa22', seats:3, badge:'💼', tagline:'For carbon credit sellers',
+    features:[
+      { text:'Everything in Free', on:true },
+      { text:'Portfolio management (sell credits)', on:true },
+      { text:'Credit retirement & export', on:true },
+      { text:'Scope 1, 2 & 3 emissions logging', on:false },
+      { text:'GHG inventory ledger + CSV export', on:false },
+      { text:'Analytics dashboard', on:false },
+      { text:'GHG Protocol PDF report', on:false },
+      { text:'BRSR / CDP / TCFD reports', on:false },
+      { text:'Audit trail + verifier', on:false },
+      { text:'Multi-entity + supplier portal', on:false },
     ],
-    cta:       '/billing/starter',
-    ctaLabel:  'GET STARTED →',
+    cta:'/billing/starter', ctaLabel:'GET STARTED →',
   },
   growth: {
-    key:       'growth',
-    label:     'GROWTH',
-    price:     '₹10,000',
-    priceNote: 'per month',
-    color:     '#22c55e',
-    bg:        '#0d2e1f',
-    border:    '#22c55e33',
-    seats:     10,
-    badge:     '📊',
-    tagline:   'For SMEs & mid-cap companies',
-    features: [
-      { text:'Everything in Starter',             on: true  },
-      { text:'Scope 1, 2 & 3 emissions logging',  on: true  },
-      { text:'GHG inventory ledger + CSV export',  on: true  },
-      { text:'Analytics dashboard',               on: true  },
-      { text:'Carbon intensity metrics',          on: true  },
-      { text:'GHG Protocol PDF report',           on: true  },
-      { text:'BRSR / CDP / TCFD reports',         on: false, locked: true },
-      { text:'Audit trail + verifier',            on: false, locked: true },
-      { text:'GEI / PAT / CCTS / SBTi',          on: false, locked: true },
-      { text:'Multi-entity + supplier portal',    on: false, locked: true },
+    key:'growth', label:'GROWTH', price:'₹10,000', priceNote:'per month', color:'#22c55e', bg:'#0d2e1f', border:'#22c55e33', seats:10, badge:'📊', tagline:'For SMEs & mid-cap companies',
+    features:[
+      { text:'Everything in Starter', on:true },
+      { text:'Scope 1, 2 & 3 emissions logging', on:true },
+      { text:'GHG inventory ledger + CSV export', on:true },
+      { text:'Analytics dashboard', on:true },
+      { text:'Carbon intensity metrics', on:true },
+      { text:'GHG Protocol PDF report', on:true },
+      { text:'BRSR / CDP / TCFD reports', on:false, locked:true },
+      { text:'Audit trail + verifier', on:false, locked:true },
+      { text:'GEI / PAT / CCTS / SBTi', on:false, locked:true },
+      { text:'Multi-entity + supplier portal', on:false, locked:true },
     ],
-    cta:       '/billing/growth',
-    ctaLabel:  'UPGRADE TO GROWTH →',
+    cta:'/billing/growth', ctaLabel:'UPGRADE TO GROWTH →',
   },
   corporate: {
-    key:       'corporate',
-    label:     'CORPORATE',
-    price:     'Custom',
-    priceNote: 'contact sales',
-    color:     '#f97316',
-    bg:        '#1a0a00',
-    border:    '#f9731633',
-    seats:     null,
-    badge:     '🏛',
-    tagline:   'For listed top 1000 & large caps',
-    features: [
-      { text:'Everything in Growth',              on: true  },
-      { text:'BRSR Environmental PDF (E2/E3/E4)', on: true  },
-      { text:'CDP disclosure PDF',                on: true  },
-      { text:'TCFD report PDF',                   on: true  },
-      { text:'Audit trail + 3rd party verifier',  on: true  },
-      { text:'GEI compliance + BEE format',       on: true  },
-      { text:'PAT scheme + CCTS compliance',      on: true  },
-      { text:'5-year plan + SBTi target setting', on: true  },
-      { text:'Supplier data portal',              on: true  },
-      { text:'Multi-entity consolidation',        on: true  },
+    key:'corporate', label:'CORPORATE', price:'Custom', priceNote:'contact sales', color:'#f97316', bg:'#1a0a00', border:'#f9731633', seats:null, badge:'🏛', tagline:'For listed top 1000 & large caps',
+    features:[
+      { text:'Everything in Growth', on:true },
+      { text:'BRSR Section A + B + C (P1–P9)', on:true },
+      { text:'CDP disclosure PDF', on:true },
+      { text:'TCFD report PDF', on:true },
+      { text:'Audit trail + 3rd party verifier', on:true },
+      { text:'GEI compliance + BEE format', on:true },
+      { text:'PAT scheme + CCTS compliance', on:true },
+      { text:'5-year plan + SBTi target setting', on:true },
+      { text:'Supplier data portal', on:true },
+      { text:'Multi-entity consolidation', on:true },
     ],
-    cta: 'https://mail.google.com/mail/?view=cm&to=sales@ethertrack.in',
-    ctaLabel:  '📞 CONTACT SALES →',
+    cta:'https://mail.google.com/mail/?view=cm&to=sales@ethertrack.in', ctaLabel:'📞 CONTACT SALES →',
   },
 };
 
 const PLAN_ORDER = ['free','starter','growth','corporate'];
-
 const INDUSTRIES = ['Manufacturing','IT/Software','Finance','Healthcare','Retail','Logistics','Construction','Energy','Agriculture','Education','Other'];
 const REPORT_YEARS = Array.from({ length: 5 }, (_, i) => new Date().getFullYear() - 2 + i);
 
 const EMPTY_PFORM = {
   companyName:'', industry:'', revenueCr:'', employees:'', floorSqft:'',
-  netZeroYear:'2050', netZeroTargetCo2e:'', reportingYear: String(new Date().getFullYear()),
+  netZeroYear:'2050', netZeroTargetCo2e:'', reportingYear:String(new Date().getFullYear()),
   companyCin:'', companyGstin:'', companyPan:'', companyType:'', baseYear:'2024',
 };
 
@@ -160,13 +118,11 @@ export default function TeamManagement() {
   const [pform,         setPform]          = useState(EMPTY_PFORM);
   const [savingProfile, setSavingProfile]  = useState(false);
 
-  // Invite form
   const [showInvite,  setShowInvite]  = useState(false);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole,  setInviteRole]  = useState('viewer');
   const [inviting,    setInviting]    = useState(false);
 
-  // Verifier form
   const [showVerifier,     setShowVerifier]     = useState(false);
   const [selectedVerifier, setSelectedVerifier] = useState(null);
   const [verifierContact,  setVerifierContact]  = useState('');
@@ -192,11 +148,7 @@ export default function TeamManagement() {
         setOrg(data.org);
         setTeamRole(data.teamRole);
         setPermissions(data.permissions || []);
-        await Promise.all([
-          loadMembers(data.org.id),
-          loadVerifiers(data.org.id),
-          loadProfile(),
-        ]);
+        await Promise.all([loadMembers(data.org.id), loadVerifiers(data.org.id), loadProfile()]);
         setTab(t => t === 'profile' ? 'team' : t);
       } else {
         await loadProfile();
@@ -207,10 +159,7 @@ export default function TeamManagement() {
   };
 
   const loadMembers = async (orgId) => {
-    try {
-      const data = await apiFetch(`/api/org/${orgId}/members`);
-      setMembers(data.members || []);
-    } catch {}
+    try { const data = await apiFetch(`/api/org/${orgId}/members`); setMembers(data.members || []); } catch {}
   };
 
   const loadProfile = async () => {
@@ -220,29 +169,26 @@ export default function TeamManagement() {
         const p = res.profile;
         setProfile(p);
         setPform({
-          companyName:       p.company_name             || '',
-          industry:          p.industry                 || '',
-          revenueCr:         p.revenue_cr               || '',
-          employees:         p.employees                || '',
-          floorSqft:         p.floor_sqft               || '',
-          netZeroYear:       String(p.net_zero_year      || 2050),
-          netZeroTargetCo2e: p.net_zero_target_co2e     || '',
-          reportingYear:     String(p.reporting_year    || new Date().getFullYear()),
-          companyCin:        p.company_cin              || '',
-          companyGstin:      p.company_gstin            || '',
-          companyPan:        p.company_pan              || '',
-          companyType:       p.company_type             || '',
-          baseYear:          String(p.base_year          || 2024),
+          companyName:       p.company_name          || '',
+          industry:          p.industry              || '',
+          revenueCr:         p.revenue_cr            || '',
+          employees:         p.employees             || '',
+          floorSqft:         p.floor_sqft            || '',
+          netZeroYear:       String(p.net_zero_year   || 2050),
+          netZeroTargetCo2e: p.net_zero_target_co2e  || '',
+          reportingYear:     String(p.reporting_year || new Date().getFullYear()),
+          companyCin:        p.company_cin           || '',
+          companyGstin:      p.company_gstin         || '',
+          companyPan:        p.company_pan           || '',
+          companyType:       p.company_type          || '',
+          baseYear:          String(p.base_year       || 2024),
         });
       }
     } catch {}
   };
 
   const loadVerifiers = async (orgId) => {
-    try {
-      const data = await apiFetch(`/api/org/${orgId}/verifiers`);
-      setVerifiers(data.verifiers || []);
-    } catch {}
+    try { const data = await apiFetch(`/api/org/${orgId}/verifiers`); setVerifiers(data.verifiers || []); } catch {}
   };
 
   const handleSaveProfile = async (e) => {
@@ -256,7 +202,7 @@ export default function TeamManagement() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           companyName:       pform.companyName,
-          industry:          pform.industry             || null,
+          industry:          pform.industry              || null,
           revenueCr:         parseFloat(pform.revenueCr)         || 0,
           employees:         parseInt(pform.employees)           || 0,
           floorSqft:         parseInt(pform.floorSqft)           || 0,
@@ -271,16 +217,14 @@ export default function TeamManagement() {
         }),
       });
       if (res?.profile) setProfile(res.profile);
-
       if (!org) {
         await apiFetch('/api/org/create', {
           method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            name:        pform.companyName,
-            cin:         pform.companyCin   || '',
-            gstin:       pform.companyGstin || '',
-            industry:    pform.industry     || '',
-            companyType: pform.companyType  || '',
+            name: pform.companyName, cin: pform.companyCin || '',
+            gstin: pform.companyGstin || '', industry: pform.industry || '',
+            companyType: pform.companyType || '',
           }),
         });
         showToast('✅ Company profile saved & workspace created!');
@@ -305,6 +249,7 @@ export default function TeamManagement() {
     try {
       await apiFetch(`/api/org/${org.id}/invite`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: inviteEmail, teamRole: inviteRole }),
       });
       showToast(`✅ Invite sent to ${inviteEmail}`);
@@ -318,6 +263,7 @@ export default function TeamManagement() {
     try {
       await apiFetch(`/api/org/${org.id}/members/${userId}/role`, {
         method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ teamRole: newRole }),
       });
       showToast(`✅ Role updated to ${newRole}`);
@@ -340,11 +286,10 @@ export default function TeamManagement() {
     try {
       await apiFetch(`/api/org/${org.id}/verifiers`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          verifierCode: selectedVerifier.code,
-          verifierName: selectedVerifier.name,
-          contactEmail: verifierContact,
-          notes:        verifierNotes,
+          verifierCode: selectedVerifier.code, verifierName: selectedVerifier.name,
+          contactEmail: verifierContact, notes: verifierNotes,
         }),
       });
       showToast('✅ Verifier request submitted');
@@ -414,6 +359,7 @@ export default function TeamManagement() {
     .tm-feat:last-child{border-bottom:none;}
     .tm-seat-bar{height:6px;border-radius:3px;background:#0d1f11;overflow:hidden;margin-top:4px;}
     .tm-seat-fill{height:100%;border-radius:3px;background:#22c55e;transition:width .4s;}
+    .tm-brsr-note{margin-top:8px;padding:10px 14px;border-radius:8px;background:#060e18;border:1px solid #3b82f622;font-size:10px;color:#60a5fa88;line-height:1.8;}
     @media(max-width:900px){.tm-plan-grid{grid-template-columns:1fr 1fr!important;}}
     @media(max-width:560px){.tm-plan-grid{grid-template-columns:1fr!important;}}
   `;
@@ -425,20 +371,20 @@ export default function TeamManagement() {
     </>
   );
 
-  const currentPlanKey  = org?.subscription_plan || 'free';
-  const currentPlan     = PLAN_META[currentPlanKey] || PLAN_META.free;
-  const activeMembers   = members.filter(m=>m.status==='active').length;
-  const seatLimit       = currentPlan.seats;
-  const seatsUsedPct    = seatLimit ? Math.min(100, (activeMembers / seatLimit) * 100) : 0;
-  const hasOrg          = !!org;
-  const isCorporate     = currentPlanKey === 'corporate';
+  const currentPlanKey = org?.subscription_plan || 'free';
+  const currentPlan    = PLAN_META[currentPlanKey] || PLAN_META.free;
+  const activeMembers  = members.filter(m=>m.status==='active').length;
+  const seatLimit      = currentPlan.seats;
+  const seatsUsedPct   = seatLimit ? Math.min(100, (activeMembers / seatLimit) * 100) : 0;
+  const hasOrg         = !!org;
+  const isCorporate    = currentPlanKey === 'corporate';
 
   const TABS = [
     { key:'profile',   label:'COMPANY PROFILE' },
-    { key:'team',      label:'TEAM',                requiresOrg: true },
-    { key:'roles',     label:'ROLES & PERMISSIONS', requiresOrg: true },
-    { key:'verifiers', label:'VERIFIERS',           requiresOrg: true, requiresPlan:'corporate' },
-    { key:'plan',      label:'PLAN & BILLING',      requiresOrg: true },
+    { key:'team',      label:'TEAM',                requiresOrg:true },
+    { key:'roles',     label:'ROLES & PERMISSIONS', requiresOrg:true },
+    { key:'verifiers', label:'VERIFIERS',           requiresOrg:true, requiresPlan:'corporate' },
+    { key:'plan',      label:'PLAN & BILLING',      requiresOrg:true },
   ];
 
   return (
@@ -453,16 +399,16 @@ export default function TeamManagement() {
             <div className="tm-hdr-title">
               {hasOrg ? <>{org.name} <span>Workspace</span></> : <>Workspace <span>Setup</span></>}
             </div>
-            {hasOrg&&(
+            {hasOrg && (
               <div className="tm-hdr-sub" style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
                 <span>{org.industry||'—'}</span>
                 <span>·</span>
                 <span style={{color:currentPlan.color,fontWeight:700}}>{currentPlan.badge} {currentPlan.label}</span>
                 <span>·</span>
-                <span>{activeMembers}{seatLimit ? `/${seatLimit}` : ''} seats used</span>
+                <span>{activeMembers}{seatLimit?`/${seatLimit}`:''} seats used</span>
                 <span>·</span>
                 <span>Your role: <span style={{color:ROLE_META[teamRole]?.color||'#22c55e',fontWeight:700}}>{ROLE_META[teamRole]?.icon} {teamRole?.toUpperCase()}</span></span>
-                {org.subscription_status==='trial'&&(
+                {org.subscription_status==='trial' && (
                   <span style={{fontSize:9,padding:'3px 8px',borderRadius:4,background:'#110a00',color:'#f59e0b88',border:'1px solid #f59e0b22'}}>
                     ⏳ Trial ends {new Date(org.trial_ends_at).toLocaleDateString('en-IN',{day:'2-digit',month:'short'})}
                   </span>
@@ -471,33 +417,26 @@ export default function TeamManagement() {
             )}
           </div>
 
-          {/* Seat usage bar */}
+          {/* Seat bar */}
           {hasOrg && seatLimit && (
             <div style={{marginBottom:20,padding:'12px 16px',background:'#070c09',border:'1px solid #0d1f11',borderRadius:10,display:'flex',alignItems:'center',gap:16}}>
               <div style={{flex:1}}>
                 <div style={{display:'flex',justifyContent:'space-between',marginBottom:6,fontSize:10}}>
                   <span style={{color:'#86efac44'}}>SEATS USED</span>
-                  <span style={{color: seatsUsedPct>=100?'#f87171':seatsUsedPct>=80?'#f59e0b':'#22c55e',fontWeight:700}}>
-                    {activeMembers} / {seatLimit}
-                  </span>
+                  <span style={{color:seatsUsedPct>=100?'#f87171':seatsUsedPct>=80?'#f59e0b':'#22c55e',fontWeight:700}}>{activeMembers} / {seatLimit}</span>
                 </div>
                 <div className="tm-seat-bar">
-                  <div className="tm-seat-fill" style={{
-                    width:`${seatsUsedPct}%`,
-                    background: seatsUsedPct>=100?'#f87171':seatsUsedPct>=80?'#f59e0b':'#22c55e'
-                  }}/>
+                  <div className="tm-seat-fill" style={{width:`${seatsUsedPct}%`,background:seatsUsedPct>=100?'#f87171':seatsUsedPct>=80?'#f59e0b':'#22c55e'}}/>
                 </div>
               </div>
-              {seatsUsedPct>=80&&!isCorporate&&(
-                <button className="tm-btn tm-btn-orange tm-btn-sm" onClick={()=>setTab('plan')}>
-                  ⬆ UPGRADE
-                </button>
+              {seatsUsedPct>=80 && !isCorporate && (
+                <button className="tm-btn tm-btn-orange tm-btn-sm" onClick={()=>setTab('plan')}>⬆ UPGRADE</button>
               )}
             </div>
           )}
 
-          {/* Setup banner for new users */}
-          {!hasOrg&&(
+          {/* New user banner */}
+          {!hasOrg && (
             <div style={{padding:'14px 18px',background:'#0a1a0e',border:'1px solid #22c55e33',borderRadius:10,marginBottom:24,display:'flex',alignItems:'center',gap:12,fontSize:11,color:'#22c55e88',lineHeight:1.7}}>
               <div style={{width:22,height:22,borderRadius:'50%',background:'#22c55e',color:'#040706',fontSize:10,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>1</div>
               <div><strong style={{color:'#22c55e'}}>Fill in your company profile below</strong> — your workspace will be created automatically when you save. You can then invite your ESG team.</div>
@@ -520,10 +459,10 @@ export default function TeamManagement() {
           </div>
 
           {/* ── COMPANY PROFILE TAB ── */}
-          {tab==='profile'&&(
+          {tab==='profile' && (
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
               <div className="tm-card">
-                <div className="tm-card-title">{hasOrg?'COMPANY PROFILE':'STEP 1 — COMPANY PROFILE'}</div>
+                <div className="tm-card-title">{hasOrg ? 'COMPANY PROFILE' : 'STEP 1 — COMPANY PROFILE'}</div>
                 <form onSubmit={handleSaveProfile}>
                   <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:14}}>
                     <div className="tm-field" style={{gridColumn:'1/-1'}}>
@@ -607,6 +546,7 @@ export default function TeamManagement() {
                 </form>
               </div>
 
+              {/* Right card */}
               <div className="tm-card">
                 <div className="tm-card-title">{hasOrg ? 'SAVED PROFILE' : 'WHAT HAPPENS NEXT'}</div>
                 {hasOrg && profile ? (
@@ -630,7 +570,15 @@ export default function TeamManagement() {
                       </div>
                     ))}
                     <div style={{marginTop:16,padding:'10px 14px',borderRadius:8,background:'#0a1a0e',border:'1px solid #22c55e33',fontSize:11,color:'#22c55e'}}>
-                      ✓ Profile complete — regulatory exports active
+                      ✓ Profile saved — GHG Protocol PDF ready
+                    </div>
+                    {/* [KEY CHANGE] BRSR note — points user to Section A, explains pre-fill */}
+                    <div className="tm-brsr-note">
+                      📋 <strong style={{color:'#60a5fa'}}>For BRSR filing</strong> — open{' '}
+                      <strong style={{color:'#60a5fa'}}>Carbon Intelligence → BRSR & Regulatory → BRSR Disclosures → Section A</strong>.
+                      Your company name and CIN will be pre-filled automatically.
+                      You only need to add BRSR-specific extras: registered address, contact person,
+                      business activities, workforce breakdown.
                     </div>
                   </>
                 ) : hasOrg && !profile ? (
@@ -644,7 +592,7 @@ export default function TeamManagement() {
                       {n:'2',c:'#22c55e',t:'Workspace auto-created',d:'Organisation workspace is set up instantly — no separate step.'},
                       {n:'3',c:'#60a5fa',t:'Invite your ESG team',d:'Add colleagues, assign roles: Admin, Manager, Auditor, Viewer.'},
                       {n:'4',c:'#a78bfa',t:'Connect a verifier (Corporate)',d:'Link Bureau Veritas, DNV, EY etc. for BRSR Level 2 assurance.'},
-                      {n:'5',c:'#f97316',t:'Start tracking emissions',d:'Log Scope 1, 2 & 3 and generate GHG / BRSR / CDP / TCFD PDFs.'},
+                      {n:'5',c:'#f97316',t:'Start tracking & reporting',d:'GHG Protocol PDF works immediately. For BRSR/CDP/TCFD, complete Section A in BRSR Disclosures — name & CIN pre-fill automatically.'},
                     ].map(s=>(
                       <div key={s.n} style={{display:'flex',gap:12,alignItems:'flex-start'}}>
                         <div style={{width:22,height:22,borderRadius:'50%',background:s.c,color:'#040706',fontSize:10,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,marginTop:2}}>{s.n}</div>
@@ -664,14 +612,13 @@ export default function TeamManagement() {
           )}
 
           {/* ── TEAM TAB ── */}
-          {tab==='team'&&hasOrg&&(
+          {tab==='team' && hasOrg && (
             <div>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16,flexWrap:'wrap',gap:10}}>
                 <div style={{fontSize:11,color:'#86efac33'}}>
                   {activeMembers} active
                   {seatLimit ? ` · ${seatLimit - activeMembers} seats remaining` : ' · unlimited seats'}
-                  {' · '}
-                  <span style={{color:currentPlan.color,fontWeight:700}}>{currentPlan.label} plan</span>
+                  {' · '}<span style={{color:currentPlan.color,fontWeight:700}}>{currentPlan.label} plan</span>
                 </div>
                 <div style={{display:'flex',gap:8}}>
                   {seatLimit && activeMembers >= seatLimit && !isCorporate && (
@@ -682,15 +629,12 @@ export default function TeamManagement() {
                   )}
                 </div>
               </div>
-
-              {/* Seat limit warning */}
               {seatLimit && activeMembers >= seatLimit && (
                 <div style={{padding:'10px 16px',borderRadius:8,background:'#110a00',border:'1px solid #f59e0b22',fontSize:11,color:'#f59e0b88',marginBottom:16}}>
                   ⚠ Seat limit reached ({activeMembers}/{seatLimit} on {currentPlan.label} plan).
                   {!isCorporate && <span> <button onClick={()=>setTab('plan')} style={{background:'none',border:'none',color:'#f97316',cursor:'pointer',fontFamily:'DM Mono,monospace',fontSize:11,textDecoration:'underline'}}>Upgrade your plan</button> to add more members.</span>}
                 </div>
               )}
-
               {members.map(m=>{
                 const rm   = ROLE_META[m.team_role]||ROLE_META.viewer;
                 const init = (m.full_name||m.email||'?')[0].toUpperCase();
@@ -701,14 +645,14 @@ export default function TeamManagement() {
                     <div className="tm-member-info">
                       <div className="tm-member-name">
                         {m.full_name||'—'}
-                        {isMe&&<span style={{fontSize:9,color:'#22c55e88',marginLeft:8}}>(you)</span>}
-                        {!m.accepted_at&&<span style={{fontSize:9,color:'#f59e0b88',marginLeft:8}}>⏳ pending</span>}
+                        {isMe && <span style={{fontSize:9,color:'#22c55e88',marginLeft:8}}>(you)</span>}
+                        {!m.accepted_at && <span style={{fontSize:9,color:'#f59e0b88',marginLeft:8}}>⏳ pending</span>}
                       </div>
                       <div className="tm-member-email">{m.email}</div>
-                      {m.wallet_address&&(
+                      {m.wallet_address && (
                         <div style={{fontSize:9,color:'#86efac22',marginTop:2,fontFamily:'monospace'}}>
                           {m.wallet_address.slice(0,8)}...{m.wallet_address.slice(-4)}
-                          {m.kyc_verified&&<span style={{color:'#22c55e88',marginLeft:6}}>✓ KYC</span>}
+                          {m.kyc_verified && <span style={{color:'#22c55e88',marginLeft:6}}>✓ KYC</span>}
                         </div>
                       )}
                     </div>
@@ -716,13 +660,13 @@ export default function TeamManagement() {
                       <span className="tm-role-pill" style={{background:rm.bg,color:rm.color,border:`1px solid ${rm.border}`}}>
                         {rm.icon} {rm.label}
                       </span>
-                      {canChange&&!isMe&&m.team_role!=='owner'&&(
+                      {canChange && !isMe && m.team_role!=='owner' && (
                         <select className="tm-role-select" value={m.team_role}
                           onChange={e=>handleChangeRole(m.user_id, e.target.value)}>
                           {['admin','manager','auditor','viewer'].map(r=><option key={r} value={r}>{r}</option>)}
                         </select>
                       )}
-                      {canRemove&&!isMe&&m.team_role!=='owner'&&(
+                      {canRemove && !isMe && m.team_role!=='owner' && (
                         <button className="tm-btn tm-btn-r tm-btn-sm"
                           onClick={()=>handleRemoveMember(m.user_id, m.full_name||m.email)}>✕</button>
                       )}
@@ -730,8 +674,7 @@ export default function TeamManagement() {
                   </div>
                 );
               })}
-
-              {members.length===0&&(
+              {members.length===0 && (
                 <div style={{textAlign:'center',padding:40,color:'#86efac33',fontSize:11}}>
                   No members yet. Invite your ESG team to collaborate.
                 </div>
@@ -740,7 +683,7 @@ export default function TeamManagement() {
           )}
 
           {/* ── ROLES & PERMISSIONS TAB ── */}
-          {tab==='roles'&&hasOrg&&(
+          {tab==='roles' && hasOrg && (
             <div>
               <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:10,marginBottom:20}}>
                 {Object.entries(ROLE_META).map(([role,meta])=>(
@@ -767,21 +710,14 @@ export default function TeamManagement() {
                     </thead>
                     <tbody>
                       {[
-                        ['Portfolio: Read',          'portfolio:read'],
-                        ['Portfolio: Write',         'portfolio:write'],
-                        ['Portfolio: Submit Credit', 'portfolio:submit_credit'],
-                        ['Portfolio: Retire Credit', 'portfolio:retire'],
-                        ['Portfolio: Export',        'portfolio:export'],
-                        ['Emissions: Read',          'emissions:read'],
-                        ['Emissions: Write',         'emissions:write'],
-                        ['Emissions: Export',        'emissions:export'],
-                        ['Reports: Generate',        'reports:generate'],
-                        ['Reports: Export PDF',      'reports:export_pdf'],
-                        ['Team: Invite',             'team:invite'],
-                        ['Team: Remove',             'team:remove'],
-                        ['Team: Change Role',        'team:change_role'],
-                        ['Verifier: Connect',        'verifier:connect'],
-                        ['Org: Billing',             'org:billing'],
+                        ['Portfolio: Read','portfolio:read'],['Portfolio: Write','portfolio:write'],
+                        ['Portfolio: Submit Credit','portfolio:submit_credit'],['Portfolio: Retire Credit','portfolio:retire'],
+                        ['Portfolio: Export','portfolio:export'],['Emissions: Read','emissions:read'],
+                        ['Emissions: Write','emissions:write'],['Emissions: Export','emissions:export'],
+                        ['Reports: Generate','reports:generate'],['Reports: Export PDF','reports:export_pdf'],
+                        ['Team: Invite','team:invite'],['Team: Remove','team:remove'],
+                        ['Team: Change Role','team:change_role'],['Verifier: Connect','verifier:connect'],
+                        ['Org: Billing','org:billing'],
                       ].map(([label,perm])=>{
                         const allowed = PERMISSIONS[perm] || [];
                         return (
@@ -808,13 +744,13 @@ export default function TeamManagement() {
             </div>
           )}
 
-          {/* ── VERIFIERS TAB (Corporate only) ── */}
-          {tab==='verifiers'&&hasOrg&&isCorporate&&(
+          {/* ── VERIFIERS TAB ── */}
+          {tab==='verifiers' && hasOrg && isCorporate && (
             <div>
               <div style={{padding:'14px 18px',background:'#0d0a1a',border:'1px solid #a78bfa22',borderRadius:10,marginBottom:20,fontSize:11,color:'#a78bfa88',lineHeight:1.8}}>
                 🔍 <strong style={{color:'#a78bfa'}}>Third-Party Verification</strong> — Connect an accredited verifier to add a verification badge to your BRSR/CDP/TCFD reports. Required for Level 2 BRSR assurance.
               </div>
-              {verifiers.length>0&&(
+              {verifiers.length>0 && (
                 <>
                   <div style={{fontSize:9,color:'#86efac44',letterSpacing:'.14em',marginBottom:10}}>CONNECTED VERIFIERS</div>
                   {verifiers.map(v=>(
@@ -834,7 +770,7 @@ export default function TeamManagement() {
                   ))}
                 </>
               )}
-              {can('verifier:connect')&&(
+              {can('verifier:connect') && (
                 <button className="tm-btn tm-btn-p" style={{marginBottom:16}} onClick={()=>setShowVerifier(true)}>
                   🔍 REQUEST VERIFIER CONNECTION →
                 </button>
@@ -856,53 +792,49 @@ export default function TeamManagement() {
           )}
 
           {/* ── PLAN & BILLING TAB ── */}
-          {tab==='plan'&&hasOrg&&(
+          {tab==='plan' && hasOrg && (
             <div>
               <div style={{fontSize:9,color:'#86efac44',letterSpacing:'.14em',marginBottom:16}}>
                 CURRENT PLAN: <span style={{color:currentPlan.color,fontWeight:700}}>{currentPlan.badge} {currentPlan.label}</span>
               </div>
               <div className="tm-plan-grid" style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:24}}>
                 {PLAN_ORDER.map(key=>{
-                  const p       = PLAN_META[key];
-                  const isCurr  = currentPlanKey === key;
-                  const isAbove = PLAN_ORDER.indexOf(key) > PLAN_ORDER.indexOf(currentPlanKey);
+                  const p      = PLAN_META[key];
+                  const isCurr = currentPlanKey === key;
+                  const isAbove= PLAN_ORDER.indexOf(key) > PLAN_ORDER.indexOf(currentPlanKey);
                   return (
                     <div key={key} className={`tm-plan-card${isCurr?' current':''}`}
-                      style={{borderColor: isCurr ? p.color : '#0d1f11', background: isCurr ? p.bg : '#070c09'}}>
-                      {/* Badge + label */}
+                      style={{borderColor:isCurr?p.color:'#0d1f11',background:isCurr?p.bg:'#070c09'}}>
                       <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}>
                         <span style={{fontSize:20}}>{p.badge}</span>
                         <div>
                           <div style={{fontSize:11,color:p.color,fontWeight:700,letterSpacing:'.1em'}}>{p.label}</div>
                           <div style={{fontSize:9,color:'#86efac33'}}>{p.tagline}</div>
                         </div>
-                        {isCurr&&<span style={{marginLeft:'auto',fontSize:9,padding:'2px 8px',borderRadius:3,background:p.bg,color:p.color,border:`1px solid ${p.border}`}}>CURRENT</span>}
+                        {isCurr && <span style={{marginLeft:'auto',fontSize:9,padding:'2px 8px',borderRadius:3,background:p.bg,color:p.color,border:`1px solid ${p.border}`}}>CURRENT</span>}
                       </div>
-                      {/* Price */}
                       <div style={{marginBottom:16,paddingBottom:14,borderBottom:'1px solid #0d1f11'}}>
                         <span style={{fontSize:key==='corporate'?16:22,fontWeight:800,color:'#f0fdf4',fontFamily:'Syne,sans-serif'}}>{p.price}</span>
-                        {key!=='corporate'&&<span style={{fontSize:9,color:'#86efac33',marginLeft:6}}>{p.priceNote}</span>}
-                        {p.seats&&<div style={{fontSize:9,color:'#86efac44',marginTop:4}}>{p.seats} seat{p.seats>1?'s':''} included</div>}
-                        {key==='corporate'&&<div style={{fontSize:9,color:'#86efac44',marginTop:4}}>Custom seats · Custom pricing</div>}
+                        {key!=='corporate' && <span style={{fontSize:9,color:'#86efac33',marginLeft:6}}>{p.priceNote}</span>}
+                        {p.seats && <div style={{fontSize:9,color:'#86efac44',marginTop:4}}>{p.seats} seat{p.seats>1?'s':''} included</div>}
+                        {key==='corporate' && <div style={{fontSize:9,color:'#86efac44',marginTop:4}}>Custom seats · Custom pricing</div>}
                       </div>
-                      {/* Features */}
                       <div style={{flex:1,marginBottom:16}}>
                         {p.features.map((f,i)=>(
                           <div key={i} className="tm-feat">
                             <span style={{fontSize:11,color:f.on?'#22c55e':f.locked?'#f9731622':'#86efac22',flexShrink:0}}>
-                              {f.on ? '✓' : f.locked ? '🔒' : '—'}
+                              {f.on?'✓':f.locked?'🔒':'—'}
                             </span>
                             <span style={{color:f.on?'#86efacaa':f.locked?'#f97316aa':'#86efac33'}}>{f.text}</span>
                           </div>
                         ))}
                       </div>
-                      {/* CTA */}
                       {p.cta && !isCurr && isAbove && (
                         key==='corporate'
                           ? <a href={p.cta} className="tm-btn tm-btn-orange" style={{display:'block',textAlign:'center',textDecoration:'none',padding:'9px 18px'}}>{p.ctaLabel}</a>
                           : <button className="tm-btn tm-btn-p" style={{width:'100%'}} onClick={()=>navigate(p.cta)}>{p.ctaLabel}</button>
                       )}
-                      {isCurr&&<div style={{fontSize:9,color:p.color,textAlign:'center',padding:'8px 0',letterSpacing:'.08em'}}>✓ YOUR CURRENT PLAN</div>}
+                      {isCurr && <div style={{fontSize:9,color:p.color,textAlign:'center',padding:'8px 0',letterSpacing:'.08em'}}>✓ YOUR CURRENT PLAN</div>}
                     </div>
                   );
                 })}
@@ -913,11 +845,11 @@ export default function TeamManagement() {
             </div>
           )}
 
-        </div>{/* /tmw */}
-      </div>{/* /tm */}
+        </div>
+      </div>
 
       {/* ── Invite Modal ── */}
-      {showInvite&&(
+      {showInvite && (
         <div className="tm-overlay" onClick={e=>e.target===e.currentTarget&&setShowInvite(false)}>
           <div className="tm-modal">
             <div className="tm-modal-hdr">
@@ -925,7 +857,7 @@ export default function TeamManagement() {
               <button className="tm-modal-close" onClick={()=>setShowInvite(false)}>✕</button>
             </div>
             <div className="tm-modal-body">
-              {seatLimit&&(
+              {seatLimit && (
                 <div style={{padding:'8px 12px',borderRadius:6,background:'#0a1a0e',border:'1px solid #22c55e22',fontSize:10,color:'#22c55e88',marginBottom:14}}>
                   {activeMembers} / {seatLimit} seats used on <strong style={{color:currentPlan.color}}>{currentPlan.label}</strong> plan
                 </div>
@@ -965,7 +897,7 @@ export default function TeamManagement() {
       )}
 
       {/* ── Verifier Modal ── */}
-      {showVerifier&&(
+      {showVerifier && (
         <div className="tm-overlay" onClick={e=>e.target===e.currentTarget&&setShowVerifier(false)}>
           <div className="tm-modal" style={{maxWidth:580}}>
             <div className="tm-modal-hdr">
@@ -984,7 +916,7 @@ export default function TeamManagement() {
                       <div style={{fontSize:11,color:'#f0fdf4',fontWeight:700,marginBottom:2}}>{v.name}</div>
                       <div style={{fontSize:9,color:'#86efac33'}}>{v.desc}</div>
                     </div>
-                    {selectedVerifier?.code===v.code&&<span style={{marginLeft:'auto',color:'#a78bfa'}}>✓</span>}
+                    {selectedVerifier?.code===v.code && <span style={{marginLeft:'auto',color:'#a78bfa'}}>✓</span>}
                   </div>
                 </div>
               ))}
@@ -1007,7 +939,7 @@ export default function TeamManagement() {
         </div>
       )}
 
-      {toast&&(
+      {toast && (
         <div className="tm-toast" style={{border:`1px solid ${toast.type==='error'?'#f8717122':'#22c55e22'}`,color:toast.type==='error'?'#f8717199':'#22c55e88'}}>
           {toast.msg}
         </div>

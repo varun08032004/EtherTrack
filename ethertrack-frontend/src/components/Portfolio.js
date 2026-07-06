@@ -382,8 +382,43 @@ function PortfolioAnalytics({ allCredits, myRetirements }) {
       color:'#86efac22', fontSize:10 }}>No data yet</div>
   );
 
+  // Export the underlying breakdown data as CSV — same escape logic as the
+  // main portfolio export, kept local since this component owns the data.
+  const handleExportAnalytics = () => {
+    const csvEscape = v => {
+      const s = String(v == null ? '' : v).replace(/^[=+\-@\t\r\n]/g, "'$&");
+      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const sections = [
+      ['BY REGISTRY STANDARD'], ['Standard', 'Credits (tCO2)'],
+      ...byStandard.map(r => [r.name, r.value]), [],
+      ['BY VINTAGE YEAR'], ['Year', 'Credits (tCO2)'],
+      ...byVintage.map(r => [r.year, r.credits]), [],
+      ['BY PROJECT TYPE'], ['Type', 'Credits (tCO2)'],
+      ...byType.map(r => [r.name, r.credits]), [],
+      ['RETIREMENT TIMELINE'], ['Month', 'Retired (tCO2)'],
+      ...retirementTimeline.map(r => [r.month, r.tco2]),
+    ];
+    const csv  = sections.map(r => r.map(csvEscape).join(',')).join('\n');
+    const blob = new Blob(['\uFEFF' + csv], { type:'text/csv;charset=utf-8;' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url;
+    a.download = `ethertrack_analytics_${Date.now()}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:20 }}>
+      <div style={{ display:'flex', justifyContent:'flex-end' }}>
+        <button onClick={handleExportAnalytics}
+          style={{ padding:'8px 16px', borderRadius:7, cursor:'pointer',
+            border:'1px solid #60a5fa44', background:'#060e18', color:'#60a5fa99',
+            fontFamily:'DM Mono,monospace', fontSize:10, letterSpacing:'.08em' }}>
+          ↓ EXPORT DATA (CSV)
+        </button>
+      </div>
       <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:12 }}>
         {[
           { l:'UNIQUE PROJECTS', v:new Set(allCredits.map(c=>c.projectId)).size,   c:'#60a5fa' },
@@ -614,6 +649,16 @@ function RetireModal({ credit, onConfirm, onClose, loading }) {
 
   useModal(true, () => !loading && onClose());
 
+  // GSTIN is optional (voluntary retirements may have no corporate beneficiary
+  // at all), but if it's filled in it goes straight into a BRSR/CDP-grade
+  // compliance certificate with no format check today. Validate the standard
+  // 15-character GSTIN shape (2-digit state code, 10-char PAN, entity code,
+  // literal 'Z', checksum) before allowing submission.
+  const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+  const gstinError = beneficiaryGstin && !GSTIN_RE.test(beneficiaryGstin)
+    ? 'Invalid GSTIN format (expected e.g. 27AAAAA0000A1Z5)'
+    : '';
+
   const REPORTING_STDS = [
     { value:'GHG_PROTOCOL', label:'GHG Protocol' },
     { value:'CDP',          label:'CDP'           },
@@ -726,13 +771,20 @@ function RetireModal({ credit, onConfirm, onClose, loading }) {
             <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
               <div>
                 <label htmlFor="bene-gstin" style={{ fontSize:9, color:'#86efac88',
-                  letterSpacing:'.12em', display:'block', marginBottom:5 }}>GSTIN</label>
+                  letterSpacing:'.12em', display:'block', marginBottom:5 }}>GSTIN (OPTIONAL)</label>
                 <input id="bene-gstin" value={beneficiaryGstin}
                   onChange={e => setBeneficiaryGstin(e.target.value.toUpperCase().slice(0,15))}
                   maxLength={15} pattern="[0-9A-Z]{15}"
-                  style={{ width:'100%', padding:'9px 10px', borderRadius:6, border:'1px solid #0d1f11',
+                  aria-invalid={!!gstinError}
+                  style={{ width:'100%', padding:'9px 10px', borderRadius:6,
+                    border:`1px solid ${gstinError ? '#dc2626' : '#0d1f11'}`,
                     background:'#040706', color:'#f0fdf4', fontFamily:'DM Mono,monospace',
                     fontSize:11, outline:'none' }}/>
+                {gstinError && (
+                  <span role="alert" style={{ fontSize:9, color:'#fca5a5', marginTop:4, display:'block' }}>
+                    {gstinError}
+                  </span>
+                )}
               </div>
               <div>
                 <label htmlFor="retire-purpose" style={{ fontSize:9, color:'#86efac88',
@@ -784,9 +836,12 @@ function RetireModal({ credit, onConfirm, onClose, loading }) {
               beneficiaryName, beneficiaryEntity, beneficiaryGstin,
               reportingStandard: reportingStd, purpose,
             })}
-            disabled={loading || qty < 1 || qty > credit.credits}
+            disabled={loading || qty < 1 || qty > credit.credits || !!gstinError}
+            title={gstinError || undefined}
             style={{ flex:2, padding:'12px', borderRadius:8, border:'1px solid #f8717133',
-              background:'#0e0505', color:'#f87171', cursor:loading?'not-allowed':'pointer',
+              background:'#0e0505', color:'#f87171',
+              cursor:(loading || gstinError)?'not-allowed':'pointer',
+              opacity: gstinError ? 0.5 : 1,
               fontFamily:'DM Mono,monospace', fontSize:12, fontWeight:700 }}>
             {loading ? '⟳ BURNING ON-CHAIN…'
                      : `RETIRE ${Number(qty).toLocaleString()} tCO₂ (S${scope}) →`}
@@ -819,7 +874,7 @@ function QRCodeImg({ value, size = 120 }) {
 function RetirementCertificate({ credit, txHash, onClose }) {
   const [pdfLoading, setPdfLoading] = useState(false);
   const date         = new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'long',year:'numeric'});
-  const tokenDisplay = credit.tokenHex || (credit.tokenId
+  const tokenDisplay = credit.tokenHex || (credit.tokenId != null
     ? `0x${Number(credit.tokenId).toString(16).padStart(8,'0').toUpperCase()}` : '—');
   const certId    = credit.certId || credit.certificate_id;
   const verifyUrl = certId ? `${VERIFY_BASE_URL}/${certId}` : null;
@@ -1076,6 +1131,20 @@ export default function PortfolioV3() {
   const [bulkAction,    setBulkAction]    = useState(null);
   const [bulkPrice,     setBulkPrice]     = useState('');
   const [bulkProgress,  setBulkProgress]  = useState(null);
+  const [bulkRetireConfirm, setBulkRetireConfirm] = useState(false); // gate for irreversible bulk retire
+
+  // Pagination — grid renders in pages instead of the full filtered array at once
+  const PAGE_SIZE = 12;
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+
+  // Per-card visual-only "processing" overlay so list/delist/retire feel instant
+  // instead of waiting on the full on-chain refetch. Never affects underlying
+  // data — purely a rendering hint, cleared once the refetch settles.
+  const [processingCredits, setProcessingCredits] = useState({});
+  const markProcessing = (key, label) =>
+    setProcessingCredits(p => ({ ...p, [key]: label }));
+  const clearProcessing = (key) =>
+    setProcessingCredits(p => { const n = { ...p }; delete n[key]; return n; });
 
   useEffect(() => {
     mountedRef.current = true;
@@ -1102,8 +1171,6 @@ export default function PortfolioV3() {
     }
   }, [isKYCVerified]);
 
-  // AFTER
-// REPLACE WITH
 useEffect(() => {
   loadPendingCredits();
   loadEmissionsData();
@@ -1162,6 +1229,18 @@ useEffect(() => {
     }
   };
 
+  // Optimistic remove — drop it from the UI immediately, restore it if the
+  // DELETE fails so the list never silently drifts from the server's state.
+  const handleRemoveWatchlist = async (item) => {
+    setWatchlist(prev => prev.filter(w => w.id !== item.id));
+    try {
+      await apiFetch(`/api/portfolio/watchlist/${item.id}`, { method: 'DELETE' });
+    } catch (e) {
+      setWatchlist(prev => [...prev, item]);
+      showToast(e.message || 'Could not remove from watchlist', 'error');
+    }
+  };
+
   // ── Credit lists ───────────────────────────────────────────────
   const ownedCredits = useMemo(() => {
     const approved = myCredits;
@@ -1210,7 +1289,18 @@ useEffect(() => {
       listedCredits: 0,
       isOnChain    : true,
       admin_status : 'approved',
-      tokenId      : b.tokenId || b.token_id || null,
+      // FIX: `0` is a valid tokenId — `||` treated it as falsy and dropped it.
+      tokenId      : b.tokenId ?? b.token_id ?? null,
+      // FIX: these four fields feed getReferencePrice() + the P&L math. The API
+      // response is inconsistently cased (see tokenId/quantity fallbacks above),
+      // so without fallbacks these were silently undefined for bought credits —
+      // portfolioValue defaulted to a flat ₹850 reference price for every bought
+      // credit, totalInvested came out to 0, and pnlPct's zero-guard then always
+      // showed 0%.
+      pricePerCredit: safeNum(b.pricePerCredit ?? b.price_per_credit ?? b.totalPaid / (b.quantity || b.credits || 1)),
+      projectType   : b.projectType   ?? b.project_type   ?? '',
+      standard      : b.standard      ?? b.standard_type  ?? 'VCS',
+      vintageYear   : b.vintageYear   ?? b.vintage_year   ?? null,
     })),
   [myBoughtCredits]);
 
@@ -1232,28 +1322,32 @@ useEffect(() => {
   // Correct stats — sum tCO₂ not card counts
   const statTotals = useMemo(() => {
   const active = allCredits.filter(c => !c.isPending && !c.isRejected && c.status !== 'RETIRED');
-  
+
   const totalTco2 = active.reduce((s, c) => s + safeNum(c.heldCredits ?? c.credits), 0);
-  
+
   const listedTco2 = active
     .filter(c => c.status === 'LISTED' || c.status === 'PARTIAL')
     .reduce((s, c) => s + safeNum(c.listedCredits), 0);
-  
-  const portfolioValue = active.reduce((s, c) => {
-    const dep     = vintagePenalty(c.vintageYear) / 100;
-    const base    = REFERENCE_PRICES[c.projectType] || 850;
-    const premium = STANDARD_PREMIUM[c.standard] || 1.0;
-    const price   = c.isBought && c.pricePerCredit > 0
-      ? c.pricePerCredit
-      : c.pricePerCredit > 0
-        ? c.pricePerCredit * (1 - dep)
-        : base * premium * (1 - dep);
-    return s + safeNum(c.heldCredits ?? c.credits) * price;
-  }, 0);
+
+  // FIX: value everything (bought + minted) at CURRENT reference price so this
+  // total reconciles with the MINTED VALUE + BOUGHT VALUE hover breakdown below,
+  // which already uses getReferencePrice() for both categories. Previously,
+  // bought credits were valued at their original purchase price here, so the
+  // displayed total never matched MINTED + BOUGHT.
+  // FIX: mapDbCredit() in PortfolioContext defaults `pricePerCredit` to a flat
+  // ₹850 for any credit that has never been listed/traded — it's a placeholder,
+  // not a real reference price. Using it here (as the old code did whenever
+  // pricePerCredit > 0, i.e. almost always) priced most held credits at a flat
+  // ₹850 regardless of project type, while the MINTED VALUE / BOUGHT VALUE hover
+  // breakdown above always uses getReferencePrice() (real per-project pricing).
+  // The two numbers could never reconcile. Price everything the same way here.
+  const portfolioValue = active.reduce((s, c) =>
+    s + safeNum(c.heldCredits ?? c.credits) * getReferencePrice(c.projectType, c.standard, c.vintageYear),
+  0);
 
   const retiredTco2 = myRetirements.reduce((s, r) => s + safeNum(r.amount), 0);
 
-  // P&L — bought credits only
+  // P&L — bought credits only (this one correctly uses purchase price vs current price)
   const totalInvested = normalisedBought.reduce((s, c) =>
     s + safeNum(c.pricePerCredit) * safeNum(c.heldCredits ?? c.credits), 0);
 
@@ -1395,6 +1489,14 @@ useEffect(() => {
   clearBulkMode();
 // eslint-disable-next-line react-hooks/exhaustive-deps
 }, [activeTab]);
+
+// Reset pagination whenever the visible set could change shape — otherwise a
+// user filtered to page 3 could land on an empty-looking page after switching
+// tabs or narrowing filters.
+useEffect(() => {
+  setVisibleCount(PAGE_SIZE);
+// eslint-disable-next-line react-hooks/exhaustive-deps
+}, [activeTab, searchQuery, filterStandard, filterType, filterVintage, filterCreditType, sortBy, sortDir]);
 
   // ── Form validation ────────────────────────────────────────────
   const validateForm = () => {
@@ -1553,14 +1655,16 @@ useEffect(() => {
     showToast(`Quantity must be between 1 and ${credit.credits}`, 'error');
     return;
   }
+  const creditKey = credit.id || credit.tokenId;
   try {
     setTxPending(`Listing "${sanitise(credit.projectName)}"…`);
+    markProcessing(creditKey, 'listing');
     const rate     = ethPriceInr || 210000;
     const priceEth = (price / rate).toFixed(6);
     const result   = await listCredit(credit.tokenId, qty, priceEth, price);
 
     // ── Sync listing ID to DB so market query picks it up ──
-    const { listingId } = result;
+        const { listingId } = result;
     if (listingId !== null && listingId !== undefined) {
       try {
         await apiFetch('/api/portfolio/confirm-listing', {
@@ -1570,6 +1674,7 @@ useEffect(() => {
             listingIdOnchain : listingId,
             txHash           : result.txHash || null,
             pricePerCreditInr: price,
+            quantity         : qty,   // ← NEW: backend needs this to set listed_quantity
           }),
         });
       } catch (dbErr) {
@@ -1591,28 +1696,45 @@ useEffect(() => {
     showToast(e.message || 'Transaction failed', 'error');
   } finally {
     if (mountedRef.current) setTxPending('');
+    clearProcessing(creditKey);
   }
 };
 
 const handleDelist = async (credit, qty) => {
   if (!can('portfolio:list')) { showToast('No permission', 'error'); return; }
+  const onchainListingId = credit.listingIdOnchain ?? credit.listingId;
+  const isPartial = qty && qty < credit.listedCredits;
+  const creditKey = credit.id || credit.tokenId;
+
   try {
     setTxPending('Cancelling listing…');
-    // Use listingIdOnchain (from DB via my-credits) as the on-chain listing ID
-    const onchainListingId = credit.listingIdOnchain ?? credit.listingId;
+    markProcessing(creditKey, 'delisting');
+    // Cancel is always step one, whether this is a full or partial delist.
+    await delistCredit(onchainListingId);
 
-    if (qty && qty < credit.listedCredits) {
-      // Partial delist — cancel then relist remainder
-      await delistCredit(onchainListingId);
+    try {
+      await apiFetch('/api/portfolio/confirm-delisting', {
+        method : 'POST',
+        body   : JSON.stringify({ batchId: credit.id }),
+      });
+    } catch (e) { console.error('[confirm-delisting]', e?.message); }
 
-      try {
-        await apiFetch('/api/portfolio/confirm-delisting', {
-          method : 'POST',
-          body   : JSON.stringify({ batchId: credit.id }),
-        });
-      } catch (e) { console.error('[confirm-delisting]', e?.message); }
+    if (!isPartial) {
+      showToast('All credits removed from marketplace.');
+      await loadMyCredits();
+      return;
+    }
 
-      const remainingQty = credit.listedCredits - qty;
+    // Partial delist = cancel, THEN a separate relist transaction for the
+    // remainder. The cancel above already succeeded — if the relist below
+    // fails, the credit is now FULLY off the market (not partially, as the
+    // user asked), so that failure needs its own message. Falling through to
+    // the generic catch would say "Transaction failed" and leave the user
+    // thinking nothing happened, when in fact their whole listing is gone.
+    const remainingQty = credit.listedCredits - qty;
+    setTxPending('Relisting remainder…');
+    markProcessing(creditKey, 'relisting');
+    try {
       const rate         = ethPriceInr || 210000;
       const priceEth     = (credit.pricePerCredit / rate).toFixed(6);
       const relistResult = await listCredit(credit.tokenId, remainingQty, priceEth, credit.pricePerCredit);
@@ -1626,33 +1748,65 @@ const handleDelist = async (credit, qty) => {
               listingIdOnchain : relistResult.listingId,
               txHash           : relistResult.txHash || null,
               pricePerCreditInr: credit.pricePerCredit,
+              quantity         : remainingQty,   // ← NEW
             }),
           });
         } catch (e) { console.error('[confirm-listing relist]', e?.message); }
       }
 
       showToast(`${qty} credits delisted. ${remainingQty} still listed.`);
-    } else {
-      // Full delist
-      await delistCredit(onchainListingId);
-
-      try {
-        await apiFetch('/api/portfolio/confirm-delisting', {
-          method : 'POST',
-          body   : JSON.stringify({ batchId: credit.id }),
-        });
-      } catch (e) { console.error('[confirm-delisting]', e?.message); }
-
-      showToast('All credits removed from marketplace.');
+    } catch (relistErr) {
+      console.error('[handleDelist relist-after-cancel]', relistErr?.message);
+      showToast(
+        `Delisted, but relisting the remaining ${remainingQty} failed (${relistErr.message || 'unknown error'}). ` +
+        `All credits are now off the market — use LIST to relist them manually.`,
+        'error'
+      );
     }
+
     await loadMyCredits();
   } catch (e) {
     showToast(e.message || 'Transaction failed', 'error');
   } finally {
     if (mountedRef.current) setTxPending('');
+    clearProcessing(creditKey);
     setShowDelist(null);
     setDelistQty('');
   }
+};
+
+// Shared bulk runner — tracks per-item failures (with the credit itself, so a
+// failed item can be retried directly) instead of just a count, and carries
+// `meta` (action type + any params needed to retry) through every progress
+// update so the retry button always knows how to re-run just the failures.
+const runBulkAction = async (selectedCredits, actionFn, statusLabel, meta = {}) => {
+  let progress = {
+    total: selectedCredits.length, done: 0, failed: 0,
+    status: statusLabel, failedItems: [], ...meta,
+  };
+  setBulkProgress(progress);
+
+  for (let i = 0; i < selectedCredits.length; i++) {
+    const credit = selectedCredits[i];
+    try {
+      await actionFn(credit);
+      progress = { ...progress, done: progress.done + 1 };
+    } catch (e) {
+      progress = {
+        ...progress,
+        failed: progress.failed + 1,
+        failedItems: [...progress.failedItems,
+          { credit, error: e.message || 'Transaction failed' }],
+      };
+      console.error(`[bulk:${statusLabel}]`, credit.projectName, e.message);
+    }
+    setBulkProgress(progress);
+  }
+
+  progress = { ...progress, status: 'done' };
+  setBulkProgress(progress);
+  await loadMyCredits();
+  return progress;
 };
 
 const handleBulkList = async () => {
@@ -1663,63 +1817,97 @@ const handleBulkList = async () => {
   const selectedCredits = filtered.filter(c =>
     selectedCards.has(c.id || c.tokenId) && c.tokenId != null
   );
-
   if (!selectedCredits.length) { showToast('No valid credits selected', 'error'); return; }
 
-  setBulkProgress({ total: selectedCredits.length, done: 0, failed: 0, status: 'listing' });
-
-  const rate = ethPriceInr || 210000;
+  const rate     = ethPriceInr || 210000;
   const priceEth = (price / rate).toFixed(6);
 
-  for (let i = 0; i < selectedCredits.length; i++) {
-    const credit = selectedCredits[i];
-    try {
-      await listCredit(credit.tokenId, credit.heldCredits ?? credit.credits, priceEth, price);
-      setBulkProgress(p => ({ ...p, done: p.done + 1 }));
-    } catch (e) {
-      setBulkProgress(p => ({ ...p, failed: p.failed + 1 }));
-      console.error('[bulkList]', credit.projectName, e.message);
-    }
-  }
+  const result = await runBulkAction(
+    selectedCredits,
+    credit => listCredit(credit.tokenId, credit.heldCredits ?? credit.credits, priceEth, price),
+    'listing',
+    { actionType: 'list', retryParams: { priceEth, price } },
+  );
 
-  setBulkProgress(p => ({ ...p, status: 'done' }));
-  await loadMyCredits();
-  showToast(`Bulk listed ${selectedCredits.length} credits!`);
-  clearBulkMode();
+  if (result.failed === 0) {
+    showToast(`Bulk listed ${result.done} credit${result.done === 1 ? '' : 's'}!`);
+    clearBulkMode();
+  } else {
+    showToast(`Listed ${result.done} of ${result.total} — ${result.failed} failed. Retry below.`, 'error');
+  }
 };
 
-const handleBulkRetire = async () => {
+// Bulk retire is irreversible on-chain, same as the single-credit retire flow —
+// but previously fired with zero confirmation on a single button click. This
+// now opens a confirmation step first; the actual burn happens in
+// executeBulkRetire once the user confirms.
+const handleBulkRetire = () => {
   if (!can('portfolio:retire')) { showToast('No permission', 'error'); return; }
-
   const selectedCredits = filtered.filter(c =>
     selectedCards.has(c.id || c.tokenId) && c.tokenId != null
   );
+  if (!selectedCredits.length) { showToast('No valid credits selected', 'error'); return; }
+  setBulkRetireConfirm(true);
+};
 
+const executeBulkRetire = async () => {
+  setBulkRetireConfirm(false);
+  const selectedCredits = filtered.filter(c =>
+    selectedCards.has(c.id || c.tokenId) && c.tokenId != null
+  );
   if (!selectedCredits.length) { showToast('No valid credits selected', 'error'); return; }
 
-  setBulkProgress({ total: selectedCredits.length, done: 0, failed: 0, status: 'retiring' });
+  const result = await runBulkAction(
+    selectedCredits,
+    credit => retireCredit(credit.tokenId, credit.heldCredits ?? credit.credits, '1', {}),
+    'retiring',
+    { actionType: 'retire' },
+  );
 
-  for (let i = 0; i < selectedCredits.length; i++) {
-    const credit = selectedCredits[i];
-    try {
-      await retireCredit(credit.tokenId, credit.heldCredits ?? credit.credits, '1', {});
-      setBulkProgress(p => ({ ...p, done: p.done + 1 }));
-    } catch (e) {
-      setBulkProgress(p => ({ ...p, failed: p.failed + 1 }));
-      console.error('[bulkRetire]', credit.projectName, e.message);
-    }
+  if (result.failed === 0) {
+    showToast(`Bulk retired ${result.done} credit${result.done === 1 ? '' : 's'}!`);
+    clearBulkMode();
+  } else {
+    showToast(`Retired ${result.done} of ${result.total} — ${result.failed} failed. Retry below.`, 'error');
   }
+};
 
-  setBulkProgress(p => ({ ...p, status: 'done' }));
-  await loadMyCredits();
-  showToast(`Bulk retired ${selectedCredits.length} credits!`);
-  clearBulkMode();
+// Retry only the items that failed last time, reusing the same action + params.
+const handleRetryFailedBulk = async () => {
+  if (!bulkProgress?.failedItems?.length) return;
+  const items = bulkProgress.failedItems.map(f => f.credit);
+
+  const result = bulkProgress.actionType === 'list'
+    ? await runBulkAction(
+        items,
+        credit => listCredit(
+          credit.tokenId, credit.heldCredits ?? credit.credits,
+          bulkProgress.retryParams.priceEth, bulkProgress.retryParams.price,
+        ),
+        'listing',
+        { actionType: 'list', retryParams: bulkProgress.retryParams },
+      )
+    : await runBulkAction(
+        items,
+        credit => retireCredit(credit.tokenId, credit.heldCredits ?? credit.credits, '1', {}),
+        'retiring',
+        { actionType: 'retire' },
+      );
+
+  if (result.failed === 0) {
+    showToast(`Retry succeeded — all ${result.done} went through!`);
+    clearBulkMode();
+  } else {
+    showToast(`Retry: ${result.done} succeeded, ${result.failed} still failing`, 'error');
+  }
 };
 
   // ── Retire confirm ─────────────────────────────────────────────
   const handleRetireConfirm = async (credit, qty, scope, corporateData) => {
+    const creditKey = credit.id || credit.tokenId;
     try {
       setTxPending('Checking for duplicate retirement…');
+      markProcessing(creditKey, 'retiring');
       const dupCheck = await apiFetch(
         `/api/portfolio/check-duplicate-retirement?serial=${encodeURIComponent(credit.serialNumber)}`
       );
@@ -1793,6 +1981,7 @@ const result = await retireCredit(credit.tokenId, qty);
       showToast(e.message || 'Transaction failed', 'error');
     } finally {
       if (mountedRef.current) setTxPending('');
+      clearProcessing(creditKey);
     }
   };
 
@@ -2059,9 +2248,14 @@ const result = await retireCredit(credit.tokenId, qty);
 
   {/* TOTAL CREDITS */}
   <div className="pt-stat" key="TOTAL CREDITS"
+    role="button" tabIndex={0} aria-expanded={hoveredStat==='credits'}
+    aria-label="Total credits — press to see breakdown by held, listed, bought, retired"
     style={{ cursor:'pointer' }}
     onMouseEnter={() => setHoveredStat('credits')}
     onMouseLeave={() => setHoveredStat(null)}
+    onFocus={() => setHoveredStat('credits')}
+    onBlur={() => setHoveredStat(null)}
+    onKeyDown={e => (e.key === 'Enter' || e.key === ' ') && setHoveredStat(h => h==='credits' ? null : 'credits')}
     onTouchStart={() => setHoveredStat(h => h==='credits' ? null : 'credits')}>
     <div style={{ position:'absolute', top:0, left:0, right:0, height:2,
       background:'linear-gradient(90deg,#052e16,#16a34a)', borderRadius:'12px 12px 0 0' }}/>
@@ -2108,9 +2302,14 @@ const result = await retireCredit(credit.tokenId, qty);
 
   {/* PORTFOLIO VALUE */}
   <div className="pt-stat"
+    role="button" tabIndex={0} aria-expanded={hoveredStat==='value'}
+    aria-label="Portfolio value — press to see breakdown by minted and bought value"
     style={{ cursor:'pointer' }}
     onMouseEnter={() => setHoveredStat('value')}
     onMouseLeave={() => setHoveredStat(null)}
+    onFocus={() => setHoveredStat('value')}
+    onBlur={() => setHoveredStat(null)}
+    onKeyDown={e => (e.key === 'Enter' || e.key === ' ') && setHoveredStat(h => h==='value' ? null : 'value')}
     onTouchStart={() => setHoveredStat(h => h==='value' ? null : 'value')}>
     <div style={{ position:'absolute', top:0, left:0, right:0, height:2,
       background:'linear-gradient(90deg,#0c1a2e,#3b82f6)', borderRadius:'12px 12px 0 0' }}/>
@@ -2164,9 +2363,14 @@ const result = await retireCredit(credit.tokenId, qty);
 
   {/* P&L */}
   <div className="pt-stat"
+    role="button" tabIndex={0} aria-expanded={hoveredStat==='pnl'}
+    aria-label="Unrealised profit and loss — press to see breakdown"
     style={{ cursor:'pointer' }}
     onMouseEnter={() => setHoveredStat('pnl')}
     onMouseLeave={() => setHoveredStat(null)}
+    onFocus={() => setHoveredStat('pnl')}
+    onBlur={() => setHoveredStat(null)}
+    onKeyDown={e => (e.key === 'Enter' || e.key === ' ') && setHoveredStat(h => h==='pnl' ? null : 'pnl')}
     onTouchStart={() => setHoveredStat(h => h==='pnl' ? null : 'pnl')}>
     <div style={{ position:'absolute', top:0, left:0, right:0, height:2,
       background: statTotals.pnl >= 0
@@ -2234,9 +2438,14 @@ const result = await retireCredit(credit.tokenId, qty);
 
   {/* PERMANENTLY RETIRED */}
   <div className="pt-stat"
+    role="button" tabIndex={0} aria-expanded={hoveredStat==='retired'}
+    aria-label="Permanently retired credits — press to see breakdown"
     style={{ cursor:'pointer' }}
     onMouseEnter={() => setHoveredStat('retired')}
     onMouseLeave={() => setHoveredStat(null)}
+    onFocus={() => setHoveredStat('retired')}
+    onBlur={() => setHoveredStat(null)}
+    onKeyDown={e => (e.key === 'Enter' || e.key === ' ') && setHoveredStat(h => h==='retired' ? null : 'retired')}
     onTouchStart={() => setHoveredStat(h => h==='retired' ? null : 'retired')}>
     <div style={{ position:'absolute', top:0, left:0, right:0, height:2,
       background:'linear-gradient(90deg,#0f0520,#7c3aed)', borderRadius:'12px 12px 0 0' }}/>
@@ -2344,6 +2553,11 @@ const result = await retireCredit(credit.tokenId, qty);
                           style={{ padding:'4px 8px', borderRadius:4, border:'1px solid #22c55e33',
                             background:'#0d2e1f', color:'#22c55e88', cursor:'pointer',
                             fontFamily:'DM Mono,monospace', fontSize:9 }}>BUY</button>
+                        <button onClick={() => handleRemoveWatchlist(w)}
+                          aria-label={`Remove ${sanitise(w.name)} from watchlist`}
+                          style={{ padding:'4px 8px', borderRadius:4, border:'1px solid #f8717133',
+                            background:'#1a0707', color:'#f8717188', cursor:'pointer',
+                            fontFamily:'DM Mono,monospace', fontSize:9 }}>✕</button>
                       </div>
                     ))}
                   </div>
@@ -2683,12 +2897,14 @@ const result = await retireCredit(credit.tokenId, qty);
                       </button>
                     )}
                   </div>
-                ) : filtered.map((credit, cardIdx) => {
+                ) : filtered.slice(0, visibleCount).map((credit, cardIdx) => {
                   const reg          = REGISTRIES[credit.standard] || REGISTRIES.VCS;
                   const dep          = vintagePenalty(credit.vintageYear);
-                  const refPrice = credit.isBought 
-  ? safeNum(credit.pricePerCredit || credit.totalPaid / credit.credits) 
-  : getReferencePrice(credit.projectType, credit.standard, credit.vintageYear);
+                  // FIX: bought-credit refPrice previously showed purchase price
+                  // (making "current price" / P&L look wrong). Always show current
+                  // market reference price here; purchase price is shown separately
+                  // as "BOUGHT AT" wherever needed.
+                  const refPrice     = getReferencePrice(credit.projectType, credit.standard, credit.vintageYear);
                   const isMinted     = credit.isOnChain !== false && credit.tokenId != null;
                   const daysLeft     = getDaysUntilExpiry(credit.expiryDate);
                   const expiryUrgent = daysLeft !== null && daysLeft <= 90 && daysLeft > 0;
@@ -2712,7 +2928,24 @@ const result = await retireCredit(credit.tokenId, qty);
                     <article key={credit.id || cardIdx}
   className={`pt-card${credit.isPending&&!credit.isRejected?' pending-approval':''}${credit.isRejected?' rejected':''}${bulkMode&&selectedCards.has(credit.id||credit.tokenId)?' bulk-selected':''}`}
   aria-label={`Credit: ${credit.projectName}`}
-  style={ bulkMode ? { overflow:'visible' } : undefined }>
+  style={ bulkMode ? { overflow:'visible', position:'relative' } : { position:'relative' } }>
+
+  {/* Visual-only processing overlay — action already fired, this just avoids
+      the card looking idle while the on-chain refetch catches up. */}
+  {processingCredits[credit.id || credit.tokenId] && (
+    <div style={{ position:'absolute', inset:0, zIndex:5, background:'#040706cc',
+      display:'flex', alignItems:'center', justifyContent:'center', borderRadius:14,
+      backdropFilter:'blur(1px)' }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8, padding:'8px 14px',
+        background:'#0a0f0c', border:'1px solid #22c55e33', borderRadius:8 }}>
+        <div className="pt-spinner" aria-hidden="true"/>
+        <span style={{ fontSize:10, color:'#22c55e88', fontFamily:'DM Mono,monospace',
+          letterSpacing:'.06em', textTransform:'uppercase' }}>
+          {processingCredits[credit.id || credit.tokenId]}…
+        </span>
+      </div>
+    </div>
+  )}
 
   <div className="pt-ribbon"
     style={{ background:statusStyle.bg, color:statusStyle.color, border:`1px solid ${statusStyle.border}` }}>
@@ -2723,7 +2956,16 @@ const result = await retireCredit(credit.tokenId, qty);
   const isSelected = selectedCards.has(credit.id || credit.tokenId);
   return (
     <div
+      role="checkbox" aria-checked={isSelected} tabIndex={0}
+      aria-label={`Select ${sanitise(credit.projectName)} for bulk action`}
       onClick={e => { e.stopPropagation(); toggleBulkSelect(credit.id || credit.tokenId); }}
+      onKeyDown={e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          e.stopPropagation();
+          toggleBulkSelect(credit.id || credit.tokenId);
+        }
+      }}
       style={{
         display: 'flex', alignItems: 'center', gap: 8,
         padding: '8px 14px',
@@ -2976,12 +3218,30 @@ const result = await retireCredit(credit.tokenId, qty);
                   );
                 })}
               </div>
+
+              {/* Pagination — the grid above renders visibleCount at a time
+                  instead of the full filtered list, since portfolios with
+                  hundreds of credits would otherwise mount every card at once. */}
+              {activeTab !== 'RETIRED' && filtered.length > visibleCount && (
+                <div style={{ textAlign:'center', marginTop:20 }}>
+                  <button onClick={() => setVisibleCount(v => v + PAGE_SIZE)}
+                    style={{ padding:'11px 28px', borderRadius:8, cursor:'pointer',
+                      border:'1px solid #22c55e33', background:'#0a0f0a', color:'#86efacaa',
+                      fontFamily:'DM Mono,monospace', fontSize:11, letterSpacing:'.08em' }}>
+                    ↓ LOAD MORE ({filtered.length - visibleCount} remaining)
+                  </button>
+                </div>
+              )}
             </ErrorBoundary>
           )}
 
           {section === 'ANALYTICS' && (
             <ErrorBoundary>
-              {can('portfolio:read')
+              {!rbacLoaded
+                ? <div style={{ padding:40, textAlign:'center', color:'#86efac33', fontSize:11 }}>
+                    ⟳ Loading permissions…
+                  </div>
+                : can('portfolio:read')
                 ? <PortfolioAnalytics allCredits={allCredits} myRetirements={myRetirements}/>
                 : <div style={{ padding:40, textAlign:'center', color:'#86efac33', fontSize:11 }}>
                     🔒 Analytics requires portfolio read access
@@ -2992,7 +3252,11 @@ const result = await retireCredit(credit.tokenId, qty);
 
           {section === 'AUDIT' && (
             <ErrorBoundary>
-              {can('portfolio:read')
+              {!rbacLoaded
+                ? <div style={{ padding:40, textAlign:'center', color:'#86efac33', fontSize:11 }}>
+                    ⟳ Loading permissions…
+                  </div>
+                : can('portfolio:read')
                 ? <AuditTrailPanel orgId={org?.id}/>
                 : <div style={{ padding:40, textAlign:'center', color:'#86efac33', fontSize:11 }}>
                     🔒 Audit log requires portfolio read access
@@ -3075,14 +3339,76 @@ const result = await retireCredit(credit.tokenId, qty);
         transition:'width .3s ease'
       }}/>
     </div>
-    {bulkProgress.status === 'done' && (
-      <button onClick={clearBulkMode}
-        style={{ marginTop:10, width:'100%', padding:'8px', borderRadius:6,
-          border:'1px solid #22c55e33', background:'#0d2e1f', color:'#22c55e',
-          cursor:'pointer', fontFamily:'DM Mono,monospace', fontSize:10, fontWeight:700 }}>
-        CLOSE
-      </button>
+    {bulkProgress.status === 'done' && bulkProgress.failedItems?.length > 0 && (
+      <div style={{ marginTop:10, maxHeight:140, overflowY:'auto' }}>
+        {bulkProgress.failedItems.map(({ credit, error }, i) => (
+          <div key={credit.id || credit.tokenId || i} style={{ padding:'6px 8px',
+            background:'#1a0707', border:'1px solid #f8717122', borderRadius:6,
+            marginBottom:5, fontSize:9 }}>
+            <div style={{ color:'#f87171', fontWeight:700, marginBottom:2 }}>
+              {credit.projectName || 'Unknown credit'}
+            </div>
+            <div style={{ color:'#f8717166' }}>{error}</div>
+          </div>
+        ))}
+      </div>
     )}
+    {bulkProgress.status === 'done' && (
+      <div style={{ display:'flex', gap:8, marginTop:10 }}>
+        {bulkProgress.failedItems?.length > 0 && (
+          <button onClick={handleRetryFailedBulk}
+            style={{ flex:1, padding:'8px', borderRadius:6,
+              border:'1px solid #f9731644', background:'#0e1200', color:'#fde047',
+              cursor:'pointer', fontFamily:'DM Mono,monospace', fontSize:10, fontWeight:700 }}>
+            ↻ RETRY {bulkProgress.failedItems.length} FAILED
+          </button>
+        )}
+        <button onClick={clearBulkMode}
+          style={{ flex:1, padding:'8px', borderRadius:6,
+            border:'1px solid #22c55e33', background:'#0d2e1f', color:'#22c55e',
+            cursor:'pointer', fontFamily:'DM Mono,monospace', fontSize:10, fontWeight:700 }}>
+          CLOSE
+        </button>
+      </div>
+    )}
+  </div>
+)}
+
+{/* Bulk retire confirmation — bulk retire is irreversible on-chain, so unlike
+    a stray click it needs the same explicit gate the single-credit retire
+    modal already has. */}
+{bulkRetireConfirm && (
+  <div role="dialog" aria-modal="true" aria-label="Confirm bulk retirement"
+    style={{ position:'fixed', inset:0, background:'rgba(0,0,0,.88)',
+      backdropFilter:'blur(6px)', zIndex:4100, display:'flex',
+      alignItems:'center', justifyContent:'center', padding:24 }}
+    onClick={e => e.target === e.currentTarget && setBulkRetireConfirm(false)}>
+    <div style={{ background:'#070c09', border:'1px solid #f8717133', borderRadius:16,
+      width:'100%', maxWidth:420, padding:24 }}>
+      <div style={{ fontSize:13, fontWeight:700, color:'#f0fdf4', marginBottom:10 }}>
+        🔥 Retire {selectedCards.size} credit{selectedCards.size === 1 ? '' : 's'}?
+      </div>
+      <div role="alert" style={{ padding:'10px 12px', background:'#0e0505', borderRadius:6,
+        border:'1px solid #f8717122', fontSize:11, color:'#f8717188', marginBottom:16, lineHeight:1.6 }}>
+        ⚠️ <strong style={{ color:'#f87171aa' }}>Irreversible.</strong> All selected tokens will be
+        permanently burned on-chain. Bulk retirement uses Scope 1 / GHG Protocol defaults for every
+        credit — for custom beneficiary or reporting details, retire credits individually instead.
+      </div>
+      <div style={{ display:'flex', gap:10 }}>
+        <button onClick={() => setBulkRetireConfirm(false)}
+          style={{ flex:1, padding:'12px', borderRadius:8, border:'1px solid #0d1f11',
+            background:'#060a07', color:'#86efac66', cursor:'pointer',
+            fontFamily:'DM Mono,monospace', fontSize:12 }}>
+          CANCEL
+        </button>
+        <button onClick={executeBulkRetire}
+          style={{ flex:2, padding:'12px', borderRadius:8, border:'1px solid #f8717133',
+            background:'#0e0505', color:'#f87171', cursor:'pointer',
+            fontFamily:'DM Mono,monospace', fontSize:12, fontWeight:700 }}>
+          🔥 RETIRE {selectedCards.size} CREDITS →
+        </button>
+      </div>
+    </div>
   </div>
 )}
 
@@ -3702,9 +4028,10 @@ const result = await retireCredit(credit.tokenId, qty);
   const c         = selectedCard;
   const reg       = REGISTRIES[c.standard] || REGISTRIES.VCS;
   const dep       = vintagePenalty(c.vintageYear);
-  const refPrice  = c.isBought
-    ? safeNum(c.pricePerCredit || c.totalPaid / c.credits)
-    : getReferencePrice(c.projectType, c.standard, c.vintageYear);
+  // FIX: always compute refPrice from current market data. Purchase price
+  // (c.pricePerCredit) is shown separately in the "BOUGHT AT" field of the
+  // P&L box below, so it no longer gets conflated with "current price".
+  const refPrice  = getReferencePrice(c.projectType, c.standard, c.vintageYear);
   const ctMeta    = CREDIT_TYPES.find(t => t.value === (c.creditType||'voluntary')) || CREDIT_TYPES[0];
   const daysLeft  = getDaysUntilExpiry(c.expiryDate);
   const expired   = daysLeft !== null && daysLeft <= 0;

@@ -3,13 +3,7 @@
 // SINGLE source of truth for plan UI metadata on the frontend.
 // NEVER put pricing here — prices come from /api/subscription/prices.
 // NEVER import this file in any backend/server code.
-//
-// [v5] Updated to match confirmed tier structure:
-//   FREE      — ₹0        · 1.5% gas · 1 seat
-//   STARTER   — ₹1,499/mo · 1% gas   · 3 seats  (₹14,990/yr)
-//   GROWTH    — ₹7,999/mo · 0.75% gas· 10 seats  (₹79,990/yr)
-//   CORPORATE — Contact Sales · 0.5% negotiated · Custom seats
-// ─────────────────────────────────────────────────────────────────
+//─
 
 export const PLAN_KEYS = ['free', 'starter', 'growth', 'corporate'];
 

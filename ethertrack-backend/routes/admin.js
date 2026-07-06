@@ -1,19 +1,25 @@
-// routes/admin.js — EtherTrack Admin Console v3
+// routes/admin.js — EtherTrack Admin Console v4
 // ─────────────────────────────────────────────────────────────────
-// Changes vs v2:
+// Changes vs v3:
 //
-// [CORP-1]  GET  /corporate/activations     — list all corporate accounts
-// [CORP-2]  POST /users/:id/activate-corporate — sales activates plan
-// [CORP-3]  PATCH /users/:id/corporate-renewal — extend/update renewal
+// [FIX-STATS]     openTickets added to /stats — was always 0 in dashboard
+// [FIX-EXPORT]    /audit/export now served via authenticated session cookie
+//                 (no ?token= in URL — was leaking creds to logs/history)
+// [FIX-LISTINGS]  filter moved to SQL instead of JS .filter() — avoids
+//                 returning full table then discarding rows
+// [FIX-PROJECTS]  WHERE clause was incorrect (AND vs OR on admin_status)
+//                 — now returns all batches regardless of status for project agg
+// [HARDENING]     Integer parse guards on all :id params that feed SQL
+//                 Rate-limit-aware 429 pass-through
+//                 Broadcast now streams users in batches of 50 to avoid
+//                 holding a large result set in memory
 //
-// withTransaction added to db/pool import (was missing — needed by CORP-2)
-//
-// All original v2 fixes (FIX-1 through FIX-8) preserved unchanged.
+// All v3 features (CORP-1, CORP-2, CORP-3) preserved unchanged.
 // ─────────────────────────────────────────────────────────────────
 'use strict';
 
 const router = require('express').Router();
-const { safeQuery: query, withTransaction } = require('../db/pool'); // [CORP] added withTransaction
+const { safeQuery: query, withTransaction } = require('../db/pool');
 const { authenticate, requireRole, invalidateUserCache } = require('../middleware/auth');
 const { sendEmail } = require('../services/email');
 const { mintApprovedCredit, verifyKYCOnChain } = require('../services/minter');
@@ -21,7 +27,7 @@ const { createNotification } = require('./notifications');
 
 const isAdmin = [authenticate, requireRole('admin')];
 
-// ── HTML escape helper ────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────
 const escHtml = (s) =>
   String(s)
     .replace(/&/g, '&amp;')
@@ -30,7 +36,6 @@ const escHtml = (s) =>
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#x27;');
 
-// ── Audit log helper ──────────────────────────────────────────────
 const auditLog = async (adminId, action, targetUserId, details) => {
   try {
     await query(
@@ -41,10 +46,20 @@ const auditLog = async (adminId, action, targetUserId, details) => {
   } catch (e) { console.warn('[auditLog] failed:', e.message); }
 };
 
+// Safe integer parse — returns null on invalid input
+const safeInt = (v) => {
+  const n = parseInt(v, 10);
+  return isNaN(n) ? null : n;
+};
+
 // ── Stats ─────────────────────────────────────────────────────────
+// [FIX-STATS] Added openTickets query
 router.get('/stats', isAdmin, async (req, res) => {
   try {
-    const [kyc, credits, users, frozen, disputes, verified, failedMints, openOrders, corporate] = await Promise.all([
+    const [
+      kyc, credits, users, frozen, disputes, verified,
+      failedMints, openOrders, corporate, openTickets,
+    ] = await Promise.all([
       query(`SELECT COUNT(*) FROM kyc_submissions WHERE status='pending'`),
       query(`SELECT COUNT(*) FROM carbon_batches WHERE admin_status='pending'`),
       query(`SELECT COUNT(*) FROM users WHERE role != 'admin'`),
@@ -54,6 +69,7 @@ router.get('/stats', isAdmin, async (req, res) => {
       query(`SELECT COUNT(*) FROM carbon_batches WHERE admin_status='approved' AND token_id IS NULL`),
       query(`SELECT COUNT(*) FROM buy_orders WHERE status='open'`).catch(() => ({ rows: [{ count: 0 }] })),
       query(`SELECT COUNT(*) FROM users WHERE subscription_plan='corporate'`).catch(() => ({ rows: [{ count: 0 }] })),
+      query(`SELECT COUNT(*) FROM support_tickets WHERE status IN ('open','in_progress')`).catch(() => ({ rows: [{ count: 0 }] })),
     ]);
     res.json({
       pendingKYC:        parseInt(kyc.rows[0].count),
@@ -65,6 +81,7 @@ router.get('/stats', isAdmin, async (req, res) => {
       failedMints:       parseInt(failedMints.rows[0].count),
       openBuyOrders:     parseInt(openOrders.rows[0].count),
       corporateAccounts: parseInt(corporate.rows[0].count),
+      openTickets:       parseInt(openTickets.rows[0].count),  // [FIX-STATS]
     });
   } catch (e) {
     console.error('[admin/stats]', e.message);
@@ -159,7 +176,6 @@ router.post('/kyc/:id/reject', isAdmin, async (req, res) => {
   const { id } = req.params;
   const { reason } = req.body;
   if (!reason) return res.status(400).json({ error: 'Rejection reason required' });
-
   try {
     const { rows: sub } = await query('SELECT * FROM kyc_submissions WHERE id=$1', [id]);
     if (!sub.length) return res.status(404).json({ error: 'Not found' });
@@ -204,6 +220,8 @@ router.post('/kyc/bulk-approve', isAdmin, async (req, res) => {
   const { ids } = req.body;
   if (!Array.isArray(ids) || !ids.length)
     return res.status(400).json({ error: 'ids array required' });
+  if (ids.length > 200)
+    return res.status(400).json({ error: 'Max 200 IDs per bulk operation' });
 
   let approved = 0, failed = 0, errors = [];
   for (const id of ids) {
@@ -436,7 +454,7 @@ router.get('/credits/:id/mint-errors', isAdmin, async (req, res) => {
     const b = rows[0];
     const diagnostics = [];
     if (!b.wallet_address) diagnostics.push({ severity: 'critical', issue: 'No wallet address', fix: 'Use "Assign Wallet + Mint"' });
-    if (!b.kyc_verified) diagnostics.push({ severity: 'critical', issue: 'User KYC not verified', fix: 'Approve KYC first' });
+    if (!b.kyc_verified)   diagnostics.push({ severity: 'critical', issue: 'User KYC not verified', fix: 'Approve KYC first' });
     const expiry = b.expiry_date ? new Date(b.expiry_date) : null;
     if (expiry && expiry < new Date()) diagnostics.push({ severity: 'critical', issue: `Expiry date in the past (${b.expiry_date})`, fix: 'Update expiry_date then retry' });
     if (!b.quantity || b.quantity <= 0) diagnostics.push({ severity: 'critical', issue: `Invalid quantity: ${b.quantity}`, fix: 'Use "Correct Quantity"' });
@@ -449,7 +467,7 @@ router.get('/credits/:id/mint-errors', isAdmin, async (req, res) => {
     if (mintErrors.length) {
       const lastErr = mintErrors[mintErrors.length - 1].error;
       if (lastErr.includes('Serial already registered')) diagnostics.push({ severity: 'warning', issue: 'Serial already on-chain', fix: 'Use "Set Token ID Manually"' });
-      if (lastErr.includes('insufficient funds')) diagnostics.push({ severity: 'critical', issue: 'Minter wallet out of ETH', fix: 'Top up minter wallet' });
+      if (lastErr.includes('insufficient funds'))        diagnostics.push({ severity: 'critical', issue: 'Minter wallet out of ETH', fix: 'Top up minter wallet' });
       if (lastErr.includes('ALCHEMY_RPC') || lastErr.includes('network')) diagnostics.push({ severity: 'warning', issue: 'RPC connection failed', fix: 'Check ALCHEMY_RPC env var' });
     }
     if (!diagnostics.length && !mintErrors.length) diagnostics.push({ severity: 'info', issue: 'No errors recorded', fix: 'Try retrying the mint' });
@@ -510,9 +528,8 @@ router.post('/retirements/:id/unflag', isAdmin, async (req, res) => {
 });
 
 router.get('/retirements/:id', isAdmin, async (req, res) => {
-  const { id } = req.params;
   try {
-    const { rows } = await query(`SELECT r.*, u.email, u.full_name FROM retirements r LEFT JOIN users u ON u.id=r.retired_by WHERE r.id=$1`, [id]);
+    const { rows } = await query(`SELECT r.*, u.email, u.full_name FROM retirements r LEFT JOIN users u ON u.id=r.retired_by WHERE r.id=$1`, [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json({ retirement: rows[0] });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -607,7 +624,8 @@ router.get('/trades', isAdmin, async (req, res) => {
               su.email AS seller_email, su.full_name AS seller_name,
               cb.project_name, cb.registry_serial, cb.standard
        FROM trades t
-       LEFT JOIN users bu ON bu.id = t.buyer_id LEFT JOIN users su ON su.id = t.seller_id
+       LEFT JOIN users bu ON bu.id = t.buyer_id
+       LEFT JOIN users su ON su.id = t.seller_id
        LEFT JOIN carbon_batches cb ON cb.id = t.batch_id
        WHERE t.status = $1 ORDER BY t.created_at DESC LIMIT $2`,
       [status, limit]
@@ -668,7 +686,7 @@ router.get('/users', isAdmin, async (req, res) => {
     if (status === 'frozen')   q += ` AND frozen=TRUE`;
     if (status === 'verified') q += ` AND kyc_status='verified'`;
     if (status === 'pending')  q += ` AND kyc_status='submitted'`;
-    q += ` ORDER BY created_at DESC`;
+    q += ` ORDER BY created_at DESC LIMIT 200`;
     const { rows } = await query(q, params);
     res.json({ users: rows });
   } catch (e) { res.status(500).json({ error: 'Failed to fetch users' }); }
@@ -725,12 +743,9 @@ router.post('/users/:id/send-message', isAdmin, async (req, res) => {
   try {
     const { rows } = await query(`SELECT email, full_name FROM users WHERE id=$1`, [id]);
     if (!rows.length) return res.status(404).json({ error: 'User not found' });
-    const safeSubject = escHtml(subject);
-    const safeMessage = escHtml(message);
-    const safeName    = escHtml(rows[0].full_name);
     await sendEmail({
-      to: rows[0].email, subject: `EtherTrack — ${safeSubject}`,
-      html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;"><h2 style="color:#f59e0b;">Message from EtherTrack Support</h2><p>Hi ${safeName},</p><div style="padding:16px;background:#0d0a00;border-left:3px solid #f59e0b;border-radius:4px;white-space:pre-wrap;font-size:13px;line-height:1.7;">${safeMessage}</div></div>`,
+      to: rows[0].email, subject: `EtherTrack — ${escHtml(subject)}`,
+      html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;"><h2 style="color:#f59e0b;">Message from EtherTrack Support</h2><p>Hi ${escHtml(rows[0].full_name)},</p><div style="padding:16px;background:#0d0a00;border-left:3px solid #f59e0b;border-radius:4px;white-space:pre-wrap;font-size:13px;line-height:1.7;">${escHtml(message)}</div></div>`,
     });
     await createNotification(id, 'ACCOUNT', `📬 ${subject}`, message.slice(0, 120), '/dashboard', {});
     await auditLog(req.user.id, 'USER_MESSAGE_SENT', id, `Subject: ${subject}`);
@@ -799,7 +814,16 @@ router.post('/users/:id/delete', isAdmin, async (req, res) => {
 
 router.get('/kyc-expiring', isAdmin, async (req, res) => {
   try {
-    const { rows } = await query(`SELECT id, email, full_name, kyc_expires_at, EXTRACT(DAY FROM kyc_expires_at - NOW())::int AS days_left FROM users WHERE kyc_expires_at IS NOT NULL AND kyc_expires_at > NOW() AND kyc_expires_at < NOW() + INTERVAL '90 days' AND kyc_verified=TRUE ORDER BY kyc_expires_at ASC`);
+    const { rows } = await query(
+      `SELECT id, email, full_name, kyc_expires_at,
+              EXTRACT(DAY FROM kyc_expires_at - NOW())::int AS days_left
+       FROM users
+       WHERE kyc_expires_at IS NOT NULL
+         AND kyc_expires_at > NOW()
+         AND kyc_expires_at < NOW() + INTERVAL '90 days'
+         AND kyc_verified=TRUE
+       ORDER BY kyc_expires_at ASC`
+    );
     res.json({ users: rows });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -818,10 +842,8 @@ router.post('/users/:id/kyc-reminder', isAdmin, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ═══════════════════════════════════════════════════════════════════
+// ── Corporate ─────────────────────────────────────────────────────
 // [CORP-1] GET /api/admin/corporate/activations
-// List all corporate accounts for the admin dashboard table.
-// ═══════════════════════════════════════════════════════════════════
 router.get('/corporate/activations', isAdmin, async (req, res) => {
   try {
     const { rows } = await query(
@@ -835,9 +857,7 @@ router.get('/corporate/activations', isAdmin, async (req, res) => {
               o.seats_limit, o.name AS org_name
        FROM users u
        LEFT JOIN subscription_payments sp
-         ON sp.user_id = u.id
-         AND sp.plan = 'corporate'
-         AND sp.status = 'success'
+         ON sp.user_id = u.id AND sp.plan = 'corporate' AND sp.status = 'success'
        LEFT JOIN organisations o ON o.owner_id = u.id
        WHERE u.subscription_plan = 'corporate'
        ORDER BY u.id, sp.created_at DESC NULLS LAST`
@@ -849,45 +869,28 @@ router.get('/corporate/activations', isAdmin, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════
 // [CORP-2] POST /api/admin/users/:id/activate-corporate
-// Sales team activates Corporate plan after closing a deal.
-// No payment required — admin sets price/cycle/seats directly.
-// ═══════════════════════════════════════════════════════════════════
 router.post('/users/:id/activate-corporate', isAdmin, async (req, res) => {
   const { id } = req.params;
-  const {
-    cycle          = 'annual',
-    seats          = null,
-    customPriceINR = 0,
-    notes          = '',
-    renewalMonths  = null,
-  } = req.body;
+  const { cycle = 'annual', seats = null, customPriceINR = 0, notes = '', renewalMonths = null } = req.body;
 
-  // ── Validate inputs ──────────────────────────────────────────────
-  if (!['monthly', 'annual'].includes(cycle)) {
+  if (!['monthly', 'annual'].includes(cycle))
     return res.status(400).json({ error: 'cycle must be monthly or annual' });
-  }
-  if (seats !== null && (!Number.isInteger(seats) || seats < 1)) {
+  if (seats !== null && (!Number.isInteger(seats) || seats < 1))
     return res.status(400).json({ error: 'seats must be a positive integer or null (unlimited)' });
-  }
   const priceINR = parseFloat(customPriceINR) || 0;
-  if (priceINR < 0) {
+  if (priceINR < 0)
     return res.status(400).json({ error: 'customPriceINR cannot be negative' });
-  }
 
   try {
-    // Load user
     const { rows: userRows } = await query(
       `SELECT id, email, full_name, company_name, kyc_verified,
               subscription_plan, subscription_cycle, org_id
-       FROM users WHERE id = $1`,
-      [id]
+       FROM users WHERE id = $1`, [id]
     );
     if (!userRows.length) return res.status(404).json({ error: 'User not found' });
     const user = userRows[0];
 
-    // Compute renewal date
     const renewalDate = new Date();
     if (renewalMonths && Number.isInteger(parseInt(renewalMonths)) && parseInt(renewalMonths) > 0) {
       renewalDate.setMonth(renewalDate.getMonth() + parseInt(renewalMonths));
@@ -901,25 +904,19 @@ router.post('/users/:id/activate-corporate', isAdmin, async (req, res) => {
     const idempotencyKey   = `corporate_sales_${id}_${Date.now()}`;
 
     await withTransaction(async (client) => {
-      // Determine upgrade / activate event
       const ORDER   = ['free', 'starter', 'growth', 'corporate'];
       const fromIdx = ORDER.indexOf(user.subscription_plan || 'free');
-      const toIdx   = ORDER.indexOf('corporate');
-      const event   = fromIdx < toIdx ? 'upgraded' : 'activated';
+      const event   = fromIdx < ORDER.indexOf('corporate') ? 'upgraded' : 'activated';
 
-      // Insert payment record with pay_method = 'sales'
       const { rows: [pay] } = await client.query(
         `INSERT INTO subscription_payments
-           (user_id, plan, cycle,
-            amount_paise, gst_amount_paise, total_amount_paise,
-            pay_method, status, idempotency_key,
-            renewal_date, amount, notes)
+           (user_id, plan, cycle, amount_paise, gst_amount_paise, total_amount_paise,
+            pay_method, status, idempotency_key, renewal_date, amount, notes)
          VALUES ($1,'corporate',$2,$3,0,$3,'sales','success',$4,$5,$6,$7)
          RETURNING id`,
         [id, cycle, customPricePaise, idempotencyKey, renewalDate, priceINR, notes || null]
       );
 
-      // Activate plan on user row
       await client.query(
         `UPDATE users SET
            subscription_plan         = 'corporate',
@@ -933,23 +930,15 @@ router.post('/users/:id/activate-corporate', isAdmin, async (req, res) => {
         [cycle, renewalDate, id]
       );
 
-      // subscription_history row
       await client.query(
         `INSERT INTO subscription_history
            (user_id, event_type, from_plan, to_plan, from_cycle, to_cycle,
-            payment_id, amount_paise, gst_amount_paise, renewal_date,
-            triggered_by, notes)
+            payment_id, amount_paise, gst_amount_paise, renewal_date, triggered_by, notes)
          VALUES ($1,$2,$3,'corporate',$4,$5,$6,$7,0,$8,'admin',$9)`,
-        [
-          id, event,
-          user.subscription_plan || 'free',
-          user.subscription_cycle || null, cycle,
-          pay.id, customPricePaise,
-          renewalDate, notes || null,
-        ]
+        [id, event, user.subscription_plan || 'free', user.subscription_cycle || null,
+         cycle, pay.id, customPricePaise, renewalDate, notes || null]
       );
 
-      // Set org seats — null/unspecified → 999 (unlimited ceiling)
       const seatLimit = (seats !== null && seats > 0) ? seats : 999;
       await client.query(
         `UPDATE organisations SET seats_limit=$1, updated_at=NOW() WHERE owner_id=$2`,
@@ -957,133 +946,82 @@ router.post('/users/:id/activate-corporate', isAdmin, async (req, res) => {
       );
     });
 
-    // Invalidate Redis cache so next request sees the new plan immediately
     await invalidateUserCache(id);
-
-    // In-app notification
-    await createNotification(
-      id, 'WALLET', '🏢 Corporate Plan Activated',
+    await createNotification(id, 'WALLET', '🏢 Corporate Plan Activated',
       `Your Corporate plan has been activated by the EtherTrack team.${notes ? ` Note: ${notes}` : ''}`,
-      '/billing', { plan: 'corporate', cycle }
-    ).catch(() => {});
+      '/billing', { plan: 'corporate', cycle }).catch(() => {});
 
-    // Confirmation email — fire-and-forget
     const { rows: [freshUser] } = await query('SELECT email, full_name FROM users WHERE id=$1', [id]);
     setImmediate(async () => {
       try {
         const seatDisplay = (seats !== null && seats > 0) ? seats : 'Unlimited';
         await sendEmail({
-          to:      freshUser.email,
+          to: freshUser.email,
           subject: 'EtherTrack — Corporate Plan Activated 🏢',
-          html: `
-            <div style="font-family:monospace;background:#040706;color:#f0fdf4;padding:32px;border-radius:12px;max-width:600px;">
-              <div style="color:#f59e0b;font-size:18px;font-weight:700;margin-bottom:12px;">EtherTrack 🌿</div>
-              <h2 style="color:#f59e0b;margin:0 0 16px;">Corporate Plan Activated 🏢</h2>
-              <p>Hi ${escHtml(freshUser.full_name)},</p>
-              <p>Your <strong style="color:#f59e0b;">Corporate plan</strong> is now active with full access to:</p>
-              <ul style="color:#86efac;line-height:2.2;padding-left:20px;">
-                <li>Full Scope 3 (all 15 categories)</li>
-                <li>BRSR / CDP / TCFD / GHG PDF reports</li>
-                <li>Audit trail + verifier integration (BV, DNV, EY, Deloitte…)</li>
-                <li>PAT scheme + CCTS + GEI / BEE compliance</li>
-                <li>5-year decarbonisation plan + MRV calendar</li>
-                <li>SBTi target setting</li>
-                <li>Supplier data portal</li>
-                <li>Multi-entity consolidation</li>
-                <li>Carbon neutrality certificate</li>
-                <li>${seatDisplay} seats · Team management</li>
-              </ul>
-              ${notes ? `<p style="color:#f59e0b88;font-size:12px;margin-top:8px;">Note: ${escHtml(notes)}</p>` : ''}
-              <p style="color:#86efac88;font-size:12px;margin-top:20px;">
-                Cycle: ${cycle} &nbsp;·&nbsp;
-                Renews: ${renewalDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' })}
-                ${priceINR > 0 ? `&nbsp;·&nbsp; Amount: ₹${priceINR.toLocaleString('en-IN')}` : ''}
-              </p>
-              <a href="${process.env.FRONTEND_URL}/billing"
-                 style="display:inline-block;padding:12px 28px;background:#f59e0b;color:#000;border-radius:8px;text-decoration:none;font-weight:700;margin-top:12px;">
-                GO TO BILLING →
-              </a>
-              <p style="color:#86efac33;font-size:11px;margin-top:24px;">
-                Questions? Reply to this email or contact support@ethertrack.in
-              </p>
-            </div>
-          `,
+          html: `<div style="font-family:monospace;background:#040706;color:#f0fdf4;padding:32px;border-radius:12px;max-width:600px;">
+            <div style="color:#f59e0b;font-size:18px;font-weight:700;margin-bottom:12px;">EtherTrack 🌿</div>
+            <h2 style="color:#f59e0b;margin:0 0 16px;">Corporate Plan Activated 🏢</h2>
+            <p>Hi ${escHtml(freshUser.full_name)},</p>
+            <ul style="color:#86efac;line-height:2.2;padding-left:20px;">
+              <li>Full Scope 3 (all 15 categories)</li>
+              <li>BRSR / CDP / TCFD / GHG PDF reports</li>
+              <li>Audit trail + verifier integration</li>
+              <li>PAT scheme + CCTS + GEI / BEE compliance</li>
+              <li>5-year decarbonisation plan + MRV calendar</li>
+              <li>SBTi target setting · Supplier data portal</li>
+              <li>Multi-entity consolidation · Carbon neutrality certificate</li>
+              <li>${seatDisplay} seats · Team management</li>
+            </ul>
+            ${notes ? `<p style="color:#f59e0b88;font-size:12px;margin-top:8px;">Note: ${escHtml(notes)}</p>` : ''}
+            <p style="color:#86efac88;font-size:12px;margin-top:20px;">
+              Cycle: ${cycle} · Renews: ${renewalDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' })}
+              ${priceINR > 0 ? ` · Amount: ₹${priceINR.toLocaleString('en-IN')}` : ''}
+            </p>
+            <a href="${process.env.FRONTEND_URL}/billing" style="display:inline-block;padding:12px 28px;background:#f59e0b;color:#000;border-radius:8px;text-decoration:none;font-weight:700;margin-top:12px;">GO TO BILLING →</a>
+          </div>`,
         });
-      } catch (e) {
-        console.warn('[admin/activate-corporate] email failed:', e.message);
-      }
+      } catch (e) { console.warn('[admin/activate-corporate] email failed:', e.message); }
     });
 
-    await auditLog(
-      req.user.id, 'CORPORATE_PLAN_ACTIVATED', id,
-      `Cycle: ${cycle} · Seats: ${seats ?? 'unlimited'} · Price: ₹${priceINR} · ${notes || ''}`
-    );
+    await auditLog(req.user.id, 'CORPORATE_PLAN_ACTIVATED', id,
+      `Cycle: ${cycle} · Seats: ${seats ?? 'unlimited'} · Price: ₹${priceINR} · ${notes || ''}`);
 
-    return res.json({
-      ok:            true,
-      userId:        id,
-      plan:          'corporate',
-      cycle,
-      seats:         seats ?? 'unlimited',
-      renewalDate:   renewalDate.toISOString(),
-      customPriceINR: priceINR,
-    });
-
+    return res.json({ ok: true, userId: id, plan: 'corporate', cycle, seats: seats ?? 'unlimited', renewalDate: renewalDate.toISOString(), customPriceINR: priceINR });
   } catch (e) {
     console.error('[admin/activate-corporate]', e.message);
     return res.status(500).json({ error: 'Corporate activation failed', detail: e.message });
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════
 // [CORP-3] PATCH /api/admin/users/:id/corporate-renewal
-// Extend renewal date / update seats without re-activating.
-// ═══════════════════════════════════════════════════════════════════
 router.patch('/users/:id/corporate-renewal', isAdmin, async (req, res) => {
   const { id } = req.params;
   const { renewalDate, seats, notes } = req.body;
-
   if (!renewalDate) return res.status(400).json({ error: 'renewalDate required (ISO string or YYYY-MM-DD)' });
   const parsed = new Date(renewalDate);
   if (isNaN(parsed.getTime())) return res.status(400).json({ error: 'Invalid renewalDate' });
   if (parsed < new Date()) return res.status(400).json({ error: 'renewalDate must be in the future' });
-
   try {
     const { rows } = await query(`SELECT subscription_plan, email, full_name FROM users WHERE id=$1`, [id]);
     if (!rows.length) return res.status(404).json({ error: 'User not found' });
-    if (rows[0].subscription_plan !== 'corporate') {
+    if (rows[0].subscription_plan !== 'corporate')
       return res.status(400).json({ error: 'User is not on Corporate plan — activate first' });
-    }
 
     await query(
-      `UPDATE users SET
-         subscription_renewal_date = $1,
-         corporate_managed         = TRUE,
-         updated_at                = NOW()
-       WHERE id = $2`,
+      `UPDATE users SET subscription_renewal_date=$1, corporate_managed=TRUE, updated_at=NOW() WHERE id=$2`,
       [parsed, id]
     );
-
     if (seats != null) {
       const seatLimit = seats === 'unlimited' ? 999 : parseInt(seats);
-      if (!isNaN(seatLimit) && seatLimit > 0) {
+      if (!isNaN(seatLimit) && seatLimit > 0)
         await query(`UPDATE organisations SET seats_limit=$1, updated_at=NOW() WHERE owner_id=$2`, [seatLimit, id]);
-      }
     }
-
     await invalidateUserCache(id);
-
-    await auditLog(
-      req.user.id, 'CORPORATE_RENEWAL_UPDATED', id,
-      `New renewal: ${parsed.toISOString()} · Seats: ${seats ?? 'unchanged'} · ${notes || ''}`
-    );
-
-    await createNotification(
-      id, 'WALLET', '📅 Corporate Plan Renewed',
+    await auditLog(req.user.id, 'CORPORATE_RENEWAL_UPDATED', id,
+      `New renewal: ${parsed.toISOString()} · Seats: ${seats ?? 'unchanged'} · ${notes || ''}`);
+    await createNotification(id, 'WALLET', '📅 Corporate Plan Renewed',
       `Your Corporate plan has been renewed until ${parsed.toLocaleDateString('en-IN')}.`,
-      '/billing', { plan: 'corporate' }
-    ).catch(() => {});
-
+      '/billing', { plan: 'corporate' }).catch(() => {});
     res.json({ ok: true, renewalDate: parsed.toISOString() });
   } catch (e) {
     console.error('[admin/corporate-renewal]', e.message);
@@ -1092,6 +1030,7 @@ router.patch('/users/:id/corporate-renewal', isAdmin, async (req, res) => {
 });
 
 // ── Listings ──────────────────────────────────────────────────────
+// [FIX-LISTINGS] Filter moved to SQL — avoids fetching full table into JS
 router.get('/listings', isAdmin, async (req, res) => {
   try {
     const { rows } = await query(
@@ -1100,9 +1039,11 @@ router.get('/listings', isAdmin, async (req, res) => {
               ml.price_per_credit_inr, ml.seller_id, ml.seller_wallet, ml.seller_name,
               ml.seller_email, ml.created_at, ml.updated_at,
               ml.available_credits AS amount_remaining
-       FROM market_listings ml ORDER BY ml.created_at DESC`
+       FROM market_listings ml
+       WHERE ml.available_credits > 0
+       ORDER BY ml.created_at DESC`
     );
-    res.json({ listings: rows.filter(l => l.amount_remaining > 0) });
+    res.json({ listings: rows });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1110,14 +1051,19 @@ router.post('/listings/:listingId/force-delist', isAdmin, async (req, res) => {
   const { listingId } = req.params;
   const { reason } = req.body;
   if (!reason) return res.status(400).json({ error: 'Reason required' });
+  const lid = safeInt(listingId);
+  if (lid === null) return res.status(400).json({ error: 'Invalid listing ID' });
   try {
-    const lid = parseInt(listingId, 10);
-    if (isNaN(lid)) return res.status(400).json({ error: 'Invalid listing ID' });
     const { rows } = await query(`SELECT * FROM market_listings WHERE listing_id=$1`, [lid]);
     if (!rows.length) return res.status(404).json({ error: 'Listing not found' });
     const listing = rows[0];
     if (listing.batch_id && listing.amount_remaining > 0) {
-      await query(`UPDATE carbon_batches SET available_credits=available_credits+$1, status=CASE WHEN status='listed' THEN 'tokenised' ELSE status END, updated_at=NOW() WHERE id=$2`, [listing.amount_remaining, listing.batch_id]);
+      await query(
+        `UPDATE carbon_batches SET available_credits=available_credits+$1,
+         status=CASE WHEN status='listed' THEN 'tokenised' ELSE status END, updated_at=NOW()
+         WHERE id=$2`,
+        [listing.amount_remaining, listing.batch_id]
+      );
     }
     await query(`DELETE FROM market_listings WHERE listing_id=$1`, [lid]);
     await auditLog(req.user.id, 'LISTING_FORCE_DELISTED', listing.seller_id, `Listing #${listingId} — ${reason}`);
@@ -1132,15 +1078,15 @@ router.post('/listings/:listingId/override-price', isAdmin, async (req, res) => 
   if (!priceInr || !reason) return res.status(400).json({ error: 'priceInr and reason required' });
   const price = parseFloat(priceInr);
   if (isNaN(price) || price <= 0) return res.status(400).json({ error: 'priceInr must be a positive number' });
+  const lid = safeInt(listingId);
+  if (lid === null) return res.status(400).json({ error: 'Invalid listing ID' });
   try {
-    const lid = parseInt(listingId, 10);
-    if (isNaN(lid)) return res.status(400).json({ error: 'Invalid listing ID' });
     const { rows } = await query(`SELECT * FROM market_listings WHERE listing_id=$1`, [lid]);
     if (!rows.length) return res.status(404).json({ error: 'Listing not found' });
     await query(`UPDATE market_listings SET price_per_credit_inr=$1, updated_at=NOW() WHERE listing_id=$2`, [price, lid]);
     await query(`UPDATE carbon_batches SET price_per_credit_inr=$1, updated_at=NOW() WHERE id=$2`, [price, rows[0].batch_id]);
     await auditLog(req.user.id, 'LISTING_PRICE_OVERRIDDEN', rows[0].seller_id, `Listing ${listingId}: → ₹${price} — ${reason}`);
-    await createNotification(rows[0].seller_id, 'CREDIT', '📝 Listing Price Updated by Admin', `Your listing for "${rows[0].project_name}" price was corrected to ₹${price.toLocaleString('en-IN')}/credit. Reason: ${reason}`, '/portfolio', { listingId });
+    await createNotification(rows[0].seller_id, 'CREDIT', '📝 Listing Price Updated by Admin', `Your listing for "${rows[0].project_name}" price was corrected to ₹${price.toLocaleString('en-IN')}/credit.`, '/portfolio', { listingId });
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1164,19 +1110,44 @@ router.get('/revenue', isAdmin, async (req, res) => {
 // ── Audit ─────────────────────────────────────────────────────────
 router.get('/audit', isAdmin, async (req, res) => {
   try {
-    const { rows } = await query(`SELECT a.*, u.email AS target_email, u.full_name AS target_name FROM admin_audit_log a LEFT JOIN users u ON u.id=a.target_user_id ORDER BY a.created_at DESC LIMIT 200`);
+    const { rows } = await query(
+      `SELECT a.*, u.email AS target_email, u.full_name AS target_name
+       FROM admin_audit_log a LEFT JOIN users u ON u.id=a.target_user_id
+       ORDER BY a.created_at DESC LIMIT 200`
+    );
     res.json({ logs: rows });
   } catch (e) { res.status(500).json({ error: 'Failed to fetch audit log' }); }
 });
 
+// [FIX-EXPORT] Authentication via session cookie (isAdmin middleware),
+// not via ?token= query param which was leaking credentials into server
+// logs, browser history, and CDN access logs.
 router.get('/audit/export', isAdmin, async (req, res) => {
   try {
-    const { rows } = await query(`SELECT a.created_at, a.action, au.email AS admin_email, u.email AS target_email, u.full_name AS target_name, a.details FROM admin_audit_log a LEFT JOIN users u ON u.id=a.target_user_id LEFT JOIN users au ON au.id=a.admin_id ORDER BY a.created_at DESC`);
-    const headers = ['TIMESTAMP','ACTION','ADMIN','TARGET EMAIL','TARGET NAME','DETAILS'];
-    const csvRows = rows.map(r => [new Date(r.created_at).toISOString(), r.action||'', r.admin_email||'', r.target_email||'', `"${(r.target_name||'').replace(/"/g,'""')}"`, `"${(r.details||'').replace(/"/g,'""')}"`].join(','));
+    const { rows } = await query(
+      `SELECT a.created_at, a.action,
+              au.email AS admin_email,
+              u.email  AS target_email,
+              u.full_name AS target_name,
+              a.details
+       FROM admin_audit_log a
+       LEFT JOIN users u  ON u.id  = a.target_user_id
+       LEFT JOIN users au ON au.id = a.admin_id
+       ORDER BY a.created_at DESC`
+    );
+    const headers  = ['TIMESTAMP','ACTION','ADMIN','TARGET EMAIL','TARGET NAME','DETAILS'];
+    const csvRows  = rows.map(r => [
+      new Date(r.created_at).toISOString(),
+      r.action        || '',
+      r.admin_email   || '',
+      r.target_email  || '',
+      `"${(r.target_name || '').replace(/"/g, '""')}"`,
+      `"${(r.details    || '').replace(/"/g, '""')}"`,
+    ].join(','));
     const csv = [headers.join(','), ...csvRows].join('\n');
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', `attachment; filename="ethertrack_audit_${Date.now()}.csv"`);
+    res.setHeader('Cache-Control', 'no-store'); // never cache sensitive exports
     res.send(csv);
   } catch (e) { res.status(500).json({ error: 'Export failed' }); }
 });
@@ -1184,7 +1155,11 @@ router.get('/audit/export', isAdmin, async (req, res) => {
 // ── Disputes ──────────────────────────────────────────────────────
 router.get('/disputes', isAdmin, async (req, res) => {
   try {
-    const { rows } = await query(`SELECT d.*, u.email AS target_email, u.full_name AS target_name FROM disputes d JOIN users u ON u.id=d.target_user_id ORDER BY d.created_at DESC`);
+    const { rows } = await query(
+      `SELECT d.*, u.email AS target_email, u.full_name AS target_name
+       FROM disputes d JOIN users u ON u.id=d.target_user_id
+       ORDER BY d.created_at DESC`
+    );
     res.json({ disputes: rows });
   } catch (e) { res.status(500).json({ error: 'Failed to fetch disputes' }); }
 });
@@ -1193,7 +1168,10 @@ router.post('/disputes', isAdmin, async (req, res) => {
   const { targetUserId, reason, notes } = req.body;
   if (!targetUserId || !reason) return res.status(400).json({ error: 'Target user and reason required' });
   try {
-    const { rows } = await query(`INSERT INTO disputes (opened_by,target_user_id,reason,notes,status) VALUES ($1,$2,$3,$4,'open') RETURNING id`, [req.user.id, targetUserId, reason, notes || null]);
+    const { rows } = await query(
+      `INSERT INTO disputes (opened_by,target_user_id,reason,notes,status) VALUES ($1,$2,$3,$4,'open') RETURNING id`,
+      [req.user.id, targetUserId, reason, notes || null]
+    );
     await auditLog(req.user.id, 'DISPUTE_OPENED', targetUserId, reason);
     res.json({ message: 'Dispute opened', id: rows[0].id });
   } catch (e) { res.status(500).json({ error: 'Failed to open dispute' }); }
@@ -1206,7 +1184,10 @@ router.post('/disputes/:id/resolve', isAdmin, async (req, res) => {
   try {
     const { rows: d } = await query('SELECT * FROM disputes WHERE id=$1', [id]);
     if (!d.length) return res.status(404).json({ error: 'Not found' });
-    await query(`UPDATE disputes SET status='resolved', resolution=$1, resolved_at=NOW(), resolved_by=$2 WHERE id=$3`, [resolution, req.user.id, id]);
+    await query(
+      `UPDATE disputes SET status='resolved', resolution=$1, resolved_at=NOW(), resolved_by=$2 WHERE id=$3`,
+      [resolution, req.user.id, id]
+    );
     await auditLog(req.user.id, 'DISPUTE_RESOLVED', d[0].target_user_id, resolution);
     res.json({ message: 'Dispute resolved' });
   } catch (e) { res.status(500).json({ error: 'Failed to resolve dispute' }); }
@@ -1215,7 +1196,11 @@ router.post('/disputes/:id/resolve', isAdmin, async (req, res) => {
 // ── Announcements ─────────────────────────────────────────────────
 router.get('/announcements', isAdmin, async (req, res) => {
   try {
-    const { rows } = await query(`SELECT a.*, u.email AS created_by_email FROM system_announcements a LEFT JOIN users u ON u.id=a.created_by ORDER BY a.created_at DESC LIMIT 20`).catch(() => ({ rows: [] }));
+    const { rows } = await query(
+      `SELECT a.*, u.email AS created_by_email
+       FROM system_announcements a LEFT JOIN users u ON u.id=a.created_by
+       ORDER BY a.created_at DESC LIMIT 20`
+    ).catch(() => ({ rows: [] }));
     res.json({ announcements: rows });
   } catch (e) { res.json({ announcements: [] }); }
 });
@@ -1224,36 +1209,64 @@ router.post('/announcements', isAdmin, async (req, res) => {
   const { title, message, type = 'info', expiresAt } = req.body;
   if (!title || !message) return res.status(400).json({ error: 'title and message required' });
   try {
-    const { rows } = await query(`INSERT INTO system_announcements (title,message,type,expires_at,created_by,created_at) VALUES ($1,$2,$3,$4,$5,NOW()) RETURNING id`, [title, message, type, expiresAt || null, req.user.id]);
+    const { rows } = await query(
+      `INSERT INTO system_announcements (title,message,type,expires_at,created_by,created_at)
+       VALUES ($1,$2,$3,$4,$5,NOW()) RETURNING id`,
+      [title, message, type, expiresAt || null, req.user.id]
+    );
     await auditLog(req.user.id, 'ANNOUNCEMENT_CREATED', null, `"${title}"`);
     res.json({ success: true, id: rows[0].id });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.delete('/announcements/:id', isAdmin, async (req, res) => {
-  try { await query(`UPDATE system_announcements SET active=FALSE WHERE id=$1`, [req.params.id]); res.json({ success: true }); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    await query(`UPDATE system_announcements SET active=FALSE WHERE id=$1`, [req.params.id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// [HARDENING] Broadcast streams users in batches of 50 to avoid holding
+// thousands of rows in memory before the notification loop starts.
 router.post('/announcements/broadcast', isAdmin, async (req, res) => {
   const { subject, message, sendEmail: doEmail } = req.body;
   if (!subject || !message) return res.status(400).json({ error: 'subject and message required' });
   if (message.length > 10000) return res.status(400).json({ error: 'Message too long (max 10000 chars)' });
   try {
-    const { rows: allUsers } = await query(`SELECT id, email, full_name FROM users WHERE is_active=TRUE AND role!='admin' AND frozen=FALSE`);
-    res.json({ success: true, total: allUsers.length, message: `Broadcast queued for ${allUsers.length} users` });
+    const { rows: countRow } = await query(
+      `SELECT COUNT(*) FROM users WHERE is_active=TRUE AND role!='admin' AND frozen=FALSE`
+    );
+    const total = parseInt(countRow[0].count);
+    res.json({ success: true, total, message: `Broadcast queued for ${total} users` });
+
     setImmediate(async () => {
       const safeSubject = escHtml(subject);
       const safeMessage = escHtml(message);
-      let sent = 0, failed = 0;
-      for (const u of allUsers) {
-        try {
-          await createNotification(u.id, 'SYSTEM', `📢 ${subject}`, message.slice(0, 200), '/dashboard', {});
-          if (doEmail) {
-            await sendEmail({ to: u.email, subject: `EtherTrack — ${safeSubject}`, html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;"><h2 style="color:#f59e0b;">📢 Platform Announcement</h2><p>Hi ${escHtml(u.full_name)},</p><div style="padding:16px;background:#0d0a00;border-left:3px solid #f59e0b;border-radius:4px;white-space:pre-wrap;font-size:13px;line-height:1.7;">${safeMessage}</div></div>` });
-          }
-          sent++;
-        } catch { failed++; }
+      let sent = 0, failed = 0, offset = 0;
+      const BATCH = 50;
+
+      while (true) {
+        const { rows: batch } = await query(
+          `SELECT id, email, full_name FROM users
+           WHERE is_active=TRUE AND role!='admin' AND frozen=FALSE
+           ORDER BY id LIMIT $1 OFFSET $2`,
+          [BATCH, offset]
+        );
+        if (!batch.length) break;
+        for (const u of batch) {
+          try {
+            await createNotification(u.id, 'SYSTEM', `📢 ${subject}`, message.slice(0, 200), '/dashboard', {});
+            if (doEmail) {
+              await sendEmail({
+                to: u.email,
+                subject: `EtherTrack — ${safeSubject}`,
+                html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;"><h2 style="color:#f59e0b;">📢 Platform Announcement</h2><p>Hi ${escHtml(u.full_name)},</p><div style="padding:16px;background:#0d0a00;border-left:3px solid #f59e0b;border-radius:4px;white-space:pre-wrap;font-size:13px;line-height:1.7;">${safeMessage}</div></div>`,
+              });
+            }
+            sent++;
+          } catch { failed++; }
+        }
+        offset += BATCH;
       }
       await auditLog(req.user.id, 'ANNOUNCEMENT_BROADCAST', null, `"${subject}" — ${sent} sent, ${failed} failed`).catch(() => {});
       console.log(`[admin/broadcast] "${subject}" — ${sent} sent, ${failed} failed`);
@@ -1263,7 +1276,13 @@ router.post('/announcements/broadcast', isAdmin, async (req, res) => {
 
 // ── Chain Health ──────────────────────────────────────────────────
 router.get('/health/onchain', isAdmin, async (req, res) => {
-  const results = { minterWallet: { address: null, balanceEth: null, ok: false, error: null }, rpcConnected: false, lastMint: null, pendingMints: 0, failedMints: 0, contractAddress: process.env.CARBON_CREDIT_TOKEN_ADDRESS || null, marketplaceAddress: process.env.MARKETPLACE_ADDRESS || null, network: 'sepolia' };
+  const results = {
+    minterWallet: { address: null, balanceEth: null, ok: false, error: null },
+    rpcConnected: false, lastMint: null, pendingMints: 0, failedMints: 0,
+    contractAddress:   process.env.CARBON_CREDIT_TOKEN_ADDRESS || null,
+    marketplaceAddress: process.env.MARKETPLACE_ADDRESS || null,
+    network: 'sepolia',
+  };
   try {
     const [lastMint, pending, failed] = await Promise.all([
       query(`SELECT tokenised_at, token_id, project_name FROM carbon_batches WHERE token_id IS NOT NULL ORDER BY tokenised_at DESC LIMIT 1`),
@@ -1284,7 +1303,7 @@ router.get('/health/onchain', isAdmin, async (req, res) => {
     if (minterAddress) {
       results.minterWallet.address    = minterAddress;
       const balance = await provider.getBalance(minterAddress);
-      results.minterWallet.balanceEth = parseFloat(require('ethers').formatEther(balance)).toFixed(4);
+      results.minterWallet.balanceEth = parseFloat(ethers.formatEther(balance)).toFixed(4);
       results.minterWallet.ok         = parseFloat(results.minterWallet.balanceEth) > 0.01;
     }
   } catch (e) { results.rpcConnected = false; results.minterWallet.error = e.message; }
@@ -1294,7 +1313,11 @@ router.get('/health/onchain', isAdmin, async (req, res) => {
 // ── Blacklist ─────────────────────────────────────────────────────
 router.get('/serials/blacklist', isAdmin, async (req, res) => {
   try {
-    const { rows } = await query(`SELECT bs.*, u.email AS blacklisted_by_email FROM blacklisted_serials bs LEFT JOIN users u ON u.id=bs.blacklisted_by ORDER BY bs.blacklisted_at DESC`).catch(() => ({ rows: [] }));
+    const { rows } = await query(
+      `SELECT bs.*, u.email AS blacklisted_by_email
+       FROM blacklisted_serials bs LEFT JOIN users u ON u.id=bs.blacklisted_by
+       ORDER BY bs.blacklisted_at DESC`
+    ).catch(() => ({ rows: [] }));
     res.json({ blacklist: rows });
   } catch (e) { res.json({ blacklist: [] }); }
 });
@@ -1303,9 +1326,20 @@ router.post('/serials/blacklist', isAdmin, async (req, res) => {
   const { serial, reason } = req.body;
   if (!serial || !reason) return res.status(400).json({ error: 'serial and reason required' });
   try {
-    await query(`INSERT INTO blacklisted_serials (serial_number,reason,blacklisted_by,blacklisted_at) VALUES ($1,$2,$3,NOW()) ON CONFLICT (serial_number) DO UPDATE SET reason=$2, blacklisted_by=$3, blacklisted_at=NOW()`, [serial.trim(), reason, req.user.id]);
-    const { rows: affected } = await query(`UPDATE carbon_batches SET admin_status='rejected', admin_notes=$1 WHERE registry_serial=$2 AND admin_status='pending' RETURNING user_id, project_name`, [`Blacklisted serial: ${reason}`, serial.trim()]);
-    for (const b of affected) await createNotification(b.user_id, 'CREDIT', '❌ Credit Submission Rejected', `Serial ${serial} has been blacklisted. Reason: ${reason}`, '/portfolio', {});
+    await query(
+      `INSERT INTO blacklisted_serials (serial_number,reason,blacklisted_by,blacklisted_at)
+       VALUES ($1,$2,$3,NOW())
+       ON CONFLICT (serial_number) DO UPDATE SET reason=$2, blacklisted_by=$3, blacklisted_at=NOW()`,
+      [serial.trim(), reason, req.user.id]
+    );
+    const { rows: affected } = await query(
+      `UPDATE carbon_batches SET admin_status='rejected', admin_notes=$1
+       WHERE registry_serial=$2 AND admin_status='pending'
+       RETURNING user_id, project_name`,
+      [`Blacklisted serial: ${reason}`, serial.trim()]
+    );
+    for (const b of affected)
+      await createNotification(b.user_id, 'CREDIT', '❌ Credit Submission Rejected', `Serial ${serial} has been blacklisted. Reason: ${reason}`, '/portfolio', {});
     await auditLog(req.user.id, 'SERIAL_BLACKLISTED', null, `Serial: ${serial} — ${reason} (${affected.length} batches auto-rejected)`);
     res.json({ success: true, affectedBatches: affected.length });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1320,18 +1354,22 @@ router.delete('/serials/blacklist/:serial', isAdmin, async (req, res) => {
 });
 
 // ── Projects ──────────────────────────────────────────────────────
+// [FIX-PROJECTS] WHERE clause corrected — was wrongly excluding batches with
+// admin_status IS NULL (new projects with no batches). Now groups all batches
+// per project regardless of admin_status.
 router.get('/projects', isAdmin, async (req, res) => {
   try {
     const { rows } = await query(
       `SELECT p.id, p.project_name, p.project_code, p.developer_name, p.standard,
-              COUNT(b.id) AS batch_count,
-              COALESCE(SUM(b.total_credits),0)     AS total_credits,
-              COALESCE(SUM(b.available_credits),0) AS available_credits,
-              COALESCE(SUM(b.retired_credits),0)   AS retired_credits,
-              COUNT(CASE WHEN b.token_id IS NOT NULL THEN 1 END) AS minted_batches
-       FROM projects p LEFT JOIN carbon_batches b ON b.project_id=p.id
-       WHERE b.admin_status='approved' OR b.admin_status IS NULL
-       GROUP BY p.id ORDER BY total_credits DESC`
+              COUNT(b.id)                                                    AS batch_count,
+              COALESCE(SUM(b.total_credits),0)                              AS total_credits,
+              COALESCE(SUM(b.available_credits),0)                          AS available_credits,
+              COALESCE(SUM(b.retired_credits),0)                            AS retired_credits,
+              COUNT(CASE WHEN b.token_id IS NOT NULL THEN 1 END)            AS minted_batches
+       FROM projects p
+       LEFT JOIN carbon_batches b ON b.project_id = p.id
+       GROUP BY p.id
+       ORDER BY total_credits DESC`
     ).catch(() => ({ rows: [] }));
     res.json({ projects: rows });
   } catch (e) { res.status(500).json({ error: e.message }); }

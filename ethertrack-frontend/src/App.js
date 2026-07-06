@@ -1,29 +1,10 @@
-// App.jsx — EtherTrack v9
+// App.jsx — EtherTrack v10
 // ─────────────────────────────────────────────────────────────────────────────
-// CHANGES vs v8:
+// CHANGES vs v9:
 //
-// [FIX-AUTH] handleLogin now correctly handles two separate login paths:
-//   1. Email/password → firebaseUser is null, dbUser comes from backend response
-//   2. Google/Facebook OAuth → firebaseUser is provided, firebase-sync sets cookies
-//
-// [INVITE-1] UserGuard saves invite token to sessionStorage before redirecting
-//            unauthenticated users to /signup?invite=1 instead of /login.
-//
-// [INVITE-2] handleLogin returns { dbUser, redirect } — Login.jsx uses the
-//            redirect value to navigate to /join-org after login if a pending
-//            invite token exists.
-//
-// [PLAN-GATE] Subscription tier locking:
-//          FREE      — dashboard, carbon-credits, trading-history, wallet, profile/settings/notifications/billing
-//          STARTER   — + portfolio
-//          GROWTH    — + emission-tracking
-//          CORPORATE — + compliance, team
-//
-// [KYC-1]  handleKycComplete sets kyc_status + kyc_tier
-// [PLAN-SYNC] Background poll every 5 mins
-//
-// [SUPPORT-WIDGET] Floating support assistant added — renders on all
-//                  authenticated pages (bottom-right bubble).
+// [AUDITOR-PORTAL] Added public AuditorPortal route at /verify-audit/:token
+//                  No auth required — token-gated via URL param.
+//                  Kept existing /verify/:certId (VerifyCertificate) untouched.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import React, {
@@ -49,7 +30,7 @@ import VerifyCertificate from './components/VerifyCertificate';
 import JoinOrg           from './components/JoinOrg';
 import PlanSelection     from './components/PlanSelection';
 import Dashboard         from './components/dashboard/Dashboard';
-import SupportWidget     from './components/SupportWidget';   // ← [SUPPORT-WIDGET]
+import SupportWidget     from './components/SupportWidget';
 
 import { NotificationProvider } from './context/NotificationContext';
 import { PortfolioProvider }    from './context/PortfolioContext';
@@ -64,6 +45,9 @@ const Portfolio           = lazy(() => import('./components/Portfolio'));
 const TeamManagement      = lazy(() => import('./components/TeamManagement'));
 const Wallet              = lazy(() => import('./components/Wallet'));
 const SubscriptionBilling = lazy(() => import('./components/SubscriptionBilling'));
+
+// [AUDITOR-PORTAL] Public portal — no auth required
+const AuditorPortal = lazy(() => import('./components/AuditorPortal'));
 
 const ComplianceDashboard = lazy(() =>
   import('./components/ComplianceDashboard').catch(() => ({
@@ -429,11 +413,6 @@ function AppInner() {
     <>
       {isAuthenticated && !isAdmin && <Header />}
       {isAuthenticated && !isAdmin && <Lazy><WalletMismatchBanner /></Lazy>}
-
-      {/* ── [SUPPORT-WIDGET] Floating support assistant ─────────────────────
-           Renders for all authenticated non-admin users on every page.
-           Widget sits outside the scrollable content area (position: fixed).
-      ──────────────────────────────────────────────────────────────────────── */}
       {isAuthenticated && !isAdmin && <SupportWidget />}
 
       <div
@@ -445,10 +424,19 @@ function AppInner() {
         }}
       >
         <Routes>
-          <Route path="/verify/:certId" element={<Lazy><VerifyCertificate /></Lazy>} />
-          <Route path="/help"           element={<Lazy><Help /></Lazy>} />
-          <Route path="/feedback"       element={<Lazy><Feedback /></Lazy>} />
+          {/* ── public routes — no auth needed ─────────────────────────── */}
+          <Route path="/verify/:certId"        element={<Lazy><VerifyCertificate /></Lazy>} />
 
+          {/* [AUDITOR-PORTAL] Public auditor verification portal
+               Separate from /verify/:certId (carbon credit certificates).
+               Token starts with et_verify_ — validated server-side.
+               No Header, no SupportWidget, no auth guard. */}
+          <Route path="/verify-audit/:token"   element={<Lazy><AuditorPortal /></Lazy>} />
+
+          <Route path="/help"                  element={<Lazy><Help /></Lazy>} />
+          <Route path="/feedback"              element={<Lazy><Feedback /></Lazy>} />
+
+          {/* ── root redirect ───────────────────────────────────────────── */}
           <Route path="/" element={
             !isAuthenticated
               ? <Navigate to="/signup"    replace />
@@ -457,6 +445,7 @@ function AppInner() {
                 : <Navigate to="/dashboard" replace />
           } />
 
+          {/* ── auth ────────────────────────────────────────────────────── */}
           <Route path="/login" element={
             isAuthenticated
               ? <Navigate to={isAdmin ? '/admin' : '/dashboard'} replace />
@@ -468,15 +457,18 @@ function AppInner() {
               : <Signup />
           } />
 
+          {/* ── admin ───────────────────────────────────────────────────── */}
           <Route path="/admin"   element={<AdminGuard dbUser={dbUser} sessionChecked={sessionChecked}><AdminDashboard /></AdminGuard>} />
           <Route path="/admin/*" element={<AdminGuard dbUser={dbUser} sessionChecked={sessionChecked}><AdminDashboard /></AdminGuard>} />
 
+          {/* ── org invite ──────────────────────────────────────────────── */}
           <Route path="/join-org" element={
             <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
               <Lazy><JoinOrg /></Lazy>
             </UserGuard>
           } />
 
+          {/* ── kyc ─────────────────────────────────────────────────────── */}
           <Route path="/kyc" element={
             <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
               {kycCompleted
@@ -486,6 +478,7 @@ function AppInner() {
             </UserGuard>
           } />
 
+          {/* ── authenticated pages ─────────────────────────────────────── */}
           <Route path="/dashboard" element={
             <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
               {isAdmin ? <Navigate to="/admin" replace /> : <Dashboard />}
@@ -604,7 +597,6 @@ function App() {
     localStorage.removeItem('activeEmail');
   }, []);
 
-  // Restore session on mount by checking /api/auth/me (uses httpOnly cookie)
   useEffect(() => {
     const restoreSession = async () => {
       devLog('🔵 restoreSession: starting...');
@@ -642,7 +634,6 @@ function App() {
     }
   }, [user]);
 
-  // Background poll every 5 mins — keeps subscription_plan fresh
   useEffect(() => {
     if (!isAuthenticated) return;
     const POLL_MS = 5 * 60 * 1000;
@@ -666,9 +657,6 @@ function App() {
     return () => clearInterval(poll);
   }, [isAuthenticated]);
 
-  // [FIX-AUTH] handleLogin handles two paths:
-  //   Path 1: Email/password — firebaseUser is null, dbUser is from backend response
-  //   Path 2: OAuth (Google/FB) — firebaseUser is provided, firebase-sync sets cookies
   const handleLogin = useCallback(async (userData, firebaseUser = null) => {
     setUser(userData);
     if (userData.email) localStorage.setItem('activeEmail', userData.email);
@@ -677,7 +665,6 @@ function App() {
     let redirect       = null;
 
     if (firebaseUser) {
-      // OAuth path — get Firebase token and sync with backend
       try {
         const idToken = await firebaseUser.getIdToken();
         devLog('🔑 Firebase idToken obtained, length:', idToken?.length);
@@ -696,7 +683,6 @@ function App() {
         console.error('[handleLogin] Firebase sync failed:', e?.message);
       }
     } else if (userData.dbUser) {
-      // Email/password path — backend already set cookies, just use returned user
       resolvedDbUser = userData.dbUser;
       setDbUser(userData.dbUser);
       if (userData.dbUser.kyc_verified)  setKycCompleted(true);

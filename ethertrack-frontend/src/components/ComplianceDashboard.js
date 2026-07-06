@@ -1,16 +1,16 @@
-// ComplianceDashboard.jsx — EtherTrack CCTS Compliance Dashboard - 28/05/2026
+// ComplianceDashboard.jsx — EtherTrack CCTS Compliance Dashboard
+// v2 — pre-fills OnboardingWizard entity name + GSTIN from /api/emissions/profile
+// so users don't re-enter identity data already captured in TeamManagement.
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiFetch } from '../services/api';
 
-// ── Formatters ────────────────────────────────────────────────────
 const fmtINR  = n  => n == null ? '—' : `₹${Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 const fmtNum  = n  => n == null ? '—' : Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 });
 const fmtPct  = n  => n == null ? '—' : `${Number(n).toFixed(1)}%`;
 const fmtDate = d  => d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
 
-// ── Urgency colours ───────────────────────────────────────────────
 const URGENCY = {
   critical: { color: '#f87171', bg: '#450a0a', border: '#f8717133', label: 'CRITICAL' },
   high:     { color: '#fb923c', bg: '#431407', border: '#fb923c33', label: 'HIGH'     },
@@ -31,19 +31,15 @@ const CONTRACT_LABELS = {
   price_cap:    { color: '#a78bfa', label: 'Price Cap', icon: '🎯'   },
 };
 
-// ── Skeleton loader ───────────────────────────────────────────────
 const Skel = ({ w = '100%', h = 16, mb = 0 }) => (
   <div style={{ width: w, height: h, borderRadius: 4, marginBottom: mb,
     background: '#0f2a1a55', animation: 'cdPulse 1.5s ease infinite' }}/>
 );
 
-// ── Progress bar ──────────────────────────────────────────────────
 const ProgressBar = ({ pct, color = '#22c55e', height = 8 }) => (
-  <div style={{ width: '100%', height, borderRadius: height / 2,
-    background: '#0f2a1a', overflow: 'hidden' }}>
+  <div style={{ width: '100%', height, borderRadius: height / 2, background: '#0f2a1a', overflow: 'hidden' }}>
     <div style={{ width: `${Math.min(100, Math.max(0, parseFloat(pct) || 0))}%`,
-      height: '100%', borderRadius: height / 2, background: color,
-      transition: 'width 0.6s ease' }}/>
+      height: '100%', borderRadius: height / 2, background: color, transition: 'width 0.6s ease' }}/>
   </div>
 );
 
@@ -52,26 +48,19 @@ function PriceTicker({ prices }) {
   return (
     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
       {prices.map(p => (
-        <div key={p.source} style={{
-          padding: '8px 14px', borderRadius: 8,
+        <div key={p.source} style={{ padding: '8px 14px', borderRadius: 8,
           background: p.is_official ? '#0d2e1f' : '#080c0a',
-          border: `1px solid ${p.is_official ? '#22c55e33' : '#0f2a1a'}`,
-          minWidth: 140,
-        }}>
+          border: `1px solid ${p.is_official ? '#22c55e33' : '#0f2a1a'}`, minWidth: 140 }}>
           <div style={{ fontSize: 9, color: '#86efac44', letterSpacing: '.12em', marginBottom: 3 }}>
             {p.source} {p.is_official && <span style={{ color: '#22c55e88' }}>● OFFICIAL</span>}
           </div>
-          <div style={{ fontSize: 18, fontWeight: 500, color: '#f0fdf4' }}>
-            {fmtINR(p.price_inr)}
-          </div>
+          <div style={{ fontSize: 18, fontWeight: 500, color: '#f0fdf4' }}>{fmtINR(p.price_inr)}</div>
           {p.bid_price_inr && p.ask_price_inr && (
             <div style={{ fontSize: 9, color: '#86efac55', marginTop: 2 }}>
               B: {fmtINR(p.bid_price_inr)} / A: {fmtINR(p.ask_price_inr)}
             </div>
           )}
-          {p.volume_ccc && (
-            <div style={{ fontSize: 9, color: '#86efac44' }}>Vol: {fmtNum(p.volume_ccc)} CCCs</div>
-          )}
+          {p.volume_ccc && <div style={{ fontSize: 9, color: '#86efac44' }}>Vol: {fmtNum(p.volume_ccc)} CCCs</div>}
         </div>
       ))}
     </div>
@@ -79,10 +68,10 @@ function PriceTicker({ prices }) {
 }
 
 function SummaryCards({ summary, period, marketContext, loading }) {
-  const gap        = parseFloat(summary?.netGap ?? 0);
-  const pct        = parseFloat(summary?.completionPct ?? 0);
-  const urgConfig  = URGENCY[period?.urgency] || URGENCY.low;
-  const posColor   = STATUS_COLOR[summary?.positionStatus] || '#86efac88';
+  const gap       = parseFloat(summary?.netGap ?? 0);
+  const pct       = parseFloat(summary?.completionPct ?? 0);
+  const urgConfig = URGENCY[period?.urgency] || URGENCY.low;
+  const posColor  = STATUS_COLOR[summary?.positionStatus] || '#86efac88';
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10, marginBottom: 16 }}>
@@ -96,9 +85,7 @@ function SummaryCards({ summary, period, marketContext, loading }) {
       <div className="cd-card">
         <div className="cd-card-label">CURRENTLY HELD</div>
         {loading ? <Skel w="80px" h={28} mb={6}/> : (
-          <div className="cd-card-val" style={{ color: '#22c55e' }}>
-            {fmtNum(summary?.totalHeld)} <span className="cd-unit">CCCs</span>
-          </div>
+          <div className="cd-card-val" style={{ color: '#22c55e' }}>{fmtNum(summary?.totalHeld)} <span className="cd-unit">CCCs</span></div>
         )}
         <ProgressBar pct={pct} color="#22c55e"/>
         <div style={{ fontSize: 10, color: '#86efac55', marginTop: 4 }}>{fmtPct(pct)} complete</div>
@@ -110,9 +97,7 @@ function SummaryCards({ summary, period, marketContext, loading }) {
             {gap < 0 ? '-' : gap > 0 ? '+' : ''}{fmtNum(Math.abs(gap))} <span className="cd-unit">CCCs</span>
           </div>
         )}
-        <div style={{ fontSize: 10, color: posColor, opacity: 0.7 }}>
-          {summary?.positionStatus?.toUpperCase()}
-        </div>
+        <div style={{ fontSize: 10, color: posColor, opacity: 0.7 }}>{summary?.positionStatus?.toUpperCase()}</div>
       </div>
       <div className="cd-card">
         <div className="cd-card-label">COST TO COMPLY</div>
@@ -146,9 +131,7 @@ function SummaryCards({ summary, period, marketContext, loading }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
           <span style={{ fontSize: 9, padding: '2px 7px', borderRadius: 10,
             background: urgConfig.bg, color: urgConfig.color, border: `1px solid ${urgConfig.border}`,
-            letterSpacing: '.08em' }}>
-            {urgConfig.label}
-          </span>
+            letterSpacing: '.08em' }}>{urgConfig.label}</span>
           <span style={{ fontSize: 10, color: '#86efac55' }}>{period?.daysLeft} days left</span>
         </div>
       </div>
@@ -165,7 +148,6 @@ function PlantBreakdown({ plants, loading, onEditPosition }) {
       </div>)}
     </div>
   );
-
   return (
     <div className="cd-panel" style={{ marginBottom: 16 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
@@ -179,30 +161,26 @@ function PlantBreakdown({ plants, loading, onEditPosition }) {
       ) : (
         <>
           <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 80px', gap: 8,
-            padding: '0 8px 8px', fontSize: 8, color: '#86efac44',
-            letterSpacing: '.12em', borderBottom: '1px solid #0f2a1a' }}>
+            padding: '0 8px 8px', fontSize: 8, color: '#86efac44', letterSpacing: '.12em',
+            borderBottom: '1px solid #0f2a1a' }}>
             <span>PLANT</span><span>TARGET</span><span>HELD</span><span>GAP</span><span>STATUS</span>
           </div>
           {plants.map(p => {
             const gap = parseFloat(p.plant_gap);
             const color = gap >= 0 ? '#22c55e' : '#f87171';
             return (
-              <div key={p.plant_id} style={{ display: 'grid',
-                gridTemplateColumns: '2fr 1fr 1fr 1fr 80px', gap: 8,
-                padding: '10px 8px', borderBottom: '1px solid #0f2a1a08',
-                alignItems: 'center', fontSize: 11 }}>
+              <div key={p.plant_id} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 80px', gap: 8,
+                padding: '10px 8px', borderBottom: '1px solid #0f2a1a08', alignItems: 'center', fontSize: 11 }}>
                 <div>
                   <div style={{ color: '#f0fdf4', fontWeight: 500 }}>{p.plant_name}</div>
                   <div style={{ fontSize: 9, color: '#86efac44' }}>{p.state} · {p.sector}</div>
                 </div>
                 <span style={{ color: '#86efac77' }}>{fmtNum(p.target_ccc)}</span>
                 <span style={{ color: '#22c55e' }}>{fmtNum(p.held_ccc)}</span>
-                <span style={{ color, fontWeight: 500 }}>
-                  {gap > 0 ? '+' : ''}{fmtNum(gap)}
-                </span>
+                <span style={{ color, fontWeight: 500 }}>{gap > 0 ? '+' : ''}{fmtNum(gap)}</span>
                 <span style={{ fontSize: 9, padding: '2px 7px', borderRadius: 10, textAlign: 'center',
-                  background: gap >= 0 ? '#0d2e1f' : '#450a0a',
-                  color, border: `1px solid ${color}33` }}>
+                  background: gap >= 0 ? '#0d2e1f' : '#450a0a', color,
+                  border: `1px solid ${color}33` }}>
                   {gap >= 0 ? 'SURPLUS' : 'DEFICIT'}
                 </span>
               </div>
@@ -215,12 +193,12 @@ function PlantBreakdown({ plants, loading, onEditPosition }) {
 }
 
 function NettingEngine({ onNettingComplete }) {
-  const [result,    setResult]    = useState(null);
-  const [loading,   setLoading]   = useState(false);
-  const [saving,    setSaving]    = useState(false);
-  const [exchange,  setExchange]  = useState('IEX');
-  const [error,     setError]     = useState('');
-  const [sessions,  setSessions]  = useState([]);
+  const [result,   setResult]   = useState(null);
+  const [loading,  setLoading]  = useState(false);
+  const [saving,   setSaving]   = useState(false);
+  const [exchange, setExchange] = useState('IEX');
+  const [error,    setError]    = useState('');
+  const [sessions, setSessions] = useState([]);
 
   useEffect(() => {
     apiFetch('/api/compliance/netting').then(d => setSessions(d?.sessions || [])).catch(() => {});
@@ -228,12 +206,9 @@ function NettingEngine({ onNettingComplete }) {
 
   const calculate = async () => {
     setLoading(true); setError('');
-    try {
-      const data = await apiFetch('/api/compliance/netting/calculate');
-      setResult(data);
-    } catch (e) {
-      setError(e.message || 'Calculation failed');
-    } finally { setLoading(false); }
+    try { setResult(await apiFetch('/api/compliance/netting/calculate')); }
+    catch (e) { setError(e.message || 'Calculation failed'); }
+    finally { setLoading(false); }
   };
 
   const confirm = async () => {
@@ -241,19 +216,15 @@ function NettingEngine({ onNettingComplete }) {
     setSaving(true);
     try {
       const data = await apiFetch('/api/compliance/netting/confirm', { method: 'POST', body: JSON.stringify({
-        netPosition:   result.netPosition,
-        netAction:     result.netAction,
-        grossSurplus:  result.grossSurplus,
-        grossDeficit:  result.grossDeficit,
-        lines:         result.lines,
+        netPosition: result.netPosition, netAction: result.netAction,
+        grossSurplus: result.grossSurplus, grossDeficit: result.grossDeficit, lines: result.lines,
       }) });
       setResult(null);
       setSessions(prev => [{ id: data.sessionId, net_action: result.netAction,
         net_position_ccc: result.netPosition, created_at: new Date().toISOString() }, ...prev]);
       onNettingComplete?.(data);
-    } catch (e) {
-      setError(e.message || 'Failed to save session');
-    } finally { setSaving(false); }
+    } catch (e) { setError(e.message || 'Failed to save session'); }
+    finally { setSaving(false); }
   };
 
   return (
@@ -263,12 +234,8 @@ function NettingEngine({ onNettingComplete }) {
         Net surplus from one plant against deficit in another before routing to exchange.
         Reduces trading costs by avoiding unnecessary buys and sells.
       </div>
-      {error && (
-        <div style={{ padding: '8px 12px', borderRadius: 6, background: '#450a0a',
-          border: '1px solid #f8717133', color: '#f87171', fontSize: 11, marginBottom: 10 }}>
-          {error}
-        </div>
-      )}
+      {error && <div style={{ padding: '8px 12px', borderRadius: 6, background: '#450a0a',
+        border: '1px solid #f8717133', color: '#f87171', fontSize: 11, marginBottom: 10 }}>{error}</div>}
       {!result ? (
         <button className="cd-btn" onClick={calculate} disabled={loading}>
           {loading ? '⏳ CALCULATING...' : '⚡ RUN NETTING CALCULATION'}
@@ -294,23 +261,17 @@ function NettingEngine({ onNettingComplete }) {
             border: `1px solid ${result.netAction === 'buy' ? '#f8717133' : '#22c55e33'}`,
             fontSize: 12, color: '#f0fdf4', lineHeight: 1.6 }}>
             <strong>Recommendation:</strong> {result.recommendation}
-            {result.netValueInr && (
-              <span style={{ color: '#86efac77', marginLeft: 8 }}>
-                (≈ {fmtINR(result.netValueInr)} at current market price)
-              </span>
-            )}
+            {result.netValueInr && <span style={{ color: '#86efac77', marginLeft: 8 }}>(≈ {fmtINR(result.netValueInr)} at current market price)</span>}
           </div>
           <div style={{ marginBottom: 14 }}>
-            <div style={{ fontSize: 9, color: '#86efac44', letterSpacing: '.12em',
-              padding: '0 8px 6px', borderBottom: '1px solid #0f2a1a',
-              display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr', gap: 8 }}>
+            <div style={{ fontSize: 9, color: '#86efac44', letterSpacing: '.12em', padding: '0 8px 6px',
+              borderBottom: '1px solid #0f2a1a', display: 'grid',
+              gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr', gap: 8 }}>
               <span>PLANT</span><span>POSITION</span><span>ALLOCATED</span><span>POST-NET GAP</span><span>ACTION</span>
             </div>
             {result.lines?.map(l => (
-              <div key={l.plantId} style={{ display: 'grid',
-                gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr', gap: 8,
-                padding: '8px', fontSize: 10, borderBottom: '1px solid #0f2a1a08',
-                alignItems: 'center' }}>
+              <div key={l.plantId} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr', gap: 8,
+                padding: '8px', fontSize: 10, borderBottom: '1px solid #0f2a1a08', alignItems: 'center' }}>
                 <span style={{ color: '#f0fdf4' }}>{l.plantName}</span>
                 <span style={{ color: l.plantPosition >= 0 ? '#22c55e' : '#f87171' }}>
                   {l.plantPosition >= 0 ? '+' : ''}{fmtNum(l.plantPosition)}
@@ -337,8 +298,7 @@ function NettingEngine({ onNettingComplete }) {
                     fontFamily: 'DM Mono, monospace', fontSize: 10, letterSpacing: '.08em',
                     border: `1px solid ${exchange === ex ? '#22c55e44' : '#0f2a1a'}`,
                     background: exchange === ex ? '#0d2e1f22' : 'transparent',
-                    color: exchange === ex ? '#22c55e' : '#86efac44',
-                  }}>{ex}</button>
+                    color: exchange === ex ? '#22c55e' : '#86efac44' }}>{ex}</button>
                 ))}
               </div>
             </div>
@@ -353,9 +313,7 @@ function NettingEngine({ onNettingComplete }) {
       )}
       {sessions.length > 0 && (
         <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid #0f2a1a' }}>
-          <div style={{ fontSize: 9, color: '#86efac44', letterSpacing: '.12em', marginBottom: 8 }}>
-            PREVIOUS SESSIONS
-          </div>
+          <div style={{ fontSize: 9, color: '#86efac44', letterSpacing: '.12em', marginBottom: 8 }}>PREVIOUS SESSIONS</div>
           {sessions.slice(0, 3).map(s => (
             <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between',
               padding: '6px 0', fontSize: 10, borderBottom: '1px solid #0f2a1a08' }}>
@@ -395,9 +353,8 @@ function HedgeManager({ currentPrice }) {
       const data = await apiFetch('/api/compliance/hedges', { method: 'POST', body: JSON.stringify(form) });
       if (data?.hedge) setHedges(prev => [data.hedge, ...prev]);
       setForm(null);
-    } catch (e) {
-      setError(e.message || 'Failed to create hedge');
-    } finally { setSaving(false); }
+    } catch (e) { setError(e.message || 'Failed to create hedge'); }
+    finally { setSaving(false); }
   };
 
   const cancel = async (id) => {
@@ -407,7 +364,7 @@ function HedgeManager({ currentPrice }) {
     } catch (e) { setError(e.message); }
   };
 
-  const activeHedges  = hedges.filter(h => h.status === 'active');
+  const activeHedges   = hedges.filter(h => h.status === 'active');
   const totalHedgedQty = activeHedges.reduce((s, h) => s + parseFloat(h.quantity_ccc || 0), 0);
   const totalBudget    = activeHedges.filter(h => h.contract_type === 'budget_lock')
     .reduce((s, h) => s + parseFloat(h.budget_inr || 0), 0);
@@ -423,8 +380,8 @@ function HedgeManager({ currentPrice }) {
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 8, marginBottom: 14 }}>
         {[
-          { label: 'HEDGED QUANTITY', val: `${fmtNum(totalHedgedQty)} CCCs` },
-          { label: 'BUDGET LOCKED',   val: fmtINR(totalBudget) },
+          { label: 'HEDGED QUANTITY',  val: `${fmtNum(totalHedgedQty)} CCCs` },
+          { label: 'BUDGET LOCKED',    val: fmtINR(totalBudget) },
           { label: 'ACTIVE CONTRACTS', val: activeHedges.length },
         ].map(({ label, val }) => (
           <div key={label} style={{ padding: '8px 12px', borderRadius: 6,
@@ -434,18 +391,11 @@ function HedgeManager({ currentPrice }) {
           </div>
         ))}
       </div>
-      {error && (
-        <div style={{ padding: '8px 12px', borderRadius: 6, background: '#450a0a',
-          border: '1px solid #f8717133', color: '#f87171', fontSize: 11, marginBottom: 10 }}>
-          {error}
-        </div>
-      )}
+      {error && <div style={{ padding: '8px 12px', borderRadius: 6, background: '#450a0a',
+        border: '1px solid #f8717133', color: '#f87171', fontSize: 11, marginBottom: 10 }}>{error}</div>}
       {form && (
-        <div style={{ padding: 14, borderRadius: 8, background: '#060908',
-          border: '1px solid #0f2a1a', marginBottom: 14 }}>
-          <div style={{ fontSize: 10, color: '#86efac88', letterSpacing: '.1em', marginBottom: 12 }}>
-            NEW HEDGE CONTRACT
-          </div>
+        <div style={{ padding: 14, borderRadius: 8, background: '#060908', border: '1px solid #0f2a1a', marginBottom: 14 }}>
+          <div style={{ fontSize: 10, color: '#86efac88', letterSpacing: '.1em', marginBottom: 12 }}>NEW HEDGE CONTRACT</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
             <div>
               <div style={{ fontSize: 9, color: '#86efac44', marginBottom: 4 }}>CONTRACT TYPE</div>
@@ -459,8 +409,7 @@ function HedgeManager({ currentPrice }) {
             </div>
             <div>
               <div style={{ fontSize: 9, color: '#86efac44', marginBottom: 4 }}>QUANTITY (CCCs)</div>
-              <input className="cd-inp" type="number" placeholder="e.g. 500"
-                value={form.quantityCcc}
+              <input className="cd-inp" type="number" placeholder="e.g. 500" value={form.quantityCcc}
                 onChange={e => setForm(p => ({ ...p, quantityCcc: e.target.value }))}/>
             </div>
             {['forward_buy','forward_sell'].includes(form.contractType) && (
@@ -474,30 +423,25 @@ function HedgeManager({ currentPrice }) {
             {form.contractType === 'budget_lock' && (
               <div>
                 <div style={{ fontSize: 9, color: '#86efac44', marginBottom: 4 }}>BUDGET (₹)</div>
-                <input className="cd-inp" type="number" placeholder="e.g. 500000"
-                  value={form.budgetInr || ''}
+                <input className="cd-inp" type="number" placeholder="e.g. 500000" value={form.budgetInr || ''}
                   onChange={e => setForm(p => ({ ...p, budgetInr: e.target.value }))}/>
               </div>
             )}
             {form.contractType === 'price_cap' && (
               <div>
                 <div style={{ fontSize: 9, color: '#86efac44', marginBottom: 4 }}>MAX PRICE (₹/CCC)</div>
-                <input className="cd-inp" type="number" placeholder="e.g. 1000"
-                  value={form.maxPriceInr || ''}
+                <input className="cd-inp" type="number" placeholder="e.g. 1000" value={form.maxPriceInr || ''}
                   onChange={e => setForm(p => ({ ...p, maxPriceInr: e.target.value }))}/>
               </div>
             )}
             <div>
               <div style={{ fontSize: 9, color: '#86efac44', marginBottom: 4 }}>EXPIRY DATE</div>
-              <input className="cd-inp" type="date"
-                value={form.expiryDate}
+              <input className="cd-inp" type="date" value={form.expiryDate}
                 onChange={e => setForm(p => ({ ...p, expiryDate: e.target.value }))}/>
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-            <button className="cd-btn" onClick={save} disabled={saving}>
-              {saving ? '⏳...' : '✅ CREATE HEDGE'}
-            </button>
+            <button className="cd-btn" onClick={save} disabled={saving}>{saving ? '⏳...' : '✅ CREATE HEDGE'}</button>
             <button className="cd-btn-outline" onClick={() => setForm(null)}>CANCEL</button>
           </div>
         </div>
@@ -506,66 +450,75 @@ function HedgeManager({ currentPrice }) {
         <div style={{ textAlign: 'center', padding: '24px', color: '#86efac33', fontSize: 12 }}>
           No hedges yet. Use forward contracts or budget locks to manage price risk.
         </div>
-      ) : (
-        hedges.map(h => {
-          const cfg = CONTRACT_LABELS[h.contract_type] || {};
-          return (
-            <div key={h.id} style={{ display: 'flex', gap: 12, alignItems: 'center',
-              padding: '10px 0', borderBottom: '1px solid #0f2a1a08' }}>
-              <span style={{ fontSize: 18 }}>{cfg.icon}</span>
-              <div style={{ flex: 1 }}>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 3 }}>
-                  <span style={{ fontSize: 11, fontWeight: 500, color: cfg.color || '#86efac88' }}>
-                    {cfg.label}
-                  </span>
-                  <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 10,
-                    background: h.status === 'active' ? '#0d2e1f' : '#1a1a1a',
-                    color: h.status === 'active' ? '#22c55e' : '#86efac44',
-                    border: '1px solid #22c55e22' }}>
-                    {h.status?.toUpperCase()}
-                  </span>
-                </div>
-                <div style={{ fontSize: 10, color: '#86efac55' }}>
-                  {fmtNum(h.quantity_ccc)} CCCs
-                  {h.locked_price_inr && ` @ ${fmtINR(h.locked_price_inr)}/CCC`}
-                  {h.budget_inr && ` — Budget: ${fmtINR(h.budget_inr)}`}
-                  {h.max_price_inr && ` — Cap: ${fmtINR(h.max_price_inr)}/CCC`}
-                  <span style={{ marginLeft: 8, color: '#86efac33' }}>
-                    Expires {fmtDate(h.expiry_date)}
-                  </span>
-                </div>
+      ) : hedges.map(h => {
+        const cfg = CONTRACT_LABELS[h.contract_type] || {};
+        return (
+          <div key={h.id} style={{ display: 'flex', gap: 12, alignItems: 'center',
+            padding: '10px 0', borderBottom: '1px solid #0f2a1a08' }}>
+            <span style={{ fontSize: 18 }}>{cfg.icon}</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 3 }}>
+                <span style={{ fontSize: 11, fontWeight: 500, color: cfg.color || '#86efac88' }}>{cfg.label}</span>
+                <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 10,
+                  background: h.status === 'active' ? '#0d2e1f' : '#1a1a1a',
+                  color: h.status === 'active' ? '#22c55e' : '#86efac44', border: '1px solid #22c55e22' }}>
+                  {h.status?.toUpperCase()}
+                </span>
               </div>
-              {h.status === 'active' && (
-                <button onClick={() => cancel(h.id)} style={{
-                  background: 'none', border: '1px solid #f8717133', borderRadius: 4,
-                  color: '#f87171', cursor: 'pointer', fontSize: 10, padding: '3px 8px',
-                  fontFamily: 'DM Mono, monospace' }}>
-                  CANCEL
-                </button>
-              )}
+              <div style={{ fontSize: 10, color: '#86efac55' }}>
+                {fmtNum(h.quantity_ccc)} CCCs
+                {h.locked_price_inr && ` @ ${fmtINR(h.locked_price_inr)}/CCC`}
+                {h.budget_inr && ` — Budget: ${fmtINR(h.budget_inr)}`}
+                {h.max_price_inr && ` — Cap: ${fmtINR(h.max_price_inr)}/CCC`}
+                <span style={{ marginLeft: 8, color: '#86efac33' }}>Expires {fmtDate(h.expiry_date)}</span>
+              </div>
             </div>
-          );
-        })
-      )}
+            {h.status === 'active' && (
+              <button onClick={() => cancel(h.id)} style={{ background: 'none', border: '1px solid #f8717133',
+                borderRadius: 4, color: '#f87171', cursor: 'pointer', fontSize: 10, padding: '3px 8px',
+                fontFamily: 'DM Mono, monospace' }}>CANCEL</button>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-function OnboardingWizard({ onComplete }) {
-  const [step,    setStep]   = useState(1);
-  const [entity,  setEntity] = useState({ entityName: '', entityType: 'steel', dcId: '', gstin: '', complianceOfficer: '', complianceEmail: '' });
-  const [plant,   setPlant]  = useState({ plantName: '', state: '', sector: '', installedCapacity: '', capacityUnit: 'MW', baselineSec: '', secUnit: 'GJ/tonne' });
-  const [pos,     setPos]    = useState({ targetCcc: '', heldCcc: '', surrenderedCcc: '0' });
-  const [saving,  setSaving] = useState(false);
-  const [error,   setError]  = useState('');
+// ─────────────────────────────────────────────────────────────────────────────
+// ONBOARDING WIZARD
+// Accepts `profile` prop from ComplianceDashboard to pre-fill identity fields.
+// Entity name ← profile.company_name
+// GSTIN       ← profile.company_gstin
+// Users only need to add CCTS-specific: DC ID, sector, compliance officer, plants.
+// ─────────────────────────────────────────────────────────────────────────────
+function OnboardingWizard({ onComplete, profile }) {
+  const [step,   setStep]   = useState(1);
+  const [entity, setEntity] = useState({
+    entityName:        profile?.company_name  || '',
+    entityType:        'steel',
+    dcId:              '',
+    gstin:             profile?.company_gstin || '',
+    complianceOfficer: '',
+    complianceEmail:   '',
+  });
+  const [plant,  setPlant]  = useState({
+    plantName: '', state: '', sector: '', installedCapacity: '',
+    capacityUnit: 'MW', baselineSec: '', secUnit: 'GJ/tonne',
+  });
+  const [pos,    setPos]    = useState({ targetCcc: '', heldCcc: '', surrenderedCcc: '0' });
+  const [saving, setSaving] = useState(false);
+  const [error,  setError]  = useState('');
 
   const ENTITY_TYPES = ['steel','cement','aluminium','fertiliser','power','textile','pulp_paper','chlor_alkali','railway','other'];
+
+  const wasPreFilled = !!(profile?.company_name || profile?.company_gstin);
 
   const saveStep1 = async () => {
     if (!entity.entityName || !entity.entityType) { setError('Entity name and type required'); return; }
     setSaving(true); setError('');
     try {
-      await apiFetch('/api/compliance/entity', { method: 'POST', body: JSON.stringify(entity) });
+      await apiFetch('/api/compliance/entity', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(entity) });
       setStep(2);
     } catch (e) { setError(e.message); }
     finally { setSaving(false); }
@@ -575,7 +528,7 @@ function OnboardingWizard({ onComplete }) {
     if (!plant.plantName) { setError('Plant name required'); return; }
     setSaving(true); setError('');
     try {
-      await apiFetch('/api/compliance/plants', { method: 'POST', body: JSON.stringify(plant) });
+      await apiFetch('/api/compliance/plants', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(plant) });
       setStep(3);
     } catch (e) { setError(e.message); }
     finally { setSaving(false); }
@@ -585,7 +538,7 @@ function OnboardingWizard({ onComplete }) {
     if (!pos.targetCcc || !pos.heldCcc) { setError('Target and held CCCs required'); return; }
     setSaving(true); setError('');
     try {
-      await apiFetch('/api/compliance/positions', { method: 'POST', body: JSON.stringify(pos) });
+      await apiFetch('/api/compliance/positions', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(pos) });
       onComplete();
     } catch (e) { setError(e.message); }
     finally { setSaving(false); }
@@ -607,41 +560,63 @@ function OnboardingWizard({ onComplete }) {
           ))}
         </div>
       </div>
+
       {error && (
         <div style={{ padding: '8px 12px', borderRadius: 6, background: '#450a0a',
           border: '1px solid #f8717133', color: '#f87171', fontSize: 11, marginBottom: 12 }}>
           {error}
         </div>
       )}
+
       <div className="cd-panel">
         {step === 1 && (
           <>
             <div className="cd-panel-title">STEP 1 OF 3 — ENTITY DETAILS</div>
+
+            {/* Pre-fill notice */}
+            {wasPreFilled && (
+              <div style={{ padding: '8px 12px', borderRadius: 6, marginBottom: 14,
+                background: '#060e18', border: '1px solid #3b82f622',
+                fontSize: 10, color: '#60a5fa88', lineHeight: 1.7 }}>
+                ℹ Entity name{profile?.company_gstin ? ' and GSTIN' : ''} pre-filled from your organisation profile.
+                Add your BEE Designated Consumer ID and compliance officer below.
+              </div>
+            )}
+
             <label className="cd-label">Entity Name *</label>
             <input className="cd-inp" placeholder="e.g. Tata Steel Ltd"
-              value={entity.entityName} onChange={e => setEntity(p => ({ ...p, entityName: e.target.value }))}/>
+              value={entity.entityName} onChange={e => setEntity(p => ({ ...p, entityName: e.target.value }))}
+              style={wasPreFilled && entity.entityName ? { borderColor: '#3b82f630' } : {}}/>
+
             <label className="cd-label">Sector *</label>
             <select className="cd-inp" value={entity.entityType}
               onChange={e => setEntity(p => ({ ...p, entityType: e.target.value }))}>
               {ENTITY_TYPES.map(t => <option key={t} value={t}>{t.replace('_', ' ').toUpperCase()}</option>)}
             </select>
+
             <label className="cd-label">BEE Designated Consumer ID</label>
             <input className="cd-inp" placeholder="DC-XXXX-XXXX"
               value={entity.dcId} onChange={e => setEntity(p => ({ ...p, dcId: e.target.value }))}/>
+
             <label className="cd-label">GSTIN</label>
             <input className="cd-inp" placeholder="27XXXXX..."
-              value={entity.gstin} onChange={e => setEntity(p => ({ ...p, gstin: e.target.value }))}/>
+              value={entity.gstin} onChange={e => setEntity(p => ({ ...p, gstin: e.target.value }))}
+              style={wasPreFilled && entity.gstin ? { borderColor: '#3b82f630' } : {}}/>
+
             <label className="cd-label">Compliance Officer</label>
             <input className="cd-inp" placeholder="Name"
               value={entity.complianceOfficer} onChange={e => setEntity(p => ({ ...p, complianceOfficer: e.target.value }))}/>
+
             <label className="cd-label">Compliance Email</label>
             <input className="cd-inp" type="email" placeholder="compliance@company.com"
               value={entity.complianceEmail} onChange={e => setEntity(p => ({ ...p, complianceEmail: e.target.value }))}/>
+
             <button className="cd-btn" onClick={saveStep1} disabled={saving}>
               {saving ? '⏳ SAVING...' : 'NEXT →'}
             </button>
           </>
         )}
+
         {step === 2 && (
           <>
             <div className="cd-panel-title">STEP 2 OF 3 — ADD FIRST PLANT</div>
@@ -657,8 +632,7 @@ function OnboardingWizard({ onComplete }) {
                 value={plant.installedCapacity}
                 onChange={e => setPlant(p => ({ ...p, installedCapacity: e.target.value }))}/>
               <select className="cd-inp" style={{ width: 'auto', flexShrink: 0 }}
-                value={plant.capacityUnit}
-                onChange={e => setPlant(p => ({ ...p, capacityUnit: e.target.value }))}>
+                value={plant.capacityUnit} onChange={e => setPlant(p => ({ ...p, capacityUnit: e.target.value }))}>
                 {['MW','MTPA','TPD','KW','TPA'].map(u => <option key={u}>{u}</option>)}
               </select>
             </div>
@@ -668,8 +642,7 @@ function OnboardingWizard({ onComplete }) {
                 value={plant.baselineSec}
                 onChange={e => setPlant(p => ({ ...p, baselineSec: e.target.value }))}/>
               <select className="cd-inp" style={{ width: 'auto', flexShrink: 0 }}
-                value={plant.secUnit}
-                onChange={e => setPlant(p => ({ ...p, secUnit: e.target.value }))}>
+                value={plant.secUnit} onChange={e => setPlant(p => ({ ...p, secUnit: e.target.value }))}>
                 {['GJ/tonne','kWh/kWh','GJ/MT','kCal/kWh'].map(u => <option key={u}>{u}</option>)}
               </select>
             </div>
@@ -681,6 +654,7 @@ function OnboardingWizard({ onComplete }) {
             </div>
           </>
         )}
+
         {step === 3 && (
           <>
             <div className="cd-panel-title">STEP 3 OF 3 — COMPLIANCE POSITION</div>
@@ -710,24 +684,31 @@ function OnboardingWizard({ onComplete }) {
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MAIN EXPORT
+// ─────────────────────────────────────────────────────────────────────────────
 export default function ComplianceDashboard() {
   const navigate = useNavigate();
-  const [dashboard, setDashboard]     = useState(null);
-  const [prices,    setPrices]        = useState([]);
-  const [loading,   setLoading]       = useState(true);
-  const [tab,       setTab]           = useState('overview');
-  const [error,     setError]         = useState('');
+  const [dashboard,        setDashboard]        = useState(null);
+  const [prices,           setPrices]           = useState([]);
+  const [loading,          setLoading]          = useState(true);
+  const [tab,              setTab]              = useState('overview');
+  const [error,            setError]            = useState('');
+  // Pre-fill source for OnboardingWizard
+  const [complianceProfile, setComplianceProfile] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true); setError('');
     try {
-      const [dash, allPrices] = await Promise.allSettled([
+      const [dash, allPrices, prof] = await Promise.allSettled([
         apiFetch('/api/compliance/dashboard'),
         fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:5000'}/api/ccc/prices/all`)
           .then(r => r.json()),
+        apiFetch('/api/emissions/profile'),
       ]);
-      if (dash.status === 'fulfilled')        setDashboard(dash.value);
-      if (allPrices.status === 'fulfilled')   setPrices(allPrices.value?.prices || []);
+      if (dash.status      === 'fulfilled') setDashboard(dash.value);
+      if (allPrices.status === 'fulfilled') setPrices(allPrices.value?.prices || []);
+      if (prof.status      === 'fulfilled') setComplianceProfile(prof.value?.profile || null);
     } catch (e) {
       setError(e.message);
     } finally { setLoading(false); }
@@ -765,8 +746,7 @@ export default function ComplianceDashboard() {
       background:#040706;color:#f0fdf4;font-family:'DM Mono',monospace;
       font-size:11px;outline:none;margin-bottom:8px;transition:border-color .2s;}
     .cd-inp:focus{border-color:#22c55e33;}
-    .cd-label{display:block;font-size:9px;color:#86efac44;letter-spacing:.1em;
-      margin-bottom:4px;margin-top:4px;}
+    .cd-label{display:block;font-size:9px;color:#86efac44;letter-spacing:.1em;margin-bottom:4px;margin-top:4px;}
     .cd-tab{padding:9px 16px;border:none;border-bottom:2px solid transparent;
       background:transparent;cursor:pointer;font-family:'DM Mono',monospace;
       font-size:10px;letter-spacing:.1em;color:#86efac44;transition:all .2s;margin-bottom:-1px;}
@@ -776,12 +756,13 @@ export default function ComplianceDashboard() {
     @media(max-width:768px){.cd-cards-grid{grid-template-columns:1fr 1fr!important;}}
   `;
 
+  // Show onboarding wizard (with profile pre-fill) if not yet onboarded
   if (!loading && dashboard && !dashboard.onboarded) {
     return (
       <>
         <style>{CSS}</style>
         <div className="cd">
-          <OnboardingWizard onComplete={load} />
+          <OnboardingWizard onComplete={load} profile={complianceProfile} />
         </div>
       </>
     );
@@ -824,6 +805,7 @@ export default function ComplianceDashboard() {
               </button>
             </div>
           </div>
+
           {error && (
             <div style={{ padding: '10px 14px', borderRadius: 7, marginBottom: 16,
               background: '#1a0707', border: '1px solid #f8717133', color: '#f87171', fontSize: 11 }}>
@@ -833,7 +815,9 @@ export default function ComplianceDashboard() {
                 fontFamily: 'DM Mono, monospace' }}>RETRY</button>
             </div>
           )}
+
           <PriceTicker prices={prices} />
+
           {d?.marketContext?.recommendation && (
             <div style={{ padding: '12px 16px', borderRadius: 8, marginBottom: 16,
               background: '#0d2e1f', border: '1px solid #22c55e22', fontSize: 12,
@@ -853,38 +837,20 @@ export default function ComplianceDashboard() {
               )}
             </div>
           )}
-          <SummaryCards
-            summary={d?.summary}
-            period={d?.period}
-            marketContext={d?.marketContext}
-            loading={loading}
-          />
-          <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid #0f2a1a',
-            marginBottom: 16, paddingBottom: 0 }}>
-            {[
-              ['overview',  'OVERVIEW'],
-              ['netting',   'NETTING ENGINE'],
-              ['hedges',    'HEDGE PORTFOLIO'],
-              ['exchange',  'EXCHANGE ORDERS'],
-              ['gci',       'GCI SYNC'],
-            ].map(([t, label]) => (
-              <button key={t} className={`cd-tab${tab === t ? ' act' : ''}`}
-                onClick={() => setTab(t)}>
-                {label}
-              </button>
+
+          <SummaryCards summary={d?.summary} period={d?.period} marketContext={d?.marketContext} loading={loading}/>
+
+          <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid #0f2a1a', marginBottom: 16, paddingBottom: 0 }}>
+            {[['overview','OVERVIEW'],['netting','NETTING ENGINE'],['hedges','HEDGE PORTFOLIO'],['exchange','EXCHANGE ORDERS'],['gci','GCI SYNC']].map(([t, label]) => (
+              <button key={t} className={`cd-tab${tab === t ? ' act' : ''}`} onClick={() => setTab(t)}>{label}</button>
             ))}
           </div>
-          {tab === 'overview' && (
-            <PlantBreakdown
-              plants={d?.plantBreakdown}
-              loading={loading}
-              onEditPosition={() => navigate('/compliance/positions')}
-            />
-          )}
-          {tab === 'netting' && <NettingEngine onNettingComplete={load}/>}
-          {tab === 'hedges'  && <HedgeManager currentPrice={currentPrice}/>}
+
+          {tab === 'overview' && <PlantBreakdown plants={d?.plantBreakdown} loading={loading} onEditPosition={() => navigate('/compliance/positions')}/>}
+          {tab === 'netting'  && <NettingEngine onNettingComplete={load}/>}
+          {tab === 'hedges'   && <HedgeManager currentPrice={currentPrice}/>}
           {tab === 'exchange' && <ExchangeOrdersPanel />}
-          {tab === 'gci'     && <GCISyncPanel onSync={load}/>}
+          {tab === 'gci'      && <GCISyncPanel onSync={load}/>}
         </div>
       </div>
     </>
@@ -908,7 +874,7 @@ function ExchangeOrdersPanel() {
     if (!form) return;
     setSaving(true); setError('');
     try {
-      const data = await apiFetch('/api/ccc/exchange/order', { method: 'POST', body: JSON.stringify(form) });
+      const data = await apiFetch('/api/ccc/exchange/order', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(form) });
       if (data?.order) setOrders(prev => [data.order, ...prev]);
       setForm(null);
     } catch (e) { setError(e.message); }
@@ -924,57 +890,40 @@ function ExchangeOrdersPanel() {
     <div className="cd-panel">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
         <div className="cd-panel-title" style={{ marginBottom: 0 }}>EXCHANGE ORDERS (IEX / PXIL)</div>
-        <button className="cd-btn-sm" onClick={() => setForm({
-          exchange: 'IEX', orderSide: 'buy', orderType: 'limit',
-          quantityCcc: '', limitPriceInr: '',
-        })}>+ PLACE ORDER</button>
+        <button className="cd-btn-sm" onClick={() => setForm({ exchange: 'IEX', orderSide: 'buy', orderType: 'limit', quantityCcc: '', limitPriceInr: '' })}>+ PLACE ORDER</button>
       </div>
-      {error && (
-        <div style={{ padding: '8px 12px', borderRadius: 6, background: '#450a0a',
-          border: '1px solid #f8717133', color: '#f87171', fontSize: 11, marginBottom: 10 }}>
-          {error}
-        </div>
-      )}
+      {error && <div style={{ padding: '8px 12px', borderRadius: 6, background: '#450a0a',
+        border: '1px solid #f8717133', color: '#f87171', fontSize: 11, marginBottom: 10 }}>{error}</div>}
       {form && (
-        <div style={{ padding: 14, borderRadius: 8, background: '#060908',
-          border: '1px solid #0f2a1a', marginBottom: 14 }}>
-          <div style={{ fontSize: 10, color: '#86efac88', letterSpacing: '.1em', marginBottom: 12 }}>
-            PLACE ORDER ON EXCHANGE
-          </div>
+        <div style={{ padding: 14, borderRadius: 8, background: '#060908', border: '1px solid #0f2a1a', marginBottom: 14 }}>
+          <div style={{ fontSize: 10, color: '#86efac88', letterSpacing: '.1em', marginBottom: 12 }}>PLACE ORDER ON EXCHANGE</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
             <div>
               <div style={{ fontSize: 9, color: '#86efac44', marginBottom: 4 }}>EXCHANGE</div>
-              <select className="cd-inp" value={form.exchange}
-                onChange={e => setForm(p => ({ ...p, exchange: e.target.value }))}>
-                <option value="IEX">IEX</option>
-                <option value="PXIL">PXIL</option>
+              <select className="cd-inp" value={form.exchange} onChange={e => setForm(p => ({ ...p, exchange: e.target.value }))}>
+                <option value="IEX">IEX</option><option value="PXIL">PXIL</option>
               </select>
             </div>
             <div>
               <div style={{ fontSize: 9, color: '#86efac44', marginBottom: 4 }}>SIDE</div>
-              <select className="cd-inp" value={form.orderSide}
-                onChange={e => setForm(p => ({ ...p, orderSide: e.target.value }))}>
-                <option value="buy">Buy</option>
-                <option value="sell">Sell</option>
+              <select className="cd-inp" value={form.orderSide} onChange={e => setForm(p => ({ ...p, orderSide: e.target.value }))}>
+                <option value="buy">Buy</option><option value="sell">Sell</option>
               </select>
             </div>
             <div>
               <div style={{ fontSize: 9, color: '#86efac44', marginBottom: 4 }}>QUANTITY (CCCs)</div>
-              <input className="cd-inp" type="number" placeholder="e.g. 200"
-                value={form.quantityCcc}
+              <input className="cd-inp" type="number" placeholder="e.g. 200" value={form.quantityCcc}
                 onChange={e => setForm(p => ({ ...p, quantityCcc: e.target.value }))}/>
             </div>
             <div>
               <div style={{ fontSize: 9, color: '#86efac44', marginBottom: 4 }}>LIMIT PRICE (₹/CCC)</div>
-              <input className="cd-inp" type="number" placeholder="e.g. 860"
-                value={form.limitPriceInr}
+              <input className="cd-inp" type="number" placeholder="e.g. 860" value={form.limitPriceInr}
                 onChange={e => setForm(p => ({ ...p, limitPriceInr: e.target.value }))}/>
             </div>
           </div>
           <div style={{ padding: '8px 12px', borderRadius: 6, marginBottom: 12, fontSize: 10,
             background: '#0a1628', border: '1px solid #60a5fa22', color: '#60a5fa88', lineHeight: 1.6 }}>
-            ⚠ Orders are routed to {form.exchange} via their API. In stub mode (before API certification),
-            orders are recorded in EtherTrack and simulated. Set {form.exchange}_API_KEY to enable live routing.
+            ⚠ Orders routed to {form.exchange} via API. Stub mode until {form.exchange}_API_KEY is set.
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="cd-btn" onClick={submit} disabled={saving}>
@@ -985,22 +934,16 @@ function ExchangeOrdersPanel() {
         </div>
       )}
       {loading ? <Skel h={80}/> : orders.length === 0 ? (
-        <div style={{ textAlign: 'center', padding: '32px', color: '#86efac33', fontSize: 12 }}>
-          No exchange orders yet.
-        </div>
+        <div style={{ textAlign: 'center', padding: '32px', color: '#86efac33', fontSize: 12 }}>No exchange orders yet.</div>
       ) : (
         <>
           <div style={{ display: 'grid', gridTemplateColumns: '80px 1fr 80px 80px 80px 90px', gap: 8,
-            padding: '0 8px 8px', fontSize: 8, color: '#86efac44', letterSpacing: '.12em',
-            borderBottom: '1px solid #0f2a1a' }}>
-            <span>EXCHANGE</span><span>SIDE / QTY</span><span>LIMIT</span>
-            <span>EXECUTED</span><span>PRICE</span><span>STATUS</span>
+            padding: '0 8px 8px', fontSize: 8, color: '#86efac44', letterSpacing: '.12em', borderBottom: '1px solid #0f2a1a' }}>
+            <span>EXCHANGE</span><span>SIDE / QTY</span><span>LIMIT</span><span>EXECUTED</span><span>PRICE</span><span>STATUS</span>
           </div>
           {orders.map(o => (
-            <div key={o.id} style={{ display: 'grid',
-              gridTemplateColumns: '80px 1fr 80px 80px 80px 90px', gap: 8,
-              padding: '10px 8px', borderBottom: '1px solid #0f2a1a08',
-              fontSize: 10, alignItems: 'center' }}>
+            <div key={o.id} style={{ display: 'grid', gridTemplateColumns: '80px 1fr 80px 80px 80px 90px', gap: 8,
+              padding: '10px 8px', borderBottom: '1px solid #0f2a1a08', fontSize: 10, alignItems: 'center' }}>
               <span style={{ color: o.exchange === 'IEX' ? '#22c55e' : '#60a5fa' }}>{o.exchange}</span>
               <div>
                 <div style={{ color: o.order_side === 'buy' ? '#22c55e' : '#f87171', fontWeight: 500 }}>
@@ -1026,10 +969,10 @@ function ExchangeOrdersPanel() {
 }
 
 function GCISyncPanel({ onSync }) {
-  const [history, setHistory]  = useState([]);
-  const [loading, setLoading]  = useState(true);
-  const [syncing, setSyncing]  = useState(false);
-  const [msg,     setMsg]      = useState('');
+  const [history, setHistory] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [msg,     setMsg]     = useState('');
 
   useEffect(() => {
     apiFetch('/api/ccc/gci/sync-history')
@@ -1040,15 +983,14 @@ function GCISyncPanel({ onSync }) {
   const sync = async () => {
     setSyncing(true); setMsg('');
     try {
-      const data = await apiFetch('/api/ccc/gci/sync', { method: 'POST', body: JSON.stringify({}) });
+      const data = await apiFetch('/api/ccc/gci/sync', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({}) });
       setMsg(data?.result?.isStub
         ? '✅ Sync simulated (stub mode — set GCI_API_KEY for live sync)'
         : `✅ Synced ${data?.result?.heldCCC} CCCs from GCI registry`);
       onSync?.();
       apiFetch('/api/ccc/gci/sync-history').then(d => setHistory(d?.history || []));
-    } catch (e) {
-      setMsg(`❌ Sync failed: ${e.message}`);
-    } finally { setSyncing(false); }
+    } catch (e) { setMsg(`❌ Sync failed: ${e.message}`); }
+    finally { setSyncing(false); }
   };
 
   const STATUS_COLOR_MAP = { success: '#22c55e', failed: '#f87171', pending: '#facc15', partial: '#fb923c' };
@@ -1073,28 +1015,18 @@ function GCISyncPanel({ onSync }) {
           {msg}
         </div>
       )}
-      <div style={{ fontSize: 9, color: '#86efac44', letterSpacing: '.12em', marginBottom: 8 }}>
-        SYNC HISTORY
-      </div>
+      <div style={{ fontSize: 9, color: '#86efac44', letterSpacing: '.12em', marginBottom: 8 }}>SYNC HISTORY</div>
       {loading ? <Skel h={60}/> : history.length === 0 ? (
-        <div style={{ color: '#86efac33', fontSize: 11, textAlign: 'center', padding: '16px' }}>
-          No sync history yet.
+        <div style={{ color: '#86efac33', fontSize: 11, textAlign: 'center', padding: '16px' }}>No sync history yet.</div>
+      ) : history.map(h => (
+        <div key={h.id} style={{ display: 'flex', justifyContent: 'space-between',
+          padding: '8px 0', borderBottom: '1px solid #0f2a1a08', fontSize: 10 }}>
+          <span style={{ color: '#86efac55' }}>{fmtDate(h.initiated_at)}</span>
+          <span style={{ color: '#86efac77' }}>{h.sync_type?.replace('_', ' ').toUpperCase()}</span>
+          <span style={{ color: STATUS_COLOR_MAP[h.status] || '#86efac44' }}>{h.status?.toUpperCase()}</span>
+          {h.gci_reference_id && <span style={{ fontSize: 9, color: '#86efac33' }}>{h.gci_reference_id}</span>}
         </div>
-      ) : (
-        history.map(h => (
-          <div key={h.id} style={{ display: 'flex', justifyContent: 'space-between',
-            padding: '8px 0', borderBottom: '1px solid #0f2a1a08', fontSize: 10 }}>
-            <span style={{ color: '#86efac55' }}>{fmtDate(h.initiated_at)}</span>
-            <span style={{ color: '#86efac77' }}>{h.sync_type?.replace('_', ' ').toUpperCase()}</span>
-            <span style={{ color: STATUS_COLOR_MAP[h.status] || '#86efac44' }}>
-              {h.status?.toUpperCase()}
-            </span>
-            {h.gci_reference_id && (
-              <span style={{ fontSize: 9, color: '#86efac33' }}>{h.gci_reference_id}</span>
-            )}
-          </div>
-        ))
-      )}
+      ))}
     </div>
   );
 }

@@ -282,6 +282,12 @@ const normaliseTradeRow = (t) => ({
   priceINR         : parseFloat(t.price_per_credit_inr || 0),
   price_per_credit_inr : parseFloat(t.price_per_credit_inr || 0),
   buyer_pays_inr   : parseFloat(t.buyer_pays_inr || 0),
+  // [FIX-INVOICE] Fields required by TradingHistory invoice + chain badge
+  has_invoice              : t.has_invoice === true || t.has_invoice === 'true' || !!t.trade_invoice_number,
+  trade_invoice_generated_at: t.trade_invoice_generated_at || null,
+  chain_tx_hash            : t.chain_tx_hash || t.tx_hash || null,
+  chain_status             : t.chain_status || (t.payment_mode === 'eth' ? 'on_chain' : null),
+  chain_block              : t.chain_block || null,
 });
 
 // ── Map a DB credit row to the shape the UI expects ───────────────

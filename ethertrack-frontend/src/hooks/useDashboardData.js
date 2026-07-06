@@ -1,13 +1,13 @@
 /**
  * hooks/useDashboardData.js
  *
- * Manages all dashboard API data:
- *  - Platform stats, trades, emissions, news, INR balance, alerts, pending tx
- *  - Priority loading: critical data first, secondary data after
- *  - Per-key concurrent-fetch guards
- *  - Circuit breaker per endpoint family
- *  - Auto-retry on error (30 s debounce)
- *  - Refresh cooldown enforced via localStorage (UX) + server (security)
+ * [FEAT-ESG-SUMMARY] Added esgData, esgError, esgTs + fetchEsg() action.
+ *   - Fetches /api/brsr/esg-summary/:year after critical data loads (Phase 2)
+ *   - Exposed in state as ds.esgData — consumed by EmissionOffsetCard
+ *   - Auto-retried on error alongside emissions
+ *   - Non-blocking — never delays Phase 1 (stats/trades/inr)
+ *
+ * All existing behaviour unchanged.
  */
 
 import { useReducer, useCallback, useEffect, useRef } from 'react';
@@ -28,7 +28,7 @@ import {
 } from '../constants/dashboard';
 import { sanitizeNewsItem } from '../utils/dashboard';
 
-// ── Circuit breakers (one per API family) ──────────────────────────────────
+// ── Circuit breakers ───────────────────────────────────────────────────────
 const CB = {
   stats:    createCircuitBreaker('stats',    { threshold: CB_FAILURE_THRESHOLD, openMs: CB_OPEN_DURATION_MS }),
   trades:   createCircuitBreaker('trades',   { threshold: CB_FAILURE_THRESHOLD, openMs: CB_OPEN_DURATION_MS }),
@@ -36,19 +36,20 @@ const CB = {
   news:     createCircuitBreaker('news',     { threshold: CB_FAILURE_THRESHOLD, openMs: CB_OPEN_DURATION_MS }),
   wallet:   createCircuitBreaker('wallet',   { threshold: CB_FAILURE_THRESHOLD, openMs: CB_OPEN_DURATION_MS }),
   network:  createCircuitBreaker('network',  { threshold: CB_FAILURE_THRESHOLD, openMs: CB_OPEN_DURATION_MS }),
+  esg:      createCircuitBreaker('esg',      { threshold: CB_FAILURE_THRESHOLD, openMs: CB_OPEN_DURATION_MS }), // [FEAT-ESG-SUMMARY]
 };
 
 // ── Reducer ────────────────────────────────────────────────────────────────
 const INIT = {
   // INR balance
-  inrBalance:   null,
-  inrBalError:  false,
+  inrBalance:  null,
+  inrBalError: false,
 
   // Platform stats
-  platformStats:  null,
-  statsError:     false,
-  statsLoading:   true,
-  statsTs:        null,
+  platformStats: null,
+  statsError:    false,
+  statsLoading:  true,
+  statsTs:       null,
 
   // My trades
   myTrades:      [],
@@ -56,10 +57,16 @@ const INIT = {
   tradesLoading: true,
   tradesTs:      null,
 
-  // Emissions
+  // Emissions (basic — from /api/emissions/my)
   emissionsData:  null,
   emissionsError: false,
   emissionsTs:    null,
+
+  // [FEAT-ESG-SUMMARY] Full ESG summary from /api/brsr/esg-summary/:year
+  // Shape: { emissions:{}, offsets:{}, net:{}, brsr:{}, frameworks:[], ready_for_submission }
+  esgData:  null,
+  esgError: false,
+  esgTs:    null,
 
   // News
   newsItems:   STATIC_NEWS_FALLBACK,
@@ -73,15 +80,15 @@ const INIT = {
   pendingTxCount: 0,
   alertCount:     0,
 
-  // Global state
+  // Global
   isRefreshing:   false,
   sessionExpired: false,
 };
 
 function reducer(state, action) {
   switch (action.type) {
-    case 'PATCH':  return { ...state, ...action.payload };
-    default:       return state;
+    case 'PATCH': return { ...state, ...action.payload };
+    default:      return state;
   }
 }
 
@@ -90,30 +97,19 @@ export function useDashboardData() {
   const [state, dispatch] = useReducer(reducer, INIT);
   const patch = useCallback((payload) => dispatch({ type: 'PATCH', payload }), []);
 
-  // Per-key in-flight guard
   const inFlight = useRef({});
-
-  // ── Helpers ──────────────────────────────────────────────────────────────
 
   function guard(key, fn) {
     return async (...args) => {
       if (inFlight.current[key]) return;
       inFlight.current[key] = true;
-      try {
-        return await fn(...args);
-      } finally {
-        inFlight.current[key] = false;
-      }
+      try { return await fn(...args); }
+      finally { inFlight.current[key] = false; }
     };
   }
 
-  function isSessionExpired(err) {
-    return err?.message === 'session-expired';
-  }
-
-  function isCircuitOpen(err) {
-    return err?.message?.startsWith('circuit-open:');
-  }
+  function isSessionExpired(err) { return err?.message === 'session-expired'; }
+  function isCircuitOpen(err)    { return err?.message?.startsWith('circuit-open:'); }
 
   // ── Fetchers ─────────────────────────────────────────────────────────────
 
@@ -121,43 +117,47 @@ export function useDashboardData() {
   const fetchStats = useCallback(guard('stats', async () => {
     patch({ statsLoading: true, statsError: false });
     try {
-      const data = await CB.stats.call(() =>
-        withRetry(() => fetchWithTimeout(() => txAPI.getStats())),
-      );
+      const data = await CB.stats.call(() => withRetry(() => fetchWithTimeout(() => txAPI.getStats())));
       patch({ platformStats: data, statsTs: Date.now() });
     } catch (err) {
       if (!isSessionExpired(err) && !isCircuitOpen(err)) patch({ statsError: true });
-    } finally {
-      patch({ statsLoading: false });
-    }
+    } finally { patch({ statsLoading: false }); }
   }), [patch]);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const fetchTrades = useCallback(guard('trades', async () => {
     patch({ tradesLoading: true, tradesError: false });
     try {
-      // Pass limit to avoid over-fetching — server should support ?limit=4
-      const data = await CB.trades.call(() =>
-        withRetry(() => fetchWithTimeout(() => txAPI.getMy({ limit: 4 }))),
-      );
+      const data = await CB.trades.call(() => withRetry(() => fetchWithTimeout(() => txAPI.getMy({ limit: 4 }))));
       patch({ myTrades: (data?.transactions || []).slice(0, 4), tradesTs: Date.now() });
     } catch (err) {
       if (!isSessionExpired(err) && !isCircuitOpen(err)) patch({ tradesError: true });
-    } finally {
-      patch({ tradesLoading: false });
-    }
+    } finally { patch({ tradesLoading: false }); }
   }), [patch]);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const fetchEmissions = useCallback(guard('emissions', async () => {
     patch({ emissionsError: false });
     try {
-      const data = await CB.emissions.call(() =>
-        withRetry(() => fetchWithTimeout(() => apiFetch('/api/emissions/my'))),
-      );
+      const data = await CB.emissions.call(() => withRetry(() => fetchWithTimeout(() => apiFetch('/api/emissions/my'))));
       patch({ emissionsData: data, emissionsTs: Date.now() });
     } catch (err) {
       if (!isSessionExpired(err) && !isCircuitOpen(err)) patch({ emissionsError: true });
+    }
+  }), [patch]);
+
+  // [FEAT-ESG-SUMMARY] Fetch full ESG summary for current year
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const fetchEsg = useCallback(guard('esg', async () => {
+    patch({ esgError: false });
+    try {
+      const year = new Date().getFullYear();
+      const data = await CB.esg.call(() =>
+        withRetry(() => fetchWithTimeout(() => apiFetch(`/api/brsr/esg-summary/${year}`)))
+      );
+      if (data) patch({ esgData: data, esgTs: Date.now() });
+    } catch (err) {
+      if (!isSessionExpired(err) && !isCircuitOpen(err)) patch({ esgError: true });
     }
   }), [patch]);
 
@@ -165,26 +165,17 @@ export function useDashboardData() {
   const fetchNews = useCallback(guard('news', async () => {
     patch({ newsLoading: true });
     try {
-      const data = await CB.news.call(() =>
-        withRetry(() => fetchWithTimeout(() => apiFetch('/api/news/carbon'))),
-      );
-      if (data?.items?.length) {
-        patch({ newsItems: data.items.slice(0, 6).map(sanitizeNewsItem), newsLive: true });
-      }
-      // Static fallback stays if fetch fails or returns empty
+      const data = await CB.news.call(() => withRetry(() => fetchWithTimeout(() => apiFetch('/api/news/carbon'))));
+      if (data?.items?.length) patch({ newsItems: data.items.slice(0, 6).map(sanitizeNewsItem), newsLive: true });
     } catch { /* keep static fallback */ }
-    finally {
-      patch({ newsLoading: false });
-    }
+    finally { patch({ newsLoading: false }); }
   }), [patch]);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const fetchInrBalance = useCallback(guard('inr', async () => {
     patch({ inrBalError: false });
     try {
-      const data = await CB.wallet.call(() =>
-        withRetry(() => fetchWithTimeout(() => apiFetch('/api/wallet/balance'))),
-      );
+      const data = await CB.wallet.call(() => withRetry(() => fetchWithTimeout(() => apiFetch('/api/wallet/balance'))));
       patch({ inrBalance: data?.balance ?? null });
     } catch (err) {
       if (!isSessionExpired(err) && !isCircuitOpen(err)) patch({ inrBalError: true });
@@ -195,17 +186,10 @@ export function useDashboardData() {
   const checkNetwork = useCallback(guard('network', async () => {
     const t0 = Date.now();
     try {
-      await CB.network.call(() =>
-        fetchWithTimeout(() => apiFetch('/api/health'), 4_000),
-      );
+      await CB.network.call(() => fetchWithTimeout(() => apiFetch('/api/health'), 4_000));
       patch({ networkStatus: { backend: 'ONLINE', backendMs: Date.now() - t0 } });
     } catch (err) {
-      patch({
-        networkStatus: {
-          backend:   isCircuitOpen(err) ? 'DEGRADED' : 'DEGRADED',
-          backendMs: null,
-        },
-      });
+      patch({ networkStatus: { backend: isCircuitOpen(err) ? 'DEGRADED' : 'DEGRADED', backendMs: null } });
     }
   }), [patch]);
 
@@ -232,17 +216,18 @@ export function useDashboardData() {
     return () => window.removeEventListener('auth/session-expired', handler);
   }, [patch]);
 
-  // ── Priority loading: critical first, secondary after ────────────────────
+  // ── Priority loading ──────────────────────────────────────────────────────
+  // Phase 1: critical financial data (stats, trades, inr balance)
+  // Phase 2: supporting data including ESG summary — non-blocking
   useEffect(() => {
-    // Phase 1: user-visible financial data
     Promise.allSettled([fetchStats(), fetchTrades(), fetchInrBalance()]).then(() => {
-      // Phase 2: supporting data
-      Promise.allSettled([fetchEmissions(), fetchNews()]);
+      // [FEAT-ESG-SUMMARY] fetchEsg runs in Phase 2 — never delays Phase 1
+      Promise.allSettled([fetchEmissions(), fetchNews(), fetchEsg()]);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Health check polling (15 s — fast enough to catch degradation) ───────
+  // ── Health check polling ──────────────────────────────────────────────────
   useEffect(() => {
     checkNetwork();
     const id = setInterval(checkNetwork, HEALTH_POLL_MS);
@@ -265,14 +250,16 @@ export function useDashboardData() {
 
   // ── Auto-retry on error ───────────────────────────────────────────────────
   useEffect(() => {
-    if (!state.statsError && !state.tradesError && !state.emissionsError) return;
+    if (!state.statsError && !state.tradesError && !state.emissionsError && !state.esgError) return;
     const id = setTimeout(() => {
       if (state.statsError)     fetchStats();
       if (state.tradesError)    fetchTrades();
       if (state.emissionsError) fetchEmissions();
+      if (state.esgError)       fetchEsg(); // [FEAT-ESG-SUMMARY]
     }, AUTO_RETRY_DELAY_MS);
     return () => clearTimeout(id);
-  }, [state.statsError, state.tradesError, state.emissionsError, fetchStats, fetchTrades, fetchEmissions]);
+  }, [state.statsError, state.tradesError, state.emissionsError, state.esgError,
+      fetchStats, fetchTrades, fetchEmissions, fetchEsg]);
 
   // ── Refresh (all keys) ────────────────────────────────────────────────────
   const refresh = useCallback(async (ethRateForceRefresh) => {
@@ -281,25 +268,25 @@ export function useDashboardData() {
     localStorage.setItem(LS_KEY_REFRESH, String(Date.now()));
 
     patch({ isRefreshing: true });
-    // Reset all in-flight guards
     inFlight.current = {};
 
     await Promise.allSettled([
       fetchStats(), fetchTrades(), fetchEmissions(), fetchNews(),
-      fetchInrBalance(), fetchAlerts(),
+      fetchInrBalance(), fetchAlerts(), fetchEsg(), // [FEAT-ESG-SUMMARY]
     ]);
     if (ethRateForceRefresh) ethRateForceRefresh();
 
     patch({ isRefreshing: false });
     return true;
-  }, [patch, fetchStats, fetchTrades, fetchEmissions, fetchNews, fetchInrBalance, fetchAlerts]);
+  }, [patch, fetchStats, fetchTrades, fetchEmissions, fetchNews, fetchInrBalance, fetchAlerts, fetchEsg]);
 
   return {
     state,
     actions: {
       fetchStats, fetchTrades, fetchEmissions,
       fetchNews, fetchInrBalance, fetchAlerts,
-      checkNetwork, refresh,
+      checkNetwork, fetchEsg, // [FEAT-ESG-SUMMARY]
+      refresh,
     },
   };
 }

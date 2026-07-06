@@ -1,6 +1,6 @@
-// routes/market.js — Public market listings (v4)
+// routes/market.js — Public market listings (v5)
 // ─────────────────────────────────────────────────────────────────────────
-// FIXES ON TOP OF v3:
+// FIXES ON TOP OF v4:
 //
 // [M9]  IPv6 rate limiter fix — keyGenerator: (req) => req.ip was throwing
 //       ERR_ERL_KEY_GEN_IPV6 validation error from express-rate-limit v7+
@@ -10,6 +10,15 @@
 // [M10] eth-inr endpoint hardened — getLiveETHRate timeout was causing the
 //       /eth-inr endpoint to hang for 30s before returning 503. Now returns
 //       the cached fallback immediately if no fresh rate is available.
+//
+// [M11] [FIX-LISTED-QTY] `amount` in /listings now = LEAST(available_credits,
+//       listed_quantity) instead of raw available_credits. Previously
+//       `amount` reflected the seller's ENTIRE remaining wallet balance for
+//       that batch (e.g. 960 out of 1000 after 40 sold), not the size of
+//       THIS specific on-chain listing (e.g. 60 still listed). That number
+//       was then used directly as both the "available" display and the max
+//       buy quantity on the frontend, letting buyers attempt to purchase far
+//       more than was actually escrowed in the listing contract.
 // ─────────────────────────────────────────────────────────────────────────
 'use strict';
 
@@ -42,7 +51,7 @@ router.use((req, res, next) => {
 const SORT_ALLOW = {
   priceAsc:  'cb.price_per_credit_inr ASC',
   priceDesc: 'cb.price_per_credit_inr DESC',
-  amount:    'cb.available_credits DESC',
+  amount:    'LEAST(cb.available_credits, cb.listed_quantity) DESC',
   vintage:   'cb.vintage_year DESC',
   name:      'cb.project_name ASC',
   recent:    'cb.updated_at DESC',
@@ -88,7 +97,12 @@ router.get('/listings', async (req, res) => {
          cb.developer,
          cb.vintage_year                             AS "vintageYear",
          cb.registry_serial                          AS "serialNumber",
-         cb.available_credits                        AS amount,
+         -- [M11] cap displayed/purchasable amount at the smaller of the two:
+         -- what's actually escrowed in this listing (listed_quantity) vs
+         -- what the batch still has (available_credits, a safety floor in
+         -- case of data drift). This is the number buyers should ever see
+         -- or be allowed to purchase against for THIS listing.
+         LEAST(cb.available_credits, cb.listed_quantity) AS amount,
          cb.price_per_credit_inr                     AS "pricePerUnitINR",
          cb.last_traded_price_inr                    AS "lastTradedPriceINR",
          cb.token_id                                 AS "tokenId",
@@ -101,6 +115,7 @@ router.get('/listings', async (req, res) => {
        JOIN users u ON u.id = cb.user_id
        WHERE cb.admin_status  = 'approved'
          AND cb.available_credits > 0
+         AND cb.listed_quantity > 0
          AND cb.listing_id_onchain IS NOT NULL
          AND cb.deleted_at IS NULL
          AND (cb.expires_at IS NULL OR cb.expires_at > NOW())
@@ -139,6 +154,7 @@ router.get('/stats', async (req, res) => {
         `SELECT COUNT(*) FROM carbon_batches
          WHERE admin_status     = 'approved'
            AND available_credits > 0
+           AND listed_quantity > 0
            AND listing_id_onchain IS NOT NULL
            AND deleted_at IS NULL
            AND (expires_at IS NULL OR expires_at > NOW())`
@@ -191,6 +207,12 @@ router.get('/buy-orders', async (req, res) => {
 });
 
 // ── GET /api/market/trade-history ────────────────────────────────
+// NOTE: this is the PUBLIC, all-users feed — there is no logged-in "you" to
+// compute Buy/Sell relative to, so it intentionally has no `type` field.
+// Personal Buy/Sell history lives at GET /api/trades/history (routes/trades.js),
+// which computes type per requesting user. If the frontend's "My Trades" or
+// "Recent Trades" panel is meant to show the current user's own trades with
+// Buy/Sell coloring, it should call tradesAPI.history() instead of this route.
 router.get('/trade-history', async (req, res) => {
   try {
     const { rows } = await query(
