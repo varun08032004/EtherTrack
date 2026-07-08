@@ -24,7 +24,7 @@ const crypto     = require('crypto');
 const { safeQuery: query, getClient } = require('../db/pool');
 const { authenticate }     = require('../middleware/auth');
 const { requireRole, getPermissions } = require('../middleware/rbac');
-const { sendEmail }        = require('../services/email');
+const { sendOrgInviteEmail, sendSubscriptionExpiringSoonEmail, sendSubscriptionExpiredEmail } = require('../services/email');
 const { createNotification } = require('./notifications');
 const { generateGSTInvoice, serveInvoice } = require('../services/invoice');
 
@@ -152,25 +152,10 @@ async function issueInvoice(userId, paymentId, plan, cycle, amount, extraMeta = 
         `UPDATE subscription_payments SET invoice_url=$1 WHERE id=$2`,
         [invoiceUrl, paymentId]
       );
-      await sendEmail({
-        to:      user.email,
-        subject: `EtherTrack — GST Invoice for ${plan.charAt(0).toUpperCase() + plan.slice(1)} Plan`,
-        html: `
-          <div style="font-family:monospace;background:#040706;color:#f0fdf4;padding:32px;border-radius:12px;">
-            <div style="color:#22c55e;font-size:18px;font-weight:700;margin-bottom:12px;">EtherTrack 🌿</div>
-            <p>Thank you for subscribing to the <strong>${plan}</strong> plan.</p>
-            <a href="${invoiceUrl}"
-               style="display:inline-block;padding:12px 24px;background:#14532d;color:#d1fae5;border-radius:8px;text-decoration:none;font-weight:700;">
-              DOWNLOAD INVOICE →
-            </a>
-            <p style="color:#86efac33;font-size:12px;margin-top:20px;">
-              Amount: ₹${amount.toLocaleString('en-IN')} + 18% GST = ₹${Math.round(amount * 1.18).toLocaleString('en-IN')}<br/>
-              Plan: ${plan} (${cycle})<br/>
-              ${extraMeta.gstin ? `GSTIN: ${extraMeta.gstin}` : ''}
-            </p>
-          </div>
-        `,
-      }).catch(e => console.warn('[org/invoice] email failed:', e.message));
+      // NOTE: no email sent here — generateGSTInvoice() already sends the
+      // GST tax invoice email internally (services/invoice.js). Sending
+      // another one here was a duplicate-send bug; users were getting two
+      // "invoice" emails per payment.
     }
 
     return invoiceUrl;
@@ -284,26 +269,18 @@ router.post('/:orgId/invite', authenticate, requireRole('owner', 'admin'), async
       [req.params.orgId, email, teamRole, token, req.user.id]
     );
     const inviteUrl = `${process.env.FRONTEND_URL}/join-org?token=${token}`;
-    await sendEmail({
-      to:      email,
-      subject: `You've been invited to join ${org[0]?.name} on EtherTrack`,
-      html: `<div style="font-family:monospace;background:#040706;color:#f0fdf4;padding:32px;border-radius:12px;">
-        <div style="color:#22c55e;font-size:18px;font-weight:700;margin-bottom:12px;">EtherTrack 🌿</div>
-        <p>You've been invited to join <strong>${org[0]?.name}</strong> on EtherTrack.</p>
-<p style="color:#86efac88;font-size:13px;margin-top:8px;">
-  ${{
-    admin:   `As <strong style="color:#f87171">Admin</strong> — you'll be able to manage the team, approve carbon credit retirements, and access all emissions data.`,
-    manager: `As <strong style="color:#22c55e">Manager</strong> — you'll be able to log Scope 1, 2 & 3 emissions, manage the carbon credit portfolio, and export ESG reports.`,
-    auditor: `As <strong style="color:#a78bfa">Auditor</strong> — you'll have read-only access to all emissions data, portfolio, and can export PDF reports for verification.`,
-    viewer:  `As <strong style="color:#60a5fa">Viewer</strong> — you'll have read-only access to the dashboard, emissions summary, and carbon credit portfolio.`,
-  }[teamRole] || `As <strong style="color:#22c55e">${teamRole}</strong> on the ESG emissions tracking and carbon credit platform.`}
-</p>
-        <a href="${inviteUrl}"
-           style="display:inline-block;padding:12px 24px;background:#14532d;color:#d1fae5;border-radius:8px;text-decoration:none;font-weight:700;">
-          ACCEPT INVITATION →
-        </a>
-        <p style="color:#86efac33;font-size:12px;margin-top:20px;">Expires in 7 days.</p>
-      </div>`,
+    const roleDescription = {
+      admin:   `As Admin — you'll be able to manage the team, approve carbon credit retirements, and access all emissions data.`,
+      manager: `As Manager — you'll be able to log Scope 1, 2 & 3 emissions, manage the carbon credit portfolio, and export ESG reports.`,
+      auditor: `As Auditor — you'll have read-only access to all emissions data, portfolio, and can export PDF reports for verification.`,
+      viewer:  `As Viewer — you'll have read-only access to the dashboard, emissions summary, and carbon credit portfolio.`,
+    }[teamRole] || `As ${teamRole} on the ESG emissions tracking and carbon credit platform.`;
+
+    sendOrgInviteEmail(email, {
+      orgName: org[0]?.name,
+      inviterName: req.user.full_name,
+      roleDescription,
+      inviteUrl,
     }).catch(e => console.warn('[org/invite] email failed:', e.message));
     res.json({ message: `Invite sent to ${email}`, inviteUrl });
   } catch (e) {
@@ -890,7 +867,7 @@ async function checkSubscriptionExpiries() {
     // ── Step 1: Send renewal reminders (non-corporate) ────────────
     // Corporate accounts get a separate, dedicated notification below.
     const { rows: expiring } = await query(`
-      SELECT id, full_name, subscription_plan, subscription_renewal_date,
+      SELECT id, email, full_name, subscription_plan, subscription_renewal_date,
              EXTRACT(DAY FROM (subscription_renewal_date - NOW())) AS days_left,
              corporate_managed
       FROM users
@@ -927,11 +904,30 @@ async function checkSubscriptionExpiries() {
           '/billing', { plan: user.subscription_plan }).catch(() => {});
  
       } else {
-        // Standard plans — original notification logic
-        if      (days <= 0)  await createNotification(user.id, 'SYSTEM', '🔴 Subscription Expired',          `Your ${planLabel} plan has expired. Renew now to restore full access.`,  '/billing', { plan: user.subscription_plan });
-        else if (days === 1) await createNotification(user.id, 'SYSTEM', '⚠️ Subscription Expires Tomorrow', `Your ${planLabel} plan expires tomorrow.`,                                '/billing', { plan: user.subscription_plan });
-        else if (days === 7) await createNotification(user.id, 'SYSTEM', '⏰ Expiring in 7 Days',             `Your ${planLabel} plan expires on ${dateStr}.`,                         '/billing', { plan: user.subscription_plan });
-        else if (days === 30)await createNotification(user.id, 'SYSTEM', '📅 Renewal Reminder',              `Your ${planLabel} plan renews on ${dateStr} (30 days away).`,           '/billing', { plan: user.subscription_plan });
+        // Standard plans — original notification logic + email (email was
+        // missing entirely before; users only ever saw an in-app badge)
+        if (days <= 0) {
+          await createNotification(user.id, 'SYSTEM', '🔴 Subscription Expired',          `Your ${planLabel} plan has expired. Renew now to restore full access.`,  '/billing', { plan: user.subscription_plan });
+          await sendSubscriptionExpiredEmail(user.email, {
+            name: user.full_name, plan: planLabel, downgradeTo: 'Free',
+            renewUrl: `${process.env.FRONTEND_URL}/billing`,
+          }).catch(e => console.warn('[checkSubscriptionExpiries] expired email failed:', e.message));
+        } else if (days === 1) {
+          await createNotification(user.id, 'SYSTEM', '⚠️ Subscription Expires Tomorrow', `Your ${planLabel} plan expires tomorrow.`,                                '/billing', { plan: user.subscription_plan });
+          await sendSubscriptionExpiringSoonEmail(user.email, {
+            name: user.full_name, plan: planLabel, expiryDate: dateStr, daysLeft: 1,
+            renewUrl: `${process.env.FRONTEND_URL}/billing`,
+          }).catch(e => console.warn('[checkSubscriptionExpiries] expiring email failed:', e.message));
+        } else if (days === 7) {
+          await createNotification(user.id, 'SYSTEM', '⏰ Expiring in 7 Days',             `Your ${planLabel} plan expires on ${dateStr}.`,                         '/billing', { plan: user.subscription_plan });
+          await sendSubscriptionExpiringSoonEmail(user.email, {
+            name: user.full_name, plan: planLabel, expiryDate: dateStr, daysLeft: 7,
+            renewUrl: `${process.env.FRONTEND_URL}/billing`,
+          }).catch(e => console.warn('[checkSubscriptionExpiries] expiring email failed:', e.message));
+        } else if (days === 30) {
+          await createNotification(user.id, 'SYSTEM', '📅 Renewal Reminder',              `Your ${planLabel} plan renews on ${dateStr} (30 days away).`,           '/billing', { plan: user.subscription_plan });
+          // no email at 30 days — 7/1/0 day emails are enough, avoid over-mailing
+        }
       }
     }
  

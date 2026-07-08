@@ -10,6 +10,13 @@
  *     · YoY change in emissions
  *   Falls back gracefully to old behaviour if esgData is null.
  *
+ * [FIX-MARKET-DEMAND-BADGE] MarketCard now receives `marketBuckets` (from
+ *   usePortfolio() in Dashboard.jsx) and shows a live 🔥 HIGH DEMAND /
+ *   📉 OVERSUPPLIED / ● BALANCED badge next to each listing, using the
+ *   same supply/demand data that drives portfolio pricing in
+ *   PortfolioContext's `stats` and PortfolioV3's statTotals — so the badge
+ *   and the number never tell conflicting stories.
+ *
  * All other cards unchanged.
  */
 
@@ -24,6 +31,7 @@ import {
   fmt, calcEmissionOffset, buildPortfolioBreakdown,
   safeOpen, getTagColor,
 } from '../../utils/dashboard';
+import { getDemandSupplyBadge } from '../../utils/creditPricing';
 import { EmissionArc } from './DashboardPrimitives';
 import {
   TAG_COLORS, NEWS_SOURCE_LINKS,
@@ -153,7 +161,12 @@ export const PlatformTradesCard = memo(function PlatformTradesCard({
 });
 
 // ── Live Market card ───────────────────────────────────────────────────────
-export const MarketCard = memo(function MarketCard({ listings, ethRate }) {
+// [FIX-MARKET-DEMAND-BADGE] Now accepts `marketBuckets` and shows a live
+// demand/supply badge per listing, sourced from the same aggregated
+// bucket data that drives PORTFOLIO VALUE elsewhere. `marketBuckets` is
+// optional — if not passed (e.g. an older caller), badges simply don't
+// render; nothing else in the card depends on it.
+export const MarketCard = memo(function MarketCard({ listings, ethRate, marketBuckets }) {
   const navigate = useNavigate();
   return (
     <div className={`${s.card} ${s.c8}`} role="region" aria-label="Live carbon credit market">
@@ -172,6 +185,10 @@ export const MarketCard = memo(function MarketCard({ listings, ethRate }) {
             const priceINR = ethRate ? Math.round((c.adjPrice || 0) * ethRate) : null;
             const reg = { VCS: '#22c55e', GS: '#facc15', CDM: '#60a5fa', ACR: '#a78bfa' }[c.standard] || '#22c55e';
             const hasPH = Array.isArray(c.priceHistory) && c.priceHistory.length >= 2;
+            // [FIX-MARKET-DEMAND-BADGE] Same bucket data used to price
+            // PORTFOLIO VALUE — badge and price always agree with each
+            // other since they're read from one shared snapshot.
+            const badge = getDemandSupplyBadge(c.projectType, c.standard, marketBuckets);
             return (
               <div key={`${c.id || i}-${i}`} className={s.mrow} role="row" tabIndex={0}
                 aria-label={`${c.projectName}, ${c.standard}${priceINR ? `, ₹${priceINR.toLocaleString('en-IN')}` : ''}`}
@@ -179,7 +196,16 @@ export const MarketCard = memo(function MarketCard({ listings, ethRate }) {
                 onKeyDown={(e) => e.key === 'Enter' && navigate('/carbon-credits')}>
                 <div>
                   <div style={{ fontSize: 12, color: '#f0fdf4', fontWeight: 600, marginBottom: 2 }}>{c.projectName}</div>
-                  <div style={{ fontSize: 11, color: '#86efac99' }}>{c.serialNumber}</div>
+                  <div style={{ fontSize: 11, color: '#86efac99', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span>{c.serialNumber}</span>
+                    {badge && (
+                      <span style={{ fontSize: 8, padding: '1px 6px', borderRadius: 3,
+                        background: badge.bg, color: badge.color, border: `1px solid ${badge.border}`,
+                        letterSpacing: '.04em', fontWeight: 700 }}>
+                        {badge.label}
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <span style={{ fontSize: 11, padding: '2px 6px', borderRadius: 3, background: `${reg}22`, color: reg, border: `1px solid ${reg}33` }}>{c.standard}</span>
                 <span style={{ fontSize: 13, fontWeight: 700, color: '#22c55e' }}>

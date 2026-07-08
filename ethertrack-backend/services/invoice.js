@@ -87,7 +87,7 @@ const path   = require('path');
 const fs     = require('fs');
 const crypto = require('crypto');
 const { safeQuery: query } = require('../db/pool');
-const { sendEmail }        = require('./email');
+const { sendSubscriptionInvoiceEmail, sendTradeInvoiceEmail, sendTradeInvoiceChainConfirmedEmail, sendTradeBillEthEmail } = require('./email');
 
 // ── Logo ──────────────────────────────────────────────────────────────────────
 // Multi-candidate resolution: if you're deploying to Vercel serverless
@@ -637,21 +637,10 @@ async function generateGSTInvoice({
 
     try { fs.writeFileSync(path.join(TMP_DIR, `sub-${paymentId}.pdf`), pdfBuffer); } catch {}
 
-    await sendEmail({
-      to:      buyerEmail,
-      subject: `EtherTrack Tax Invoice ${invoiceNumber}`,
-      html: `<div style="font-family:monospace;background:#040706;color:#f0fdf4;padding:32px;border-radius:12px;max-width:520px;margin:0 auto;">
-        <div style="color:#22c55e;font-size:20px;font-weight:700;margin-bottom:16px;">EtherTrack 🌿</div>
-        <p style="color:#d1fae5;margin-bottom:16px;">Thank you for subscribing! Your GST tax invoice is attached.</p>
-        <p style="color:#86efac33;font-size:12px;">Invoice: ${invoiceNumber} · Plan: ${escapeHtml(planLabel)} (${cycleLabel})</p>
-        <a href="${invoiceUrl}" style="display:inline-block;padding:13px 28px;background:#14532d;color:#d1fae5;border-radius:8px;text-decoration:none;font-weight:700;font-size:12px;margin-top:16px;">↓ DOWNLOAD INVOICE</a>
-      </div>`,
-      attachments: [{
-        filename:    `EtherTrack-Invoice-${invoiceNumber}.pdf`,
-        content:     pdfBuffer,
-        contentType: 'application/pdf',
-      }],
-    }).catch(e => console.warn('Invoice email failed:', e.message));
+    await sendSubscriptionInvoiceEmail(buyerEmail,
+      { name: buyerName, invoiceNumber, planLabel, cycleLabel, invoiceUrl },
+      { attachments: [{ filename: `EtherTrack-Invoice-${invoiceNumber}.pdf`, content: pdfBuffer }] }
+    ).catch(e => console.warn('Invoice email failed:', e.message));
 
     console.log(`✅ Subscription invoice ${invoiceNumber} — payment ${paymentId}`);
     return invoiceUrl;
@@ -757,39 +746,14 @@ async function generateTradeInvoice({
     try { fs.writeFileSync(path.join(TMP_DIR, `trade-${tradeId}.pdf`), pdfBuffer); } catch {}
 
     const safeProjectName = escapeHtml(projectName);
-    await sendEmail({
-      to:      buyerEmail,
-      subject: `EtherTrack Trade Invoice ${invoiceNumber}`,
-      html: `<div style="font-family:monospace;background:#040706;color:#f0fdf4;padding:32px;border-radius:12px;max-width:520px;margin:0 auto;">
-        <div style="color:#22c55e;font-size:20px;font-weight:700;margin-bottom:16px;">EtherTrack 🌿</div>
-        <p style="color:#d1fae5;margin-bottom:16px;">Your carbon credit purchase invoice is attached.</p>
-        <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:20px;background:#050809;border-radius:8px;overflow:hidden;">
-          <tr style="border-bottom:1px solid #22c55e11;">
-            <td style="color:#86efac44;padding:10px 14px;">Invoice No</td>
-            <td style="color:#f0fdf4;padding:10px 14px;text-align:right;font-weight:700;">${invoiceNumber}</td>
-          </tr>
-          <tr style="border-bottom:1px solid #22c55e11;">
-            <td style="color:#86efac44;padding:10px 14px;">Project</td>
-            <td style="color:#22c55e;padding:10px 14px;text-align:right;">${safeProjectName}</td>
-          </tr>
-          <tr style="border-bottom:1px solid #22c55e11;">
-            <td style="color:#86efac44;padding:10px 14px;">Quantity</td>
-            <td style="color:#f0fdf4;padding:10px 14px;text-align:right;">${qty} tCO₂e</td>
-          </tr>
-          <tr>
-            <td style="color:#22c55e;padding:12px 14px;font-weight:700;">Total Paid</td>
-            <td style="color:#22c55e;padding:12px 14px;text-align:right;font-weight:700;font-size:14px;">Rs. ${Number(totalPaidINR).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-          </tr>
-        </table>
-        <a href="${invoiceUrl}" style="display:inline-block;padding:13px 28px;background:#14532d;color:#d1fae5;border-radius:8px;text-decoration:none;font-weight:700;font-size:12px;">↓ DOWNLOAD INVOICE</a>
-        <p style="color:#86efac22;font-size:11px;margin-top:20px;">PDF attached · Keep for ITC claims · Queries: ${SELLER.supportEmail}</p>
-      </div>`,
-      attachments: [{
-        filename:    `EtherTrack-Trade-Invoice-${invoiceNumber}.pdf`,
-        content:     pdfBuffer,
-        contentType: 'application/pdf',
-      }],
-    }).catch(e => console.warn('[tradeInvoice] email failed:', e.message));
+    await sendTradeInvoiceEmail(buyerEmail,
+      {
+        buyerName, invoiceNumber, projectName: safeProjectName, qty,
+        totalPaidINR: Number(totalPaidINR).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+        invoiceUrl,
+      },
+      { attachments: [{ filename: `EtherTrack-Trade-Invoice-${invoiceNumber}.pdf`, content: pdfBuffer }] }
+    ).catch(e => console.warn('[tradeInvoice] email failed:', e.message));
 
     console.log(`✅ Trade invoice ${invoiceNumber} — trade ${tradeId}`);
     return invoiceUrl;
@@ -897,19 +861,10 @@ async function patchInvoiceWithChainConfirmation(tradeId, { notifyBuyer = false 
     } catch {}
 
     if (notifyBuyer && t.buyer_email) {
-      await sendEmail({
-        to: t.buyer_email,
-        subject: `EtherTrack Invoice ${t.trade_invoice_number} — On-Chain Confirmation Added`,
-        html: `<div style="font-family:monospace;background:#040706;color:#f0fdf4;padding:32px;border-radius:12px;max-width:520px;margin:0 auto;">
-          <div style="color:#22c55e;font-size:20px;font-weight:700;margin-bottom:16px;">EtherTrack 🌿</div>
-          <p style="color:#d1fae5;margin-bottom:16px;">Your trade has been confirmed on-chain. The updated invoice with the blockchain transaction record is attached.</p>
-          <a href="${SELLER.website}/api/trades/${tradeId}/invoice" style="display:inline-block;padding:13px 28px;background:#14532d;color:#d1fae5;border-radius:8px;text-decoration:none;font-weight:700;font-size:12px;">↓ DOWNLOAD UPDATED INVOICE</a>
-        </div>`,
-        attachments: [{
-          filename: `EtherTrack-Trade-Invoice-${t.trade_invoice_number}.pdf`,
-          content: pdfBuffer, contentType: 'application/pdf',
-        }],
-      }).catch(e => console.warn('[patchInvoiceWithChainConfirmation] email failed:', e.message));
+      await sendTradeInvoiceChainConfirmedEmail(t.buyer_email,
+        { invoiceNumber: t.trade_invoice_number, invoiceUrl: `${SELLER.website}/api/trades/${tradeId}/invoice` },
+        { attachments: [{ filename: `EtherTrack-Trade-Invoice-${t.trade_invoice_number}.pdf`, content: pdfBuffer }] }
+      ).catch(e => console.warn('[patchInvoiceWithChainConfirmation] email failed:', e.message));
     }
 
     console.log(`✅ Invoice ${t.trade_invoice_number} patched with on-chain confirmation for trade ${tradeId}`);
@@ -1011,35 +966,10 @@ async function generateTradeBill({
     try { fs.writeFileSync(path.join(TMP_DIR, `trade-${tradeId}.pdf`), pdfBuffer); } catch {}
 
     const safeProjectName = escapeHtml(projectName);
-    await sendEmail({
-      to:      buyerEmail,
-      subject: `EtherTrack Payment Bill ${invoiceNumber}`,
-      html: `<div style="font-family:monospace;background:#040706;color:#f0fdf4;padding:32px;border-radius:12px;max-width:520px;margin:0 auto;">
-        <div style="color:#22c55e;font-size:20px;font-weight:700;margin-bottom:16px;">EtherTrack 🌿</div>
-        <p style="color:#d1fae5;margin-bottom:16px;">Your ETH-settled carbon credit purchase bill is attached. This is a non-GST payment bill, not a tax invoice.</p>
-        <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:20px;background:#050809;border-radius:8px;overflow:hidden;">
-          <tr style="border-bottom:1px solid #22c55e11;">
-            <td style="color:#86efac44;padding:10px 14px;">Bill No</td>
-            <td style="color:#f0fdf4;padding:10px 14px;text-align:right;font-weight:700;">${invoiceNumber}</td>
-          </tr>
-          <tr style="border-bottom:1px solid #22c55e11;">
-            <td style="color:#86efac44;padding:10px 14px;">Project</td>
-            <td style="color:#22c55e;padding:10px 14px;text-align:right;">${safeProjectName}</td>
-          </tr>
-          <tr>
-            <td style="color:#86efac44;padding:10px 14px;">Quantity</td>
-            <td style="color:#f0fdf4;padding:10px 14px;text-align:right;">${qty} tCO₂e</td>
-          </tr>
-        </table>
-        <a href="${invoiceUrl}" style="display:inline-block;padding:13px 28px;background:#14532d;color:#d1fae5;border-radius:8px;text-decoration:none;font-weight:700;font-size:12px;">↓ DOWNLOAD BILL</a>
-        <p style="color:#86efac22;font-size:11px;margin-top:20px;">PDF attached · Queries: ${SELLER.supportEmail}</p>
-      </div>`,
-      attachments: [{
-        filename:    `EtherTrack-Trade-Bill-${invoiceNumber}.pdf`,
-        content:     pdfBuffer,
-        contentType: 'application/pdf',
-      }],
-    }).catch(e => console.warn('[tradeBill] email failed:', e.message));
+    await sendTradeBillEthEmail(buyerEmail,
+      { buyerName, invoiceNumber, projectName: safeProjectName, qty, invoiceUrl },
+      { attachments: [{ filename: `EtherTrack-Trade-Bill-${invoiceNumber}.pdf`, content: pdfBuffer }] }
+    ).catch(e => console.warn('[tradeBill] email failed:', e.message));
 
     console.log(`✅ Trade bill ${invoiceNumber} — trade ${tradeId}`);
     return invoiceUrl;

@@ -18,6 +18,35 @@
 // [FIX-4]  loadListingsFromAPI mapper now correctly reads batchId from
 //          l.batchId (UUID) separately from listingId (onchain integer).
 //          The market route now returns both as separate fields.
+//
+// [FIX-5]  `stats` previously only summed `myCredits` (owned/minted), so
+//          anything bought on the marketplace was silently excluded from
+//          the Dashboard's PORTFOLIO VALUE / TOTAL CREDITS cards even
+//          though PortfolioV3 (the portfolio page) counted it via
+//          `allCredits = [...ownedCredits, ...normalisedBought]`. It also
+//          priced everything off the raw DB `pricePerCredit` field, which
+//          defaults to a flat ₹850 for any credit that's never traded
+//          (see mapDbCredit), while PortfolioV3 priced via a real
+//          reference-price formula. The two numbers could never match.
+//          `stats` now includes myBoughtCredits AND prices every credit
+//          through the same shared getMarketPrice() used by PortfolioV3,
+//          so Dashboard and the Portfolio page always reconcile. `costBasis`
+//          was also added — Dashboard.jsx already read `stats?.costBasis`
+//          but nothing ever set it, so P&L was silently always based on 0.
+//
+// [FIX-6]  vintagePenalty moved to utils/creditPricing.js (single source of
+//          truth, shared with getMarketPrice's depreciation step) and
+//          re-exported here so existing `import { vintagePenalty } from
+//          '../context/PortfolioContext'` call sites keep working.
+//
+// [FIX-7]  Real supply/demand pricing engine — tokenMetaMap + marketBuckets
+//          are built once per render from live listings/tradeHistory/
+//          buyOrders and exposed via context as `marketBuckets` so
+//          PortfolioV3.jsx and DashboardCards.jsx can price/badge credits
+//          off the exact same market snapshot as `stats` does here.
+//          Requires trade rows to carry `rawCreatedAt` (raw ISO timestamp)
+//          for recency-weighted price discovery — added to
+//          normaliseTradeRow and the on-chain optimistic trade entry.
 // ─────────────────────────────────────────────────────────────────────────────
 'use strict';
 
@@ -26,6 +55,12 @@ import React, {
   useCallback, useRef, useMemo,
 } from 'react';
 import { ethers } from 'ethers';
+import {
+  vintagePenalty as vintagePenaltyFn,
+  buildTokenMetaMap,
+  buildMarketBuckets,
+  getMarketPrice,
+} from '../utils/creditPricing';
 
 // ── Contract addresses — validated at startup ─────────────────────
 const ADDRESSES = {
@@ -105,14 +140,12 @@ const ABI = {
 export const STANDARD_ENUM      = { VCS: 0, GS: 1, CDM: 2, ACR: 3 };
 export const STANDARD_FROM_ENUM = { 0: 'VCS', 1: 'GS', 2: 'CDM', 3: 'ACR' };
 
-export const vintagePenalty = (year) => {
-  const age = new Date().getFullYear() - Number(year);
-  if (age <= 1) return 0;
-  if (age <= 2) return 3;
-  if (age <= 3) return 8;
-  if (age <= 4) return 15;
-  return 25;
-};
+// [FIX-6] Re-exported from utils/creditPricing so existing call sites
+// (`import { vintagePenalty } from '../context/PortfolioContext'`, e.g. in
+// PortfolioV3.jsx) keep working without changes. Do NOT redefine this
+// function here — it must stay the single source of truth shared with
+// getMarketPrice's depreciation step.
+export const vintagePenalty = vintagePenaltyFn;
 
 // ── Safe number parser ────────────────────────────────────────────
 const safeNum = (val, fallback = 0) => {
@@ -275,6 +308,12 @@ const normaliseTradeRow = (t) => ({
                       hour: '2-digit', minute: '2-digit',
                     })
                   : '—',
+  // [FIX-7] Raw ISO timestamp, kept separately from the display-formatted
+  // `time` string above. buildMarketBuckets() needs this for recency-
+  // weighted trade pricing — without it, every trade would be treated as
+  // "right now" and old trades would incorrectly dominate price discovery
+  // just as much as fresh ones.
+  rawCreatedAt: t.created_at || null,
   status      : t.status === 'completed' ? 'Confirmed' : (t.status || 'Confirmed'),
   paymentMode : t.payment_mode || 'inr',
   isAMM       : false,
@@ -282,12 +321,6 @@ const normaliseTradeRow = (t) => ({
   priceINR         : parseFloat(t.price_per_credit_inr || 0),
   price_per_credit_inr : parseFloat(t.price_per_credit_inr || 0),
   buyer_pays_inr   : parseFloat(t.buyer_pays_inr || 0),
-  // [FIX-INVOICE] Fields required by TradingHistory invoice + chain badge
-  has_invoice              : t.has_invoice === true || t.has_invoice === 'true' || !!t.trade_invoice_number,
-  trade_invoice_generated_at: t.trade_invoice_generated_at || null,
-  chain_tx_hash            : t.chain_tx_hash || t.tx_hash || null,
-  chain_status             : t.chain_status || (t.payment_mode === 'eth' ? 'on_chain' : null),
-  chain_block              : t.chain_block || null,
 });
 
 // ── Map a DB credit row to the shape the UI expects ───────────────
@@ -700,6 +733,9 @@ export function PortfolioProvider({ children }) {
           buyerFeeINR  : Number(buyerFee),
           sellerFeeINR : Number(sellerFee),
           time         : new Date().toLocaleString('en-IN'),
+          // [FIX-7] Raw timestamp for recency-weighted market pricing —
+          // this optimistic entry is "now", so use the current instant.
+          rawCreatedAt : new Date().toISOString(),
           status       : 'Confirmed',
           isAMM,
         }, ...prev.slice(0, 49)]);
@@ -1351,17 +1387,62 @@ export function PortfolioProvider({ children }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contracts, walletAddress, safeSet, loadMyCreditsInternal, loadAMMPools]);
 
+  // ── [FIX-7] Real market pricing data ────────────────────────────
+  // Built once per render from the live listings/tradeHistory/buyOrders
+  // already in state. tokenMetaMap resolves tokenId -> project metadata
+  // (buy orders and trades only carry tokenId); marketBuckets aggregates
+  // supply/demand/trade-price per (projectType, standard) bucket.
+  //
+  // Exposed via context as `marketBuckets` so PortfolioV3.jsx and
+  // DashboardCards.jsx price and badge credits off this EXACT same
+  // snapshot that `stats` below uses — this is what keeps Dashboard and
+  // the Portfolio page reconciled.
+  const tokenMetaMap = useMemo(
+    () => buildTokenMetaMap({ listings, myCredits, myBoughtCredits }),
+    [listings, myCredits, myBoughtCredits]
+  );
+
+  const marketBuckets = useMemo(
+    () => buildMarketBuckets({ listings, tradeHistory, buyOrders }, tokenMetaMap),
+    [listings, tradeHistory, buyOrders, tokenMetaMap]
+  );
+
   // ── Stats ─────────────────────────────────────────────────────
+  // [FIX-5] Now includes myBoughtCredits (previously only myCredits, so
+  // bought credits were silently excluded from the Dashboard's PORTFOLIO
+  // VALUE / TOTAL CREDITS cards) and prices every credit through the same
+  // getMarketPrice() used by PortfolioV3.jsx's statTotals, instead of the
+  // raw `c.pricePerCredit` DB fallback (which defaults to a flat ₹850 for
+  // most credits). costBasis is new — Dashboard.jsx already reads
+  // `stats?.costBasis` for its P&L card but nothing previously set it, so
+  // P&L was silently always computed against 0.
   const stats = useMemo(() => {
-    const active = myCredits.filter(c => c.status !== 'RETIRED');
+    const ownedActive  = myCredits.filter(c => c.status !== 'RETIRED');
+    const boughtActive = myBoughtCredits; // normalised bought credits are never RETIRED
+    const allActive    = [...ownedActive, ...boughtActive];
+
+    const totalCredits = allActive.reduce(
+      (s, c) => s + safeNum(c.heldCredits ?? c.credits, 0), 0
+    );
+
+    const totalValue = allActive.reduce((s, c) => {
+      const { price } = getMarketPrice(
+        c.projectType, c.standard, c.vintageYear, c.creditType, marketBuckets
+      );
+      return s + safeNum(c.heldCredits ?? c.credits, 0) * price;
+    }, 0);
+
+    // Cost basis — bought credits only, priced at actual purchase price.
+    // Feeds Dashboard's P&L card via calcPnL(totalValue, costBasis).
+    const costBasis = myBoughtCredits.reduce(
+      (s, c) => s + safeNum(c.pricePerCredit, 0) * safeNum(c.heldCredits ?? c.credits, 0),
+      0
+    );
+
     return {
-      totalCredits : active.reduce((s, c) => s + safeNum(c.heldCredits ?? c.credits, 0), 0),
-      totalValue   : active.reduce((s, c) => {
-        const price = safeNum(c.pricePerCredit, 850);
-        const dep   = vintagePenalty(safeNum(c.vintageYear, 0)) / 100;
-        const qty   = safeNum(c.heldCredits ?? c.credits, 0);
-        return s + qty * price * (1 - dep);
-      }, 0),
+      totalCredits,
+      totalValue,
+      costBasis,
       listedCount  : myCredits
         .filter(c => c.status === 'LISTED')
         .reduce((s, c) => s + safeNum(c.listedCredits, 0), 0),
@@ -1369,7 +1450,7 @@ export function PortfolioProvider({ children }) {
       heldCount    : myCredits.filter(c => c.status === 'HELD').length,
       openBids     : buyOrders.filter(o => o.status === 0 || o.status === 2).length,
     };
-  }, [myCredits, myRetirements, buyOrders]);
+  }, [myCredits, myBoughtCredits, myRetirements, buyOrders, marketBuckets]);
 
   const resolvedRate = ethINRRate || ETH_RATE_FALLBACK;
 
@@ -1384,6 +1465,11 @@ export function PortfolioProvider({ children }) {
       myCredits, myBoughtCredits, myRetirements,
       // Market
       listings, buyOrders, tradeHistory, ammPools,
+      // [FIX-7] Shared market-pricing snapshot — PortfolioV3.jsx and
+      // DashboardCards.jsx must use this (via getMarketPrice /
+      // getDemandSupplyBadge from utils/creditPricing) rather than
+      // deriving their own local pricing.
+      marketBuckets,
       // Stats
       stats,
       // Loading

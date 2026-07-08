@@ -1,0 +1,15 @@
+{
+  "network": "sepolia",
+  "chainId": "11155111",
+  "deployer": "0xE026653F4fDfe7Bd02fd1F6534Da631DD3410489",
+  "timestamp": "2026-07-08T10:06:51.305Z",
+  "action": "marketplace-v2-redeploy",
+  "newMarketplaceAddress": "0x62813cDCbc2ce6133463912049aeC9ee5969f417",
+  "reused": {
+    "CarbonCreditToken": "0x9619B74Ca898A539d28d000A1116dCB154F3b121",
+    "KYCRegistry": "0x2d08B5d750efb8595Ad058EE6eC93aE7EC6AC7dD",
+    "Treasury": "0xB9f32d9a62ba943d44730FAE71F70C6E362D752F",
+    "AMMPool": "0x68D3f3bcfa6582B0E9295380f08F86884446B621"
+  },
+  "signerWallet": "0xC2C3E8740CF650d9dEa4e4ca7cE7b2650DBf9151"
+}

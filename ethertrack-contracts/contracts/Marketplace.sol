@@ -33,6 +33,13 @@ import "./Treasury.sol";
  *   INR trades  → backend calls logINRTrade() after DB atomic settlement
  *   Razorpay    → backend calls logRazorpayTrade() after Razorpay verify
  *   All 3 modes → verifyTrade() lets anyone confirm a trade happened
+ *
+ * [FIX-NATSPEC v2.1] Fixed a NatSpec doc-comment bug in verifyTrade() below:
+ *   its doc comment had a return-value tag written as "payMode" but the
+ *   function's actual 4th return value is named `loggedPayMode`. Solidity's
+ *   compiler enforces that documented return names match real return
+ *   parameter names exactly, and Hardhat failed the entire build over this
+ *   mismatch (HH600). No behavior changed — only the doc comment text.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
@@ -382,10 +389,10 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
      *         Regulators, auditors, counterparties can verify any trade
      *         without trusting EtherTrack's database.
      *
-     * @return valid        true if supplied params match what was logged
-     * @return storedHash   the hash stored on-chain
-     * @return blockLogged  block number when trade was logged (0 = not found)
-     * @return payMode      0=INR_WALLET, 1=RAZORPAY, 2=ETH (ETH → use trades mapping)
+     * @return valid         true if supplied params match what was logged
+     * @return storedHash    the hash stored on-chain
+     * @return blockLogged   block number when trade was logged (0 = not found)
+     * @return loggedPayMode 0=INR_WALLET, 1=RAZORPAY, 2=ETH (ETH → use trades mapping)
      */
     function verifyTrade(
         bytes32 tradeId,

@@ -9,7 +9,7 @@ const { body, validationResult } = require('express-validator');
 const { safeQuery: query } = require('../db/pool');
 const { authenticate }     = require('../middleware/auth');
 const { invalidateUserCache } = require('../middleware/auth');
-const { sendEmail }        = require('../services/email');
+const { sendTwoFactorDisabledEmail, sendAccountDeactivatedEmail, sendAccountDeletedEmail, sendNewTicketInternalAlert, sendSupportTicketReceivedEmail } = require('../services/email');
 
 const escHtml = (s) =>
   String(s)
@@ -142,18 +142,7 @@ router.post('/disable-2fa', authenticate, destructiveLimiter, async (req, res) =
     await invalidateUserCache(req.user.id);
 
     try {
-      await sendEmail({
-        to:      req.user.email,
-        subject: 'EtherTrack — 2FA Disabled',
-        html: `
-          <div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;">
-            <h2 style="color:#f87171;">2FA Disabled ⚠️</h2>
-            <p>2-Factor Authentication was disabled on your EtherTrack account.</p>
-            <p style="color:#86efac88;">If you did not do this, contact support@ethertrack.in immediately.</p>
-            <p>Time: ${new Date().toLocaleString('en-IN')}</p>
-          </div>
-        `,
-      });
+      await sendTwoFactorDisabledEmail(req.user.email, { name: req.user.full_name });
     } catch {}
 
     res.json({ success: true, message: '2FA disabled successfully' });
@@ -179,18 +168,7 @@ router.post('/deactivate', authenticate, destructiveLimiter, async (req, res) =>
     await invalidateUserCache(req.user.id);
 
     try {
-      await sendEmail({
-        to:      req.user.email,
-        subject: 'EtherTrack — Account Deactivated',
-        html: `
-          <div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;">
-            <h2 style="color:#facc15;">Account Deactivated ⏸️</h2>
-            <p>Your EtherTrack account has been temporarily deactivated.</p>
-            <p style="color:#86efac88;">Your funds (₹${parseFloat(rows[0].inr_balance || 0).toLocaleString('en-IN')}) are safe and will be available when you reactivate.</p>
-            <p>To reactivate, contact support@ethertrack.in.</p>
-          </div>
-        `,
-      });
+      await sendAccountDeactivatedEmail(req.user.email, { name: req.user.full_name, inrBalance: rows[0].inr_balance });
     } catch {}
 
     res.json({ success: true, message: 'Account deactivated' });
@@ -247,18 +225,7 @@ router.post('/delete', authenticate, destructiveLimiter, async (req, res) => {
     } catch {}
 
     try {
-      await sendEmail({
-        to:      req.user.email,
-        subject: 'EtherTrack — Account Deleted',
-        html: `
-          <div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;">
-            <h2 style="color:#f87171;">Account Deleted 🗑️</h2>
-            <p>Your EtherTrack account has been permanently deleted.</p>
-            <p style="color:#86efac88;">All personal data has been removed. Transaction records are retained for regulatory compliance as required by RBI and SEBI guidelines.</p>
-            <p style="color:#4ade8044;font-size:12px;margin-top:24px;">EtherTrack · Carbon Credit Exchange</p>
-          </div>
-        `,
-      });
+      await sendAccountDeletedEmail(req.user.email, { name: req.user.full_name });
     } catch {}
 
     res.json({ success: true, message: 'Account permanently deleted' });
@@ -295,22 +262,12 @@ router.post('/ticket', authenticate, [
       [req.user.id, JSON.stringify({ type, message, email: req.user.email })]
     );
 
+    const ticketNumber = `TKT-${req.user.id}-${Date.now().toString(36).toUpperCase()}`;
+
     try {
       if (process.env.ADMIN_EMAIL) {
-        await sendEmail({
-          to:      process.env.ADMIN_EMAIL,
-          subject: `[EtherTrack Support] ${type.toUpperCase()} — ${req.user.email}`,
-          html: `
-            <div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;">
-              <h2 style="color:#facc15;">Support Ticket — ${safeType.toUpperCase()}</h2>
-              <p><strong>From:</strong> ${safeEmail}</p>
-              <p><strong>User ID:</strong> ${req.user.id}</p>
-              <p><strong>Type:</strong> ${safeType}</p>
-              <p><strong>Message:</strong></p>
-              <p style="color:#86efac88;padding:12px;background:#0a0f0c;border-radius:6px;">${safeMessage}</p>
-              <p><strong>Submitted:</strong> ${new Date().toLocaleString('en-IN')}</p>
-            </div>
-          `,
+        await sendNewTicketInternalAlert(process.env.ADMIN_EMAIL, {
+          ticketNumber, userEmail: req.user.email, userId: req.user.id, type: safeType, message: safeMessage,
         });
       }
     } catch (emailErr) {
@@ -318,20 +275,7 @@ router.post('/ticket', authenticate, [
     }
 
     try {
-      await sendEmail({
-        to:      req.user.email,
-        subject: 'EtherTrack — Support Ticket Received',
-        html: `
-          <div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;">
-            <h2 style="color:#22c55e;">Support Ticket Received ✅</h2>
-            <p>Hi ${safeName},</p>
-            <p>We've received your support request (${safeType.replace('_', ' ')}).</p>
-            <p style="color:#86efac88;">Our team will respond within <strong>1 business day</strong>.</p>
-            <p>If urgent, reply to this email directly.</p>
-            <p style="color:#4ade8044;font-size:12px;margin-top:24px;">EtherTrack · Carbon Credit Exchange</p>
-          </div>
-        `,
-      });
+      await sendSupportTicketReceivedEmail(req.user.email, { name: safeName, ticketNumber });
     } catch {}
 
     res.json({ success: true, message: 'Support ticket submitted. We will respond within 1 business day.' });

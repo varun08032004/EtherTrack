@@ -25,34 +25,17 @@ const multer  = require('multer');
 const { safeQuery: query } = require('../db/pool');
 const { authenticate }     = require('../middleware/auth');
 const { insertAuditEntry, resolveScope } = require('./audit');
-const { sendEmail }        = require('../services/email');
+const { sendVerificationPackageCreatedEmail, sendVerificationSealedEmail, sendVerificationReceivedEmail } = require('../services/email');
 
 const FRONTEND_URL = process.env.FRONTEND_URL || process.env.APP_BASE_URL || 'https://ethertrack.in';
 
 // ── Email: notify SME package created + portal link ───────────────────────
 const sendPackageCreatedEmail = async ({ toEmail, toName, companyName, year, auditorFirm, auditorEmail, portalUrl, expiresAt }) => {
   try {
-    await sendEmail({
-      to:      toEmail,
-      subject: `Verification package created — FY ${year} · ${companyName}`,
-      html: `
-        <div style="font-family:monospace;background:#020f07;color:#f0fdf4;padding:40px;border-radius:12px;max-width:520px">
-          <h2 style="color:#22c55e;letter-spacing:.1em;margin-bottom:4px">ETHERTRACK</h2>
-          <p style="color:#86efac88;font-size:11px;letter-spacing:.1em;margin-bottom:24px">GHG AUDIT TRAIL · ISO 14064-3</p>
-          <p>Hi ${toName || 'there'},</p>
-          <p>Your verification package for <strong style="color:#22c55e">FY ${year}</strong> has been created for <strong>${companyName}</strong>.</p>
-          <div style="background:#0d2e1f;border:1px solid #22c55e44;border-radius:8px;padding:16px;margin:20px 0;font-size:12px;line-height:1.8">
-            <div><span style="color:#86efac88">Auditor:</span> <span style="color:#f0fdf4">${auditorFirm || auditorEmail}</span></div>
-            <div><span style="color:#86efac88">Reporting Year:</span> <span style="color:#22c55e">FY ${year}</span></div>
-            <div><span style="color:#86efac88">Link Expires:</span> <span style="color:#f0fdf4">${new Date(expiresAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' })}</span></div>
-          </div>
-          <p style="font-size:13px;color:#86efac88;margin-bottom:8px">Share this portal link with your auditor:</p>
-          <div style="background:#060e18;border:1px solid #3b82f633;border-radius:6px;padding:12px;font-size:11px;color:#60a5fa;word-break:break-all;margin-bottom:20px">${portalUrl}</div>
-          <p style="font-size:12px;color:#86efac88;line-height:1.7">The auditor will open this link, sign the verification document using their DSC, and upload it back. Once uploaded, the hash will be anchored on Ethereum.</p>
-          <a href="${FRONTEND_URL}/emission-tracking" style="display:inline-block;background:#16a34a;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;margin-top:16px;font-size:13px">View Audit Trail →</a>
-          <p style="color:#86efac44;font-size:11px;margin-top:24px">EtherTrack Technologies Private Limited · ISO 14064-3 · Ethereum Sepolia</p>
-        </div>
-      `,
+    await sendVerificationPackageCreatedEmail(toEmail, {
+      name: toName, companyName, year, auditorFirm, auditorEmail, portalUrl,
+      expiresAt: new Date(expiresAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' }),
+      dashboardUrl: `${FRONTEND_URL}/emission-tracking`,
     });
   } catch (err) {
     console.error('[AuditorVerification] Package email failed:', err.message);
@@ -62,35 +45,10 @@ const sendPackageCreatedEmail = async ({ toEmail, toName, companyName, year, aud
 // ── Email: notify SME inventory is sealed ─────────────────────────────────
 const sendSealedEmail = async ({ toEmail, toName, companyName, year, auditorFirm, auditorName, fileHash, sealTxHash, sealExplorerUrl }) => {
   try {
-    await sendEmail({
-      to:      toEmail,
-      subject: `✓ GHG Inventory Sealed on Ethereum — FY ${year} · ${companyName}`,
-      html: `
-        <div style="font-family:monospace;background:#020f07;color:#f0fdf4;padding:40px;border-radius:12px;max-width:520px">
-          <h2 style="color:#22c55e;letter-spacing:.1em;margin-bottom:4px">ETHERTRACK</h2>
-          <p style="color:#86efac88;font-size:11px;letter-spacing:.1em;margin-bottom:24px">GHG AUDIT TRAIL · ISO 14064-3 · SEALED</p>
-          <p>Hi ${toName || 'there'},</p>
-          <p>Your GHG inventory for <strong style="color:#22c55e">FY ${year}</strong> has been <strong style="color:#22c55e">verified and sealed on Ethereum</strong> by <strong>${auditorName || auditorFirm || 'your auditor'}</strong>.</p>
-          <div style="background:#040f09;border:1px solid #10b98133;border-radius:8px;padding:20px;margin:20px 0">
-            <div style="font-size:32px;margin-bottom:12px">⬡</div>
-            <div style="font-size:14px;font-weight:700;color:#10b981;margin-bottom:8px">SEALED ON ETHEREUM SEPOLIA</div>
-            <div style="font-size:11px;color:#86efac88;line-height:1.8">
-              <div><span style="color:#86efac44">Company:</span> ${companyName}</div>
-              <div><span style="color:#86efac44">Reporting Year:</span> FY ${year}</div>
-              <div><span style="color:#86efac44">Verified By:</span> ${auditorName || auditorFirm || '—'}</div>
-              <div><span style="color:#86efac44">Document SHA-256:</span></div>
-              <div style="color:#10b981;word-break:break-all;margin-top:2px">${fileHash}</div>
-              ${sealTxHash ? `<div style="margin-top:8px"><span style="color:#86efac44">TX Hash:</span></div><div style="color:#627eea;word-break:break-all;margin-top:2px">${sealTxHash}</div>` : ''}
-            </div>
-          </div>
-          <p style="font-size:13px;color:#86efac88;line-height:1.7">This seal is permanent and immutable. Your BRSR, CDP, and TCFD reports can now reference this verification.</p>
-          <div style="margin-top:20px">
-            ${sealExplorerUrl ? `<a href="${sealExplorerUrl}" style="display:inline-block;background:#627eea;color:#fff;padding:12px 20px;border-radius:6px;text-decoration:none;font-size:12px;margin-right:10px">⬡ Verify on Etherscan →</a>` : ''}
-            <a href="${FRONTEND_URL}/emission-tracking" style="display:inline-block;background:#16a34a;color:#fff;padding:12px 20px;border-radius:6px;text-decoration:none;font-size:12px">View Audit Trail →</a>
-          </div>
-          <p style="color:#86efac44;font-size:11px;margin-top:24px">EtherTrack Technologies Private Limited · ISO 14064-3 · Ethereum Sepolia</p>
-        </div>
-      `,
+    await sendVerificationSealedEmail(toEmail, {
+      name: toName, companyName, year, verifierName: auditorName || auditorFirm,
+      fileHash, sealTxHash, sealExplorerUrl,
+      dashboardUrl: `${FRONTEND_URL}/emission-tracking`,
     });
   } catch (err) {
     console.error('[AuditorVerification] Seal email failed:', err.message);
@@ -100,25 +58,8 @@ const sendSealedEmail = async ({ toEmail, toName, companyName, year, auditorFirm
 // ── Email: confirm to auditor their upload was received ───────────────────
 const sendAuditorConfirmEmail = async ({ toEmail, auditorName, companyName, year, fileHash, sealTxHash, sealExplorerUrl }) => {
   try {
-    await sendEmail({
-      to:      toEmail,
-      subject: `Verification received — ${companyName} FY ${year}`,
-      html: `
-        <div style="font-family:monospace;background:#020f07;color:#f0fdf4;padding:40px;border-radius:12px;max-width:520px">
-          <h2 style="color:#22c55e;letter-spacing:.1em;margin-bottom:4px">ETHERTRACK</h2>
-          <p style="color:#86efac88;font-size:11px;letter-spacing:.1em;margin-bottom:24px">AUDITOR CONFIRMATION</p>
-          <p>Hi ${auditorName || 'there'},</p>
-          <p>Your signed verification document for <strong style="color:#22c55e">${companyName} FY ${year}</strong> has been received and ${sealTxHash ? '<strong style="color:#10b981">anchored on Ethereum</strong>' : 'saved securely'}.</p>
-          <div style="background:#0d2e1f;border:1px solid #22c55e44;border-radius:8px;padding:16px;margin:20px 0;font-size:12px;line-height:1.8">
-            <div><span style="color:#86efac88">Document SHA-256:</span></div>
-            <div style="color:#22c55e;word-break:break-all">${fileHash}</div>
-            ${sealTxHash ? `<div style="margin-top:8px"><span style="color:#86efac88">On-chain TX:</span></div><div style="color:#627eea;word-break:break-all">${sealTxHash}</div>` : ''}
-          </div>
-          <p style="font-size:12px;color:#86efac88;line-height:1.7">The SHA-256 hash of your document is the cryptographic fingerprint of your signature. Anyone can verify it matches your signed PDF by computing the hash independently.</p>
-          ${sealExplorerUrl ? `<a href="${sealExplorerUrl}" style="display:inline-block;background:#627eea;color:#fff;padding:12px 20px;border-radius:6px;text-decoration:none;font-size:12px;margin-top:16px">⬡ Verify on Etherscan →</a>` : ''}
-          <p style="color:#86efac44;font-size:11px;margin-top:24px">EtherTrack Technologies Private Limited · ISO 14064-3 · Ethereum Sepolia</p>
-        </div>
-      `,
+    await sendVerificationReceivedEmail(toEmail, {
+      name: auditorName, companyName, year, fileHash, sealTxHash, sealExplorerUrl,
     });
   } catch (err) {
     console.error('[AuditorVerification] Auditor confirm email failed:', err.message);

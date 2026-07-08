@@ -601,7 +601,7 @@ server.listen(PORT, () => {
   console.log('📅 Subscription expiry cron started (first run in 30 s)');
 
   try {
-    const { startEmailWorker } = require('./services/emailQueue');
+    const { startEmailWorker } = require('./services/email');
     startEmailWorker();
     console.log('📧 Email queue worker started');
   } catch (e) {

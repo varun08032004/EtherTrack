@@ -18,6 +18,7 @@ const { safeQuery: query, withTransaction } = require('../db/pool');
 const { authenticate, requireKYC }          = require('../middleware/auth');
 const { generateGSTInvoice, serveInvoice }  = require('../services/invoice');
 const { createNotification }               = require('../routes/notifications');
+const { sendPaymentFailedEmail, sendPlanSelectedEmail, sendSubscriptionCancelledEmail } = require('../services/email');
 const { rateLimit, ipKeyGenerator }        = require('express-rate-limit');
 
 const router = express.Router();
@@ -626,6 +627,19 @@ router.post('/free', authenticate, async (req, res) => {
       );
     });
 
+    const wasOnPaidPlan = req.user.subscription_plan && req.user.subscription_plan !== 'free';
+    if (wasOnPaidPlan) {
+      const fromPlanLabel = req.user.subscription_plan.charAt(0).toUpperCase() + req.user.subscription_plan.slice(1);
+      sendSubscriptionCancelledEmail(req.user.email, {
+        name: req.user.full_name, fromPlan: fromPlanLabel, downgradeTo: 'Free', effectiveNow: true,
+        renewUrl: `${process.env.FRONTEND_URL}/billing`,
+      }).catch(e => console.warn('[subscription/free] cancelled email failed:', e.message));
+    } else {
+      sendPlanSelectedEmail(req.user.email, {
+        name: req.user.full_name, dashboardUrl: `${process.env.FRONTEND_URL}/dashboard`,
+      }).catch(e => console.warn('[subscription/free] plan-selected email failed:', e.message));
+    }
+
     return res.json({ ok: true, plan: 'free', renewalDate: null });
   } catch (err) {
     console.error('[POST /subscription/free]', err.message);
@@ -717,13 +731,27 @@ router.post('/webhook/razorpay',
           [paymentData.id, eventId, paymentData.order_id]
         );
       } else if (eventType === 'payment.failed') {
-        await query(
+        const { rows: [failedPayment] } = await query(
           `UPDATE subscription_payments SET
              status='failed', payment_failed_reason=$1,
              failure_code=$2, webhook_event_id=$3
-           WHERE razorpay_order_id=$4 AND status='pending'`,
+           WHERE razorpay_order_id=$4 AND status='pending'
+           RETURNING user_id, plan, amount`,
           [paymentData.error_description||'Payment failed', paymentData.error_code||null, eventId, paymentData.order_id]
         );
+
+        if (failedPayment) {
+          const { rows: [user] } = await query(
+            `SELECT email, full_name FROM users WHERE id=$1`, [failedPayment.user_id]
+          ).catch(() => ({ rows: [] }));
+          if (user?.email) {
+            const planLabel = failedPayment.plan.charAt(0).toUpperCase() + failedPayment.plan.slice(1);
+            sendPaymentFailedEmail(user.email, {
+              name: user.full_name, plan: planLabel, amount: failedPayment.amount,
+              retryUrl: `${process.env.FRONTEND_URL}/billing`,
+            }).catch(e => console.warn('[webhook/razorpay] payment-failed email failed:', e.message));
+          }
+        }
       } else if (eventType === 'refund.processed') {
         const refund = event.payload?.refund?.entity;
         await query(

@@ -24,6 +24,7 @@ const pino       = require('pino');
 const { safeQuery: query, pool }       = require('../db/pool');
 const { authenticate, invalidateUserCache } = require('../middleware/auth');
 const { createNotification }           = require('./notifications');
+const { sendWalletConnectedEmail, sendDepositConfirmedEmail, sendWithdrawalProcessedEmail, sendWithdrawalFailedEmail, sendBankAccountAddedEmail, sendBankAccountRemovedEmail } = require('../services/email');
 
 // ── Compliance stubs ──────────────────────────────────────────────────────────
 const runComplianceChecks = async (userId, amount, type) => ({
@@ -428,6 +429,13 @@ router.post('/deposit/verify', authenticate, async (req, res) => {
     } catch {}
 
     log.info({ userId: req.user.id, amount: tx.amount }, 'Deposit ledger credited — nodal model');
+
+    sendDepositConfirmedEmail(req.user.email, {
+      name: req.user.full_name, amount: parseFloat(tx.amount).toLocaleString('en-IN'),
+      method: tx.method, balanceAfter: balanceAfter.toLocaleString('en-IN'),
+      reference: tx.reference, walletUrl: `${process.env.FRONTEND_URL}/wallet`,
+    }).catch(e => console.warn('[deposit/verify] email failed:', e.message));
+
     res.json({
       success:      true,
       message:      'Funds credited successfully',
@@ -501,6 +509,16 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
             '/wallet', { amount: tx.amount }
           );
         } catch {}
+        try {
+          const { rows: [u] } = await query('SELECT email, full_name FROM users WHERE id=$1', [tx.user_id]);
+          if (u?.email) {
+            await sendDepositConfirmedEmail(u.email, {
+              name: u.full_name, amount: parseFloat(tx.amount).toLocaleString('en-IN'),
+              method: tx.method, balanceAfter: balanceAfter.toLocaleString('en-IN'),
+              reference: tx.reference, walletUrl: `${process.env.FRONTEND_URL}/wallet`,
+            });
+          }
+        } catch (e) { console.warn('[wallet/webhook] deposit email failed:', e.message); }
       } catch (err) {
         await client.query('ROLLBACK');
         throw err;
@@ -529,6 +547,21 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         [payout.id]
       );
       log.info({ payoutId: payout.id }, 'Payout processed via webhook');
+
+      try {
+        const { rows: [tx] } = await query(
+          `SELECT wt.user_id, wt.amount, wt.bank_account_name, wt.bank_account_number, u.email, u.full_name
+           FROM wallet_transactions wt JOIN users u ON u.id = wt.user_id
+           WHERE wt.razorpay_payout_id = $1`, [payout.id]
+        );
+        if (tx?.email) {
+          await sendWithdrawalProcessedEmail(tx.email, {
+            name: tx.full_name, amount: parseFloat(tx.amount).toLocaleString('en-IN'),
+            accountName: tx.bank_account_name, accountNumberMasked: mask(tx.bank_account_number),
+            reference: payout.id, walletUrl: `${process.env.FRONTEND_URL}/wallet`,
+          });
+        }
+      } catch (e) { console.warn('[wallet/webhook] withdrawal-processed email failed:', e.message); }
     }
 
     if (event.event === 'payout.failed') {
@@ -568,6 +601,16 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
               '/wallet', { amount: tx.amount }
             );
           } catch {}
+          try {
+            const { rows: [u] } = await query('SELECT email, full_name FROM users WHERE id=$1', [tx.user_id]);
+            if (u?.email) {
+              await sendWithdrawalFailedEmail(u.email, {
+                name: u.full_name, amount: parseFloat(tx.amount).toLocaleString('en-IN'),
+                reason: 'Your bank rejected the transfer — please verify your account number and IFSC code.',
+                walletUrl: `${process.env.FRONTEND_URL}/wallet`,
+              });
+            }
+          } catch (e) { console.warn('[wallet/webhook] withdrawal-failed email failed:', e.message); }
           log.warn({ userId: tx.user_id, amount: tx.amount, payoutId: payout.id }, 'Payout failed — ledger reversed');
         } else {
           await client.query('ROLLBACK');
@@ -927,6 +970,12 @@ router.post('/bind', authenticate, walletWriteLimiter, async (req, res) => {
     await invalidateUserCache(req.user.id);
 
     log.info({ userId: req.user.id, wallet: mask(walletAddress) }, 'Wallet bound');
+
+    sendWalletConnectedEmail(req.user.email, {
+      name: req.user.full_name, walletAddress: walletAddress.toLowerCase(),
+      walletUrl: `${process.env.FRONTEND_URL}/wallet`,
+    }).catch(e => console.warn('[wallet/bind] email failed:', e.message));
+
     res.json({ message: 'Wallet bound successfully', walletAddress: walletAddress.toLowerCase() });
   } catch (err) {
     log.error({ err: err?.message, userId: req.user.id }, 'Wallet bind error');
@@ -1067,6 +1116,12 @@ router.post('/bank-accounts', authenticate, async (req, res) => {
        ifsc.toUpperCase(), sanitiseText(bankName, 60), isFirst]
     );
     log.info({ userId: req.user.id, account: mask(accountNumber) }, 'Bank account added');
+
+    sendBankAccountAddedEmail(req.user.email, {
+      name: req.user.full_name, bankName: sanitiseText(bankName, 60), accountNumberMasked: mask(accountNumber),
+      walletUrl: `${process.env.FRONTEND_URL}/wallet`,
+    }).catch(e => console.warn('[bank-accounts] add email failed:', e.message));
+
     res.json({ success: true, account: rows[0] });
   } catch (err) {
     if (err.code === '23505')
@@ -1111,7 +1166,7 @@ router.delete('/bank-accounts/:id', authenticate, async (req, res) => {
     const { rows } = await client.query(
       `DELETE FROM user_bank_accounts
        WHERE id = $1 AND user_id = $2
-       RETURNING id, is_default`,
+       RETURNING id, is_default, bank_name, account_number`,
       [req.params.id, req.user.id]
     );
     if (!rows.length) {
@@ -1130,6 +1185,12 @@ router.delete('/bank-accounts/:id', authenticate, async (req, res) => {
     }
     await client.query('COMMIT');
     log.info({ userId: req.user.id }, 'Bank account deleted');
+
+    sendBankAccountRemovedEmail(req.user.email, {
+      name: req.user.full_name, bankName: rows[0].bank_name, accountNumberMasked: mask(rows[0].account_number),
+      walletUrl: `${process.env.FRONTEND_URL}/wallet`,
+    }).catch(e => console.warn('[bank-accounts] remove email failed:', e.message));
+
     res.json({ success: true });
   } catch (err) {
     await client.query('ROLLBACK');

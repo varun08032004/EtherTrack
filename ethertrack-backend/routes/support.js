@@ -21,7 +21,7 @@
 const express = require('express');
 const router = express.Router();
 const { safeQuery } = require('../db/pool');
-const { sendEmail } = require('../services/email'); // adjust export name if different
+const { sendNewTicketInternalAlert, sendSupportTicketReceivedEmail } = require('../services/email'); // adjust export name if different
 const { authenticate, optionalAuth, requireRole } = require('../middleware/auth');
 
 // requireAdmin from middleware/auth.js is requireRole('admin') only — it does
@@ -324,41 +324,20 @@ router.get('/analytics', authenticate, requireAdmin, async (req, res) => {
 async function sendTicketNotificationEmail(ticket) {
   const supportEmail = process.env.ADMIN_EMAIL || process.env.SUPPORT_TEAM_EMAIL || 'support@ethertrack.in';
 
-  await sendEmail({
-    to: supportEmail,
-    subject: `🎫 New Support Ticket — ${ticket.ticket_number}`,
-    html: `
-      <div style="font-family: sans-serif; max-width: 600px;">
-        <h2 style="color: #16a34a;">New Support Ticket</h2>
-        <p><strong>Ticket ID:</strong> ${ticket.ticket_number}</p>
-        <p><strong>From:</strong> ${ticket.name} (${ticket.email})</p>
-        <p><strong>Subject:</strong> ${ticket.subject || '(no subject)'}</p>
-        <p><strong>Page:</strong> ${ticket.page || 'unknown'}</p>
-        <p><strong>Message:</strong></p>
-        <div style="background:#f4f4f4; padding:12px; border-radius:8px;">${ticket.message}</div>
-        <p style="margin-top:20px; color:#666; font-size:12px;">
-          Submitted at ${new Date(ticket.created_at).toLocaleString('en-IN')}
-        </p>
-      </div>
-    `,
+  await sendNewTicketInternalAlert(supportEmail, {
+    ticketNumber: ticket.ticket_number,
+    userEmail: ticket.email,
+    userName: ticket.name,
+    subjectLine: ticket.subject || '(no subject)',
+    page: ticket.page || 'unknown',
+    message: ticket.message,
   });
 }
 
 async function sendUserConfirmationEmail(ticket) {
-  await sendEmail({
-    to: ticket.email,
-    subject: `We've received your request — ${ticket.ticket_number}`,
-    html: `
-      <div style="font-family: sans-serif; max-width: 600px;">
-        <h2 style="color: #16a34a;">Thanks for reaching out, ${ticket.name}!</h2>
-        <p>We've received your support request. Here's your ticket reference:</p>
-        <p style="font-size: 20px; font-weight: bold; letter-spacing: 1px;">${ticket.ticket_number}</p>
-        <p>Our team typically responds within 24 hours.</p>
-        <p style="margin-top: 24px; color: #666; font-size: 13px;">
-          — The EtherTrack Support Team
-        </p>
-      </div>
-    `,
+  await sendSupportTicketReceivedEmail(ticket.email, {
+    name: ticket.name,
+    ticketNumber: ticket.ticket_number,
   });
 }
 

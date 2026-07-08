@@ -39,3 +39,9 @@ uploads/*
 build/
 coverage/
 *.env
+
+node_modules/
+
+ethertrack-frontend/node_modules/
+
+ethertrack-backend/node_modules/

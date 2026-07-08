@@ -6,6 +6,10 @@
  *                           (myCredits + myBoughtCredits) instead of only myCredits.
  *                           Bought credits were silently excluded because activeCredits
  *                           was derived from myCredits alone.
+ * [FIX-MARKET-DEMAND-BADGE] marketBuckets is now pulled from usePortfolio() and
+ *                           passed into MarketCard so listing rows can show a live
+ *                           demand/supply badge sourced from the same market
+ *                           snapshot that computes PORTFOLIO VALUE in stats.
  */
 
 import React, { useContext, useMemo, useCallback } from 'react';
@@ -49,6 +53,10 @@ function DashboardInner() {
   const {
     myCredits, myBoughtCredits, stats, listings, walletAddress,
     isKYCVerified, loading,
+    // [FIX-MARKET-DEMAND-BADGE] shared market snapshot — same one `stats`
+    // uses internally to price PORTFOLIO VALUE. Passed to MarketCard so
+    // the demand/supply badge and the portfolio numbers never disagree.
+    marketBuckets,
   } = usePortfolio();
 
   const { rate: ethRate, isStale: ethRateIsStale, ageMin: ethRateAgeMin, forceRefresh: refreshEthRate } = useEthRate();
@@ -196,7 +204,9 @@ function DashboardInner() {
               />
 
               {/* Row 2 — Market + Actions */}
-              <MarketCard listings={listings} ethRate={ethRate} />
+              {/* [FIX-MARKET-DEMAND-BADGE] marketBuckets passed through so
+                  each listing row can show a live demand/supply badge */}
+              <MarketCard listings={listings} ethRate={ethRate} marketBuckets={marketBuckets} />
               <QuickActionsCard isKYC={isKYC} alertCount={ds.alertCount} />
 
               {/* Row 3 — Emissions + Portfolio + Network */}

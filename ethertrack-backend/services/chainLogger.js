@@ -1,22 +1,39 @@
 'use strict';
 /**
- * services/chainLogger.js — EtherTrack v2
+ * services/chainLogger.js — EtherTrack v3
  * ─────────────────────────────────────────────────────────────────────────────
- * Updated to call Marketplace.logINRTrade() and Marketplace.batchLogINRTrades()
- * instead of a separate TradeRegistry contract.
+ * CHANGES vs v2:
  *
- * Your existing Marketplace.sol already handles ETH trades on-chain.
- * This service adds the INR + Razorpay side.
+ * [FIX-RETRY-LOOP] retryPendingLogs() had a bug: it wrapped `await logTrade(...)`
+ *                  in a try/catch expecting logTrade to throw on failure — but
+ *                  logTrade() catches its own errors internally and always
+ *                  resolves (never rejects), returning `{ queued: true, error }`
+ *                  on failure. That meant the outer `catch` block — the ONLY
+ *                  place that incremented `attempts` / pushed `next_retry_at`
+ *                  forward — never ran. Combined with `_queueRetry`'s
+ *                  `ON CONFLICT (trade_id) DO NOTHING`, failed rows kept
+ *                  `attempts` stuck at 0 and `next_retry_at` stuck in the past
+ *                  forever, so the same dead trades got retried every 5
+ *                  minutes indefinitely with no backoff and no cutoff.
  *
- * ENV VARS NEEDED:
- *   POLYGON_RPC_URL          — e.g. https://rpc-amoy.polygon.technology
- *   CHAIN_SIGNER_PRIVATE_KEY — backend hot wallet private key (needs MATIC)
- *   MARKETPLACE_ADDRESS      — your deployed Marketplace contract address
+ *                  Fixed by branching on `result.queued` (the actual signal
+ *                  logTrade gives us) instead of a try/catch, and by capping
+ *                  attempts: once a row hits MAX_RETRY_ATTEMPTS it's marked
+ *                  `chain_status = 'failed'` on the trade and removed from the
+ *                  retry queue instead of being retried forever.
+ *
+ * [SENTRY] Added Sentry.captureException(...) to catch blocks that were
+ *          previously silent (DB update failures, queueRetry failures,
+ *          permanent chain-log failures) so these actually surface in
+ *          Sentry instead of only going to console.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
 const { ethers }    = require('ethers');
+const Sentry        = require('@sentry/node');
 const { safeQuery } = require('../db/pool');
+
+const MAX_RETRY_ATTEMPTS = 5;
 
 // ── Marketplace ABI — only the new logging functions we call ─────────────────
 const MARKETPLACE_ABI = [
@@ -47,6 +64,7 @@ const PAY_MODE = {
 let _provider  = null;
 let _signer    = null;
 let _contract  = null;
+let _deployCheckPromise = null; // [FIX-DEPLOY-CHECK] cached, runs once
 
 function getContract() {
   if (_contract) return _contract;
@@ -64,6 +82,48 @@ function getContract() {
   _contract = new ethers.Contract(contractAddress, MARKETPLACE_ABI, _signer);
 
   return _contract;
+}
+
+/**
+ * [FIX-DEPLOY-CHECK] Verifies there is actually contract bytecode at
+ * MARKETPLACE_ADDRESS on the connected RPC, and that it exposes
+ * logINRTrade(). Without this, a wrong address/network combo produces the
+ * classic "empty revert data / likely require(false)" error on every single
+ * call — indistinguishable from a real on-chain rejection — which is exactly
+ * what happened here. Runs once per process (cached) and throws a clear,
+ * actionable error instead.
+ */
+async function assertContractDeployed() {
+  if (_deployCheckPromise) return _deployCheckPromise;
+
+  _deployCheckPromise = (async () => {
+    const contract = getContract();
+    const address  = await contract.getAddress();
+    const code     = await _provider.getCode(address);
+
+    if (code === '0x') {
+      throw new Error(
+        `[chainLogger] FATAL: No contract deployed at MARKETPLACE_ADDRESS ` +
+        `(${address}) on RPC ${process.env.POLYGON_RPC_URL || process.env.ALCHEMY_RPC}. ` +
+        `Check that MARKETPLACE_ADDRESS and POLYGON_RPC_URL point to the same ` +
+        `network where Marketplace.sol v2 (with logINRTrade) was deployed.`
+      );
+    }
+
+    // Confirm the deployed contract actually has logINRTrade — catches the
+    // "right network, stale/old contract address" case too.
+    const iface = new ethers.Interface(['function logINRTrade(bytes32,uint256,uint256,uint256,uint8,address,address,uint256) external']);
+    const selector = iface.getFunction('logINRTrade').selector;
+    if (!code.includes(selector.slice(2))) {
+      throw new Error(
+        `[chainLogger] FATAL: Contract at ${address} does not appear to ` +
+        `implement logINRTrade(). This is likely a stale/old Marketplace ` +
+        `deployment — redeploy Marketplace.sol v2 and update MARKETPLACE_ADDRESS.`
+      );
+    }
+  })();
+
+  return _deployCheckPromise;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -95,6 +155,7 @@ async function logTrade(trade) {
   const seller     = trade.sellerWallet || ethers.ZeroAddress;
 
   try {
+    await assertContractDeployed(); // [FIX-DEPLOY-CHECK]
     const contract = getContract();
 
     // Estimate gas — catches revert (e.g. duplicate) before spending gas
@@ -134,7 +195,10 @@ async function logTrade(trade) {
        SET chain_tx_hash = $1, chain_status = 'pending', chain_logged_at = NOW()
        WHERE id = $2`,
       [tx.hash, trade.dbTradeId]
-    ).catch(err => console.error('[chainLogger] DB update failed:', err.message));
+    ).catch(err => {
+      console.error('[chainLogger] DB update failed:', err.message);
+      Sentry.captureException(err, { tags: { module: 'chainLogger' }, extra: { tradeId: trade.dbTradeId, step: 'db-update-pending' } });
+    });
 
     console.log(`[chainLogger] ${trade.paymentMode} trade ${trade.dbTradeId} → tx ${tx.hash}`);
 
@@ -145,10 +209,13 @@ async function logTrade(trade) {
          SET chain_status = 'confirmed', chain_block = $1
          WHERE id = $2`,
         [receipt.blockNumber, trade.dbTradeId]
-      ).catch(() => {});
+      ).catch(err => {
+        Sentry.captureException(err, { tags: { module: 'chainLogger' }, extra: { tradeId: trade.dbTradeId, step: 'db-update-confirmed' } });
+      });
       console.log(`[chainLogger] confirmed block ${receipt.blockNumber} | trade ${trade.dbTradeId}`);
     }).catch(err => {
       console.error('[chainLogger] confirmation error:', err.message);
+      Sentry.captureException(err, { tags: { module: 'chainLogger' }, extra: { tradeId: trade.dbTradeId, step: 'tx-confirmation' } });
       _queueRetry(trade);
     });
 
@@ -156,6 +223,7 @@ async function logTrade(trade) {
 
   } catch (err) {
     console.error('[chainLogger] logTrade failed:', err.message, { tradeId: trade.dbTradeId });
+    Sentry.captureException(err, { tags: { module: 'chainLogger' }, extra: { tradeId: trade.dbTradeId, step: 'logTrade' } });
     await _queueRetry(trade);
     return { txHash: null, queued: true, error: err.message };
   }
@@ -191,6 +259,7 @@ async function batchLogPending() {
   );
 
   try {
+    await assertContractDeployed(); // [FIX-DEPLOY-CHECK]
     const isMainnet = (process.env.POLYGON_NETWORK === 'polygon');
     const gasOverrides = isMainnet ? {
       maxPriorityFeePerGas: ethers.parseUnits('30', 'gwei'),
@@ -217,12 +286,19 @@ async function batchLogPending() {
 
   } catch (err) {
     console.error('[chainLogger] batchLogPending failed:', err.message);
+    Sentry.captureException(err, { tags: { module: 'chainLogger' }, extra: { step: 'batchLogPending', rowCount: rows.length } });
     return { batched: 0, error: err.message };
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // retryPendingLogs — every 5 min cron
+//
+// [FIX-RETRY-LOOP] logTrade() never throws — it always resolves, returning
+// `{ queued: true/false, ... }`. So we branch on `result.queued` directly
+// instead of relying on a try/catch that will never fire on a logTrade
+// failure. We still keep a try/catch around the whole iteration to handle
+// truly unexpected errors (e.g. a DB failure in the UPDATE/DELETE itself).
 // ─────────────────────────────────────────────────────────────────────────────
 async function retryPendingLogs() {
   const { rows } = await safeQuery(
@@ -231,9 +307,10 @@ async function retryPendingLogs() {
             t.payment_mode, t.buyer_wallet, t.seller_wallet, t.inr_settlement_at
      FROM pending_chain_logs cl
      JOIN trades t ON t.id = cl.trade_id
-     WHERE cl.attempts < 5 AND cl.next_retry_at <= NOW()
+     WHERE cl.attempts < $1 AND cl.next_retry_at <= NOW()
      ORDER BY cl.next_retry_at ASC
-     LIMIT 10`
+     LIMIT 10`,
+    [MAX_RETRY_ATTEMPTS]
   );
 
   for (const row of rows) {
@@ -252,15 +329,50 @@ async function retryPendingLogs() {
       if (!result.queued) {
         // Success — remove from retry queue
         await safeQuery(`DELETE FROM pending_chain_logs WHERE id = $1`, [row.id]);
+        continue;
       }
-    } catch {
-      const delay = Math.pow(2, row.attempts + 1) * 60_000; // exponential backoff
+
+      // [FIX-RETRY-LOOP] logTrade failed (result.queued === true).
+      // This is the branch that used to never run attempts/backoff logic.
+      const newAttempts = row.attempts + 1;
+
+      if (newAttempts >= MAX_RETRY_ATTEMPTS) {
+        // Give up — mark the trade as permanently failed on-chain logging
+        // and remove it from the retry queue so it stops being picked up.
+        await safeQuery(
+          `UPDATE trades SET chain_status = 'failed' WHERE id = $1`,
+          [row.trade_id]
+        );
+        await safeQuery(`DELETE FROM pending_chain_logs WHERE id = $1`, [row.id]);
+
+        console.error(`[chainLogger] trade ${row.trade_id} exceeded ${MAX_RETRY_ATTEMPTS} retry attempts — marking chain_status='failed'`);
+        Sentry.captureException(
+          new Error(`Chain log permanently failed after ${MAX_RETRY_ATTEMPTS} attempts: ${result.error || 'unknown error'}`),
+          { tags: { module: 'chainLogger' }, extra: { tradeId: row.trade_id, attempts: newAttempts } }
+        );
+      } else {
+        const delay = Math.pow(2, newAttempts) * 60_000; // exponential backoff
+        const nextRetry = new Date(Date.now() + delay);
+        await safeQuery(
+          `UPDATE pending_chain_logs
+           SET attempts = $1, next_retry_at = $2 WHERE id = $3`,
+          [newAttempts, nextRetry, row.id]
+        );
+      }
+    } catch (err) {
+      // Truly unexpected failure (e.g. DB error during the retry bookkeeping
+      // itself) — back off this row too, rather than hammering it again in 5s.
+      console.error('[chainLogger] retryPendingLogs row failed unexpectedly:', err.message, { tradeId: row.trade_id });
+      Sentry.captureException(err, { tags: { module: 'chainLogger' }, extra: { tradeId: row.trade_id, step: 'retryPendingLogs-row' } });
+
+      const newAttempts = row.attempts + 1;
+      const delay = Math.pow(2, newAttempts) * 60_000;
       const nextRetry = new Date(Date.now() + delay);
       await safeQuery(
         `UPDATE pending_chain_logs
-         SET attempts = attempts + 1, next_retry_at = $1 WHERE id = $2`,
-        [nextRetry, row.id]
-      );
+         SET attempts = $1, next_retry_at = $2 WHERE id = $3`,
+        [newAttempts, nextRetry, row.id]
+      ).catch(() => {});
     }
   }
 }
@@ -319,7 +431,10 @@ async function _queueRetry(trade) {
      VALUES ($1, $2, 0, NOW() + INTERVAL '2 minutes', NOW())
      ON CONFLICT (trade_id) DO NOTHING`,
     [trade.dbTradeId, JSON.stringify(trade)]
-  ).catch(err => console.error('[chainLogger] _queueRetry failed:', err.message));
+  ).catch(err => {
+    console.error('[chainLogger] _queueRetry failed:', err.message);
+    Sentry.captureException(err, { tags: { module: 'chainLogger' }, extra: { tradeId: trade.dbTradeId, step: '_queueRetry' } });
+  });
 }
 
 module.exports = {

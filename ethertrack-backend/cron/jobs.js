@@ -26,7 +26,7 @@ const cron = require('node-cron');
 const { safeQuery: query, withTransaction } = require('../db/pool');
 const { mintApprovedCredit } = require('../services/minter');
 const { createNotification } = require('../routes/notifications');
-const { sendEmail } = require('../services/email');
+const { sendMintSuccessEmail, sendKycExpiredEmail, sendKycExpiringSoonEmail, sendListingExpiredEmail } = require('../services/email');
 
 // ── Optional Redis distributed lock ──────────────────────────────
 // [FIX-2] Prevents duplicate cron execution across multiple instances
@@ -125,19 +125,12 @@ cron.schedule('*/15 * * * *', async () => {
           '/portfolio', { tokenId, txHash, creditId: batch.id });
 
         try {
-          await sendEmail({
-            to:      batch.email,
-            subject: 'EtherTrack — Carbon Credits Tokenised ⛓',
-            html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;">
-              <h2 style="color:#22c55e;">Carbon Credits Minted ⛓</h2>
-              <p>Hi ${batch.full_name},</p>
-              <p>Your carbon credits "<strong>${batch.project_name}</strong>" have been successfully tokenised.</p>
-              <p>Token ID: <strong style="color:#22c55e;">#${tokenId}</strong></p>
-              <a href="${process.env.FRONTEND_URL}/portfolio"
-                 style="display:inline-block;background:#16a34a;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;margin-top:8px;">
-                View Portfolio →
-              </a>
-            </div>`,
+          await sendMintSuccessEmail(batch.email, {
+            name: batch.full_name,
+            projectName: batch.project_name,
+            tokenId,
+            txHash,
+            portfolioUrl: `${process.env.FRONTEND_URL}/portfolio`,
           });
         } catch {}
 
@@ -240,20 +233,11 @@ cron.schedule('0 * * * *', async () => {
           '/kyc', {});
 
         try {
-          await sendEmail({
-            to:      user.email,
-            subject: 'EtherTrack — KYC Expired · Action Required',
-            html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;">
-              <h2 style="color:#f87171;">KYC Expired ⚠</h2>
-              <p>Hi ${user.full_name},</p>
-              <p>Your KYC verification expired on <strong style="color:#f87171;">${new Date(user.kyc_expires_at).toLocaleDateString('en-IN', { day:'2-digit', month:'long', year:'numeric' })}</strong>.</p>
-              <p>Your account has been suspended from trading, listing, and retiring credits until you renew.</p>
-              ${listings.length > 0 ? `<p style="color:#f59e0b;">⚠ ${listings.length} active listing(s) have been removed and credits returned to your portfolio.</p>` : ''}
-              <a href="${process.env.FRONTEND_URL}/kyc"
-                 style="display:inline-block;background:#dc2626;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:700;margin-top:8px;">
-                RENEW KYC NOW →
-              </a>
-            </div>`,
+          await sendKycExpiredEmail(user.email, {
+            fullName: user.full_name,
+            expiredOn: new Date(user.kyc_expires_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' }),
+            listingsRemovedCount: listings.length,
+            kycUrl: `${process.env.FRONTEND_URL}/kyc`,
           });
         } catch {}
 
@@ -286,19 +270,11 @@ cron.schedule('0 * * * *', async () => {
           '/kyc', {});
 
         try {
-          await sendEmail({
-            to:      user.email,
-            subject: `EtherTrack — KYC Expiring in ${user.days_left} Day${user.days_left === 1 ? '' : 's'}`,
-            html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;">
-              <h2 style="color:#f59e0b;">KYC Expiring Soon ⚠</h2>
-              <p>Hi ${user.full_name},</p>
-              <p>Your KYC expires in <strong style="color:#f59e0b;">${user.days_left} day${user.days_left === 1 ? '' : 's'}</strong> on ${new Date(user.kyc_expires_at).toLocaleDateString('en-IN', { day:'2-digit', month:'long', year:'numeric' })}.</p>
-              <p>Renew now to avoid trading suspension.</p>
-              <a href="${process.env.FRONTEND_URL}/kyc"
-                 style="display:inline-block;background:#f59e0b;color:#000;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:700;margin-top:8px;">
-                RENEW KYC NOW →
-              </a>
-            </div>`,
+          await sendKycExpiringSoonEmail(user.email, {
+            fullName: user.full_name,
+            daysLeft: user.days_left,
+            expiresOn: new Date(user.kyc_expires_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' }),
+            kycUrl: `${process.env.FRONTEND_URL}/kyc`,
           });
         } catch {}
 
@@ -383,20 +359,12 @@ cron.schedule('30 * * * *', async () => {
           '/portfolio', { listingId: listing.listing_id });
 
         try {
-          await sendEmail({
-            to:      listing.seller_email,
-            subject: 'EtherTrack — Listing Expired',
-            html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;">
-              <h2 style="color:#f59e0b;">Listing Expired ⏰</h2>
-              <p>Hi ${listing.seller_name},</p>
-              <p>Your listing for <strong>"${listing.project_name}"</strong> expired on ${new Date(listing.expires_at).toLocaleDateString('en-IN', { day:'2-digit', month:'long', year:'numeric' })}.</p>
-              <p><strong style="color:#22c55e;">${listing.available_credits} credits</strong> have been returned to your portfolio.</p>
-              <p>You can re-list them at any time from your portfolio page.</p>
-              <a href="${process.env.FRONTEND_URL}/portfolio"
-                 style="display:inline-block;background:#16a34a;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;margin-top:8px;">
-                Go to Portfolio →
-              </a>
-            </div>`,
+          await sendListingExpiredEmail(listing.seller_email, {
+            name: listing.seller_name,
+            projectName: listing.project_name,
+            expiredOn: new Date(listing.expires_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' }),
+            creditsReturned: listing.available_credits,
+            portfolioUrl: `${process.env.FRONTEND_URL}/portfolio`,
           });
         } catch {}
 

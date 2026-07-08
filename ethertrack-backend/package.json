@@ -10,7 +10,7 @@
     "db:seed": "node db/seed.js"
   },
   "dependencies": {
-    "@sentry/node": "^10.53.1",
+    "@sentry/node": "^10.63.0",
     "@supabase/supabase-js": "^2.108.2",
     "@upstash/redis": "^1.38.0",
     "axios": "^1.6.2",

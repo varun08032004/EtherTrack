@@ -7,6 +7,13 @@
 // [P3] CONNECT_TIMEOUT_MS lowered to 5s — 15s was allowing hung connections to
 //      pile up. Fail fast + retry is better than waiting 15s per attempt.
 // [P4] Added pool exhaustion warning threshold at 80% utilisation.
+// [P5] Fixed the utilisation calculation itself: it was computing
+//      `totalCount / MAX_CONNECTIONS`, which measures how many connections the
+//      pool has ever opened (idle or busy) — not how many are actually in use.
+//      A pool sitting at 10 idle, unused connections would falsely report
+//      "100% utilisation" with Idle: 10, Waiting: 0 (zero real load). Now
+//      measures active = total - idle, and only warns when active load is
+//      high OR requests are actually queued waiting for a connection.
 'use strict';
 
 const { Pool } = require('pg');
@@ -39,12 +46,18 @@ pool.on('error', (err) => {
 // [P1] Removed per-connection log — it was printing 17+ times per page load
 // pool.on('connect', () => { console.log('[DB Pool] New client connected'); });
 
-// [P4] Pool health monitor — warn only when things are actually bad
+// [P4/P5] Pool health monitor — warn only when things are actually bad.
+// See [P5] note above for why this now measures `active` (total - idle)
+// instead of raw `totalCount`.
 setInterval(() => {
-  const utilisation = pool.totalCount / MAX_CONNECTIONS;
-  if (utilisation >= 0.8) {
+  const active        = pool.totalCount - pool.idleCount;
+  const utilisation    = MAX_CONNECTIONS > 0 ? active / MAX_CONNECTIONS : 0;
+  const underPressure  = pool.waitingCount > 0 || utilisation >= 0.8;
+
+  if (underPressure) {
     console.warn(
       `[DB Pool] ⚠️  HIGH UTILISATION ${Math.round(utilisation * 100)}% | ` +
+      `Active: ${active}/${MAX_CONNECTIONS} | ` +
       `Total: ${pool.totalCount}/${MAX_CONNECTIONS} | ` +
       `Idle: ${pool.idleCount} | Waiting: ${pool.waitingCount}`
     );

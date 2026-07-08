@@ -28,7 +28,7 @@ try {
 }
 
 const { safeQuery, withTransaction } = require('../db/pool');
-const { generateOTP, sendVerificationEmail, sendWelcomeEmail } = require('../services/email');
+const { generateOTP, sendVerificationEmail, sendWelcomeEmail, sendPasswordChangedEmail } = require('../services/email');
 const { authenticate, optionalAuth } = require('../middleware/auth');
 const admin = require('../lib/firebaseAdmin');
 
@@ -144,7 +144,7 @@ router.post('/register', [
       [email, passwordHash, fullName, companyName || null, otpHash, otpExpires, firebaseUid]
     );
 
-    sendVerificationEmail(email, otp, fullName).catch(e =>
+    sendVerificationEmail(email, { name: fullName, otp }).catch(e =>
       console.error('[register] verification email failed:', e.message)
     );
 
@@ -190,7 +190,7 @@ router.post('/resend-otp',
         [otpHash, expires, user.id]
       );
 
-      sendVerificationEmail(email, otp, user.full_name).catch(e =>
+      sendVerificationEmail(email, { name: user.full_name, otp }).catch(e =>
         console.error('[resend-otp] email failed:', e.message)
       );
 
@@ -270,7 +270,7 @@ router.post('/verify-email',
         }
       }
 
-      sendWelcomeEmail(email, user.full_name).catch(e =>
+      sendWelcomeEmail(email, { name: user.full_name, dashboardUrl: `${process.env.FRONTEND_URL}/dashboard` }).catch(e =>
         console.error('[verify-email] welcome email failed:', e.message)
       );
 
@@ -504,7 +504,10 @@ router.post('/firebase-sync', async (req, res) => {
       );
       let user = rows[0];
 
+      let isNewUser = false;
+
       if (!user) {
+        isNewUser = true;
         const { rows: newUser } = await client.query(
           `INSERT INTO users
              (email, password_hash, full_name, firebase_uid, provider, email_verified)
@@ -536,8 +539,15 @@ router.post('/firebase-sync', async (req, res) => {
         [user.id, hashToken(tokens.refreshToken)]
       );
 
-      return { user, tokens };
+      return { user, tokens, isNewUser };
     });
+
+    if (result.isNewUser) {
+      sendWelcomeEmail(result.user.email, {
+        name: result.user.full_name,
+        dashboardUrl: `${process.env.FRONTEND_URL}/dashboard`,
+      }).catch(e => console.error('[firebase-sync] welcome email failed:', e.message));
+    }
 
     setAuthCookies(res, result.tokens.accessToken, result.tokens.refreshToken);
     res.json({
@@ -669,7 +679,7 @@ router.patch('/profile', authenticate, [
         `UPDATE users SET email_otp=$1, email_otp_expires=$2, otp_attempts=0 WHERE id=$3`,
         [otpHash, expires, req.user.id]
       );
-      sendVerificationEmail(email, otp, rows[0].full_name).catch(e =>
+      sendVerificationEmail(email, { name: rows[0].full_name, otp }).catch(e =>
         console.error('[profile] re-verification email failed:', e.message)
       );
     }
@@ -755,6 +765,12 @@ router.post('/change-password', authenticate, [
     await safeQuery('UPDATE refresh_tokens SET revoked=TRUE WHERE user_id=$1', [req.user.id]);
     await safeQuery('DELETE FROM user_sessions WHERE user_id=$1', [req.user.id]);
     await logActivity(req.user.id, 'PASSWORD_CHANGED', {}, req.ip);
+
+    sendPasswordChangedEmail(req.user.email, {
+      name: req.user.full_name,
+      time: new Date().toISOString(),
+      ipAddress: req.ip,
+    }).catch(e => console.error('[change-password] notification email failed:', e.message));
 
     res.json({ message: 'Password changed successfully. Please log in again on other devices.' });
   } catch (e) {

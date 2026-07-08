@@ -21,7 +21,13 @@
 const router = require('express').Router();
 const { safeQuery: query, withTransaction } = require('../db/pool');
 const { authenticate, requireRole, invalidateUserCache } = require('../middleware/auth');
-const { sendEmail } = require('../services/email');
+const {
+  sendKycApprovedEmail, sendKycRejectedEmail, sendKycResubmissionRequiredEmail,
+  sendKycExpiringSoonEmail, sendMintSuccessEmail, sendCreditListingRejectedEmail,
+  sendBuyOrderCancelledEmail, sendAccountSuspendedEmail, sendAccountReinstatedEmail,
+  sendAdminMessageToUserEmail, sendWalletUpdatedEmail, sendCorporatePlanActivatedEmail,
+  sendPlatformAnnouncementEmail,
+} = require('../services/email');
 const { mintApprovedCredit, verifyKYCOnChain } = require('../services/minter');
 const { createNotification } = require('./notifications');
 
@@ -151,17 +157,9 @@ router.post('/kyc/:id/approve', isAdmin, async (req, res) => {
     }
 
     try {
-      await sendEmail({
-        to:      usr[0].email,
-        subject: 'EtherTrack — KYC Approved 🎉',
-        html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;">
-          <h2 style="color:#22c55e;">KYC Approved ✅</h2>
-          <p>Hi ${escHtml(usr[0].full_name)},</p>
-          <a href="${process.env.FRONTEND_URL}/dashboard"
-             style="display:inline-block;background:#16a34a;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;">
-            Go to Dashboard →
-          </a>
-        </div>`,
+      await sendKycApprovedEmail(usr[0].email, {
+        fullName: usr[0].full_name,
+        dashboardUrl: `${process.env.FRONTEND_URL}/dashboard`,
       });
     } catch {}
 
@@ -195,17 +193,10 @@ router.post('/kyc/:id/reject', isAdmin, async (req, res) => {
       `Your KYC was rejected. Reason: ${reason}. Please resubmit.`, '/kyc', { reason });
 
     try {
-      await sendEmail({
-        to:      usr[0].email,
-        subject: 'EtherTrack — KYC Resubmission Required',
-        html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;">
-          <h2 style="color:#f87171;">KYC Resubmission Required</h2>
-          <p>Reason: ${escHtml(reason)}</p>
-          <a href="${process.env.FRONTEND_URL}/kyc"
-             style="display:inline-block;background:#dc2626;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;">
-            Resubmit KYC →
-          </a>
-        </div>`,
+      await sendKycRejectedEmail(usr[0].email, {
+        fullName: usr[0].full_name,
+        reason,
+        resubmitUrl: `${process.env.FRONTEND_URL}/kyc`,
       });
     } catch {}
 
@@ -305,14 +296,12 @@ router.post('/credits/:id/approve', isAdmin, async (req, res) => {
         await createNotification(batch[0].user_id, 'CREDIT', '🪙 Credit Tokenised On-Chain',
           `"${batch[0].project_name}" minted as Token #${tokenId}.`, '/portfolio', { tokenId, txHash, creditId: id });
         try {
-          await sendEmail({
-            to: batch[0].email,
-            subject: 'EtherTrack — Carbon Credits Tokenised ⛓',
-            html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;">
-              <h2 style="color:#22c55e;">Minted ⛓</h2>
-              <p>Token #${tokenId} · ${escHtml(batch[0].project_name)}</p>
-              <a href="${process.env.FRONTEND_URL}/portfolio" style="background:#16a34a;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;display:inline-block;">View Portfolio →</a>
-            </div>`,
+          await sendMintSuccessEmail(batch[0].email, {
+            name: batch[0].full_name,
+            projectName: batch[0].project_name,
+            tokenId,
+            txHash,
+            portfolioUrl: `${process.env.FRONTEND_URL}/portfolio`,
           });
         } catch {}
       } catch (mintErr) {
@@ -370,9 +359,11 @@ router.post('/credits/:id/reject', isAdmin, async (req, res) => {
     await createNotification(batch[0].user_id, 'CREDIT', '❌ Credit Listing Rejected', `Your listing "${batch[0].project_name}" was rejected. Reason: ${reason}`, '/portfolio', { creditId: id, reason });
 
     try {
-      await sendEmail({
-        to: batch[0].email, subject: 'EtherTrack — Credit Listing Requires Resubmission',
-        html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;"><h2 style="color:#f87171;">Credit Rejected</h2><p>Reason: ${escHtml(reason)}</p><a href="${process.env.FRONTEND_URL}/portfolio" style="background:#dc2626;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;display:inline-block;">Go to Portfolio →</a></div>`,
+      await sendCreditListingRejectedEmail(batch[0].email, {
+        name: batch[0].full_name,
+        projectName: batch[0].project_name,
+        reason,
+        portfolioUrl: `${process.env.FRONTEND_URL}/portfolio`,
       });
     } catch {}
     res.json({ message: 'Credit listing rejected' });
@@ -602,8 +593,7 @@ router.post('/buy-orders/:id/force-cancel', isAdmin, async (req, res) => {
     await auditLog(req.user.id, 'BUY_ORDER_FORCE_CANCELLED', order.buyer_id, `Order #${id} — ETH: ${order.eth_escrowed} — ${reason}`);
     await createNotification(order.buyer_id, 'TRADE', '⚠ Buy Order Cancelled by Admin', `Your buy order #${id} has been cancelled. Reason: ${reason}.`, '/portfolio', { orderId: id });
     try {
-      await sendEmail({ to: order.email, subject: 'EtherTrack — Buy Order Cancelled',
-        html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;"><h2 style="color:#f59e0b;">Buy Order Cancelled</h2><p>Order #${id} was cancelled. Reason: ${escHtml(reason)}</p><p>ETH escrowed: ${order.eth_escrowed} ETH will be refunded to your wallet.</p></div>` });
+      await sendBuyOrderCancelledEmail(order.email, { orderId: id, reason, ethEscrowed: order.eth_escrowed });
     } catch {}
     res.json({ success: true, ethEscrowed: order.eth_escrowed });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -701,7 +691,7 @@ router.post('/users/:id/freeze', isAdmin, async (req, res) => {
     await invalidateUserCache(id);
     await auditLog(req.user.id, 'ACCOUNT_FROZEN', id, reason);
     const { rows: usr } = await query('SELECT email, full_name FROM users WHERE id=$1', [id]);
-    try { await sendEmail({ to: usr[0].email, subject: 'EtherTrack — Account Suspended', html: `<p>Reason: ${escHtml(reason)}</p>` }); } catch {}
+    try { await sendAccountSuspendedEmail(usr[0].email, { name: usr[0].full_name, reason }); } catch {}
     res.json({ message: 'Account frozen' });
   } catch (e) { res.status(500).json({ error: 'Freeze failed' }); }
 });
@@ -713,7 +703,7 @@ router.post('/users/:id/unfreeze', isAdmin, async (req, res) => {
     await invalidateUserCache(id);
     await auditLog(req.user.id, 'ACCOUNT_UNFROZEN', id, 'Account reinstated');
     const { rows: usr } = await query('SELECT email, full_name FROM users WHERE id=$1', [id]);
-    try { await sendEmail({ to: usr[0].email, subject: 'EtherTrack — Account Reinstated', html: `<p>Your account has been reinstated.</p>` }); } catch {}
+    try { await sendAccountReinstatedEmail(usr[0].email, { name: usr[0].full_name }); } catch {}
     res.json({ message: 'Account unfrozen' });
   } catch (e) { res.status(500).json({ error: 'Unfreeze failed' }); }
 });
@@ -743,10 +733,7 @@ router.post('/users/:id/send-message', isAdmin, async (req, res) => {
   try {
     const { rows } = await query(`SELECT email, full_name FROM users WHERE id=$1`, [id]);
     if (!rows.length) return res.status(404).json({ error: 'User not found' });
-    await sendEmail({
-      to: rows[0].email, subject: `EtherTrack — ${escHtml(subject)}`,
-      html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;"><h2 style="color:#f59e0b;">Message from EtherTrack Support</h2><p>Hi ${escHtml(rows[0].full_name)},</p><div style="padding:16px;background:#0d0a00;border-left:3px solid #f59e0b;border-radius:4px;white-space:pre-wrap;font-size:13px;line-height:1.7;">${escHtml(message)}</div></div>`,
-    });
+    await sendAdminMessageToUserEmail(rows[0].email, { name: rows[0].full_name, subject, message });
     await createNotification(id, 'ACCOUNT', `📬 ${subject}`, message.slice(0, 120), '/dashboard', {});
     await auditLog(req.user.id, 'USER_MESSAGE_SENT', id, `Subject: ${subject}`);
     res.json({ success: true });
@@ -765,7 +752,7 @@ router.post('/users/:id/reassign-wallet', isAdmin, async (req, res) => {
     await invalidateUserCache(id);
     await auditLog(req.user.id, 'WALLET_REASSIGNED', id, `${rows[0].wallet_address || 'none'} → ${walletAddress.toLowerCase()} — ${reason}`);
     await createNotification(id, 'ACCOUNT', '🔑 Wallet Address Updated', `Your wallet has been updated to ${walletAddress.slice(0,6)}...${walletAddress.slice(-4)}`, '/profile', {});
-    try { await sendEmail({ to: rows[0].email, subject: 'EtherTrack — Wallet Address Updated', html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;"><h2 style="color:#60a5fa;">Wallet Updated 🔑</h2><p>New wallet: <strong>${escHtml(walletAddress)}</strong></p><p>If you did not request this, contact support immediately.</p></div>` }); } catch {}
+    try { await sendWalletUpdatedEmail(rows[0].email, { name: rows[0].full_name, walletAddress }); } catch {}
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -782,7 +769,13 @@ router.post('/users/:id/require-rekyc', isAdmin, async (req, res) => {
     await invalidateUserCache(id);
     await auditLog(req.user.id, 'REKYC_REQUIRED', id, reason);
     await createNotification(id, 'KYC', '🔄 Re-KYC Required', `Your KYC has been invalidated. Reason: ${reason}. Please resubmit your documents.`, '/kyc', { reason });
-    try { await sendEmail({ to: rows[0].email, subject: 'EtherTrack — Fresh KYC Submission Required', html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;"><h2 style="color:#f59e0b;">Re-KYC Required 🔄</h2><p>Hi ${escHtml(rows[0].full_name)},</p><p><strong style="color:#f87171;">Reason:</strong> ${escHtml(reason)}</p><a href="${process.env.FRONTEND_URL}/kyc" style="display:inline-block;background:#f59e0b;color:#000;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:700;margin-top:8px;">RESUBMIT KYC →</a></div>` }); } catch {}
+    try {
+      await sendKycResubmissionRequiredEmail(rows[0].email, {
+        fullName: rows[0].full_name,
+        reason,
+        kycUrl: `${process.env.FRONTEND_URL}/kyc`,
+      });
+    } catch {}
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -835,8 +828,13 @@ router.post('/users/:id/kyc-reminder', isAdmin, async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: 'User not found' });
     const u = rows[0];
     await createNotification(id, 'KYC', '⚠ KYC Renewal Required', `Your KYC expires on ${new Date(u.kyc_expires_at).toLocaleDateString('en-IN')}. Please renew to avoid suspension.`, '/kyc', {});
-    await sendEmail({ to: u.email, subject: 'EtherTrack — KYC Renewal Required',
-      html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;"><h2 style="color:#f59e0b;">KYC Renewal Required ⚠️</h2><p>Hi ${escHtml(u.full_name)},</p><p>Your KYC expires on <strong style="color:#f59e0b;">${new Date(u.kyc_expires_at).toLocaleDateString('en-IN',{day:'2-digit',month:'long',year:'numeric'})}</strong>.</p><a href="${process.env.FRONTEND_URL}/kyc" style="display:inline-block;background:#f59e0b;color:#000;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:700;margin-top:8px;">RENEW KYC NOW →</a></div>` });
+    const daysLeft = Math.max(0, Math.ceil((new Date(u.kyc_expires_at) - Date.now()) / 86400000));
+    await sendKycExpiringSoonEmail(u.email, {
+      fullName: u.full_name,
+      daysLeft,
+      expiresOn: new Date(u.kyc_expires_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' }),
+      kycUrl: `${process.env.FRONTEND_URL}/kyc`,
+    });
     await auditLog(req.user.id, 'KYC_REMINDER_SENT', id, `Sent to ${u.email}`);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -955,30 +953,14 @@ router.post('/users/:id/activate-corporate', isAdmin, async (req, res) => {
     setImmediate(async () => {
       try {
         const seatDisplay = (seats !== null && seats > 0) ? seats : 'Unlimited';
-        await sendEmail({
-          to: freshUser.email,
-          subject: 'EtherTrack — Corporate Plan Activated 🏢',
-          html: `<div style="font-family:monospace;background:#040706;color:#f0fdf4;padding:32px;border-radius:12px;max-width:600px;">
-            <div style="color:#f59e0b;font-size:18px;font-weight:700;margin-bottom:12px;">EtherTrack 🌿</div>
-            <h2 style="color:#f59e0b;margin:0 0 16px;">Corporate Plan Activated 🏢</h2>
-            <p>Hi ${escHtml(freshUser.full_name)},</p>
-            <ul style="color:#86efac;line-height:2.2;padding-left:20px;">
-              <li>Full Scope 3 (all 15 categories)</li>
-              <li>BRSR / CDP / TCFD / GHG PDF reports</li>
-              <li>Audit trail + verifier integration</li>
-              <li>PAT scheme + CCTS + GEI / BEE compliance</li>
-              <li>5-year decarbonisation plan + MRV calendar</li>
-              <li>SBTi target setting · Supplier data portal</li>
-              <li>Multi-entity consolidation · Carbon neutrality certificate</li>
-              <li>${seatDisplay} seats · Team management</li>
-            </ul>
-            ${notes ? `<p style="color:#f59e0b88;font-size:12px;margin-top:8px;">Note: ${escHtml(notes)}</p>` : ''}
-            <p style="color:#86efac88;font-size:12px;margin-top:20px;">
-              Cycle: ${cycle} · Renews: ${renewalDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' })}
-              ${priceINR > 0 ? ` · Amount: ₹${priceINR.toLocaleString('en-IN')}` : ''}
-            </p>
-            <a href="${process.env.FRONTEND_URL}/billing" style="display:inline-block;padding:12px 28px;background:#f59e0b;color:#000;border-radius:8px;text-decoration:none;font-weight:700;margin-top:12px;">GO TO BILLING →</a>
-          </div>`,
+        await sendCorporatePlanActivatedEmail(freshUser.email, {
+          name: freshUser.full_name,
+          seatDisplay,
+          cycle,
+          renewalDateLabel: renewalDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' }),
+          priceINR,
+          notes,
+          billingUrl: `${process.env.FRONTEND_URL}/billing`,
         });
       } catch (e) { console.warn('[admin/activate-corporate] email failed:', e.message); }
     });
@@ -1257,11 +1239,7 @@ router.post('/announcements/broadcast', isAdmin, async (req, res) => {
           try {
             await createNotification(u.id, 'SYSTEM', `📢 ${subject}`, message.slice(0, 200), '/dashboard', {});
             if (doEmail) {
-              await sendEmail({
-                to: u.email,
-                subject: `EtherTrack — ${safeSubject}`,
-                html: `<div style="font-family:monospace;background:#080c0a;color:#f0fdf4;padding:32px;border-radius:12px;"><h2 style="color:#f59e0b;">📢 Platform Announcement</h2><p>Hi ${escHtml(u.full_name)},</p><div style="padding:16px;background:#0d0a00;border-left:3px solid #f59e0b;border-radius:4px;white-space:pre-wrap;font-size:13px;line-height:1.7;">${safeMessage}</div></div>`,
-              });
+              await sendPlatformAnnouncementEmail(u.email, { name: u.full_name, subject: safeSubject, message: safeMessage });
             }
             sent++;
           } catch { failed++; }

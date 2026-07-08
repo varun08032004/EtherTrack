@@ -1,6 +1,17 @@
-// App.jsx — EtherTrack v10
+// App.jsx — EtherTrack v11
 // ─────────────────────────────────────────────────────────────────────────────
-// CHANGES vs v9:
+// CHANGES vs v10:
+//
+// [SENTRY-INIT] Added Sentry.init() at module scope, right after imports.
+//               Since this file is imported exactly once by your entry file
+//               (index.js/main.jsx) and JS module bodies only execute on
+//               first import, this runs once before <App/> ever mounts —
+//               same effect as putting it in index.js, but keeps everything
+//               Sentry-related in one place next to the existing
+//               Sentry.captureException() call in ErrorBoundary below.
+//               If you'd rather keep Sentry.init() out of App.jsx entirely,
+//               move this block into your actual entry file (index.js) —
+//               just make sure it runs before ReactDOM/createRoot renders.
 //
 // [AUDITOR-PORTAL] Added public AuditorPortal route at /verify-audit/:token
 //                  No auth required — token-gated via URL param.
@@ -35,6 +46,20 @@ import SupportWidget     from './components/SupportWidget';
 import { NotificationProvider } from './context/NotificationContext';
 import { PortfolioProvider }    from './context/PortfolioContext';
 import { authAPI }              from './services/api';
+
+// [SENTRY-INIT] Initialize once, before anything renders.
+// Put your DSN in an env var rather than hardcoding it — frontend DSNs are
+// safe to ship in client JS (they're not secrets), but env vars keep it
+// out of source control and let you swap DSNs per environment easily.
+if (process.env.REACT_APP_SENTRY_DSN) {
+  Sentry.init({
+    dsn: process.env.REACT_APP_SENTRY_DSN,
+    environment: process.env.NODE_ENV || 'development',
+    tracesSampleRate: process.env.NODE_ENV === 'production' ? 0.2 : 0,
+  });
+} else if (process.env.NODE_ENV === 'development') {
+  console.warn('⚠️  REACT_APP_SENTRY_DSN not set — Sentry disabled in this build');
+}
 
 const Profile             = lazy(() => import('./components/Profile'));
 const EditProfile         = lazy(() => import('./components/EditProfile'));
