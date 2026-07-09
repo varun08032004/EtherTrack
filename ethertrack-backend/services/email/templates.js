@@ -45,8 +45,8 @@ const kv = (rows) => `
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#0a130e;border:1px solid #1a4d30;border-radius:8px;margin:20px 0">
     ${rows.map(([label, value], i) => `
     <tr>
-      <td style="padding:10px 16px;font-size:10px;color:#5eead4;letter-spacing:.1em;white-space:nowrap;font-weight:700;${i < rows.length - 1 ? 'border-bottom:1px solid #1a4d3055;' : ''}">${label.toUpperCase()}</td>
-      <td align="right" style="padding:10px 16px;font-size:12px;color:#f0fdf4;${i < rows.length - 1 ? 'border-bottom:1px solid #1a4d3055;' : ''}">${value}</td>
+      <td style="padding:10px 16px;font-size:10px;color:#5eead4;letter-spacing:.1em;white-space:nowrap;font-weight:700;${i < rows.length - 1 ? 'border-bottom:1px solid #1a4d3055;' : ''}">${String(label ?? '').toUpperCase()}</td>
+      <td align="right" style="padding:10px 16px;font-size:12px;color:#f0fdf4;${i < rows.length - 1 ? 'border-bottom:1px solid #1a4d3055;' : ''}">${value ?? '—'}</td>
     </tr>`).join('')}
   </table>`;
 
@@ -497,6 +497,144 @@ const TEMPLATES = {
   }),
 
   // ═══════════════════════════════ ADMIN ALERTS ═══════════════════════════════
+
+  'retirement-certificate': ({ name, amount, certificateId, projectName, beneficiary, txHash, certUrl }) => ({
+    subject: `Retirement Certificate — ${certificateId}`,
+    html: layout({
+      eyebrow: 'RETIREMENT', title: 'Credits Retired 🌱',
+      bodyHtml: `
+        <p style="margin:0 0 16px">Hi ${name || 'there'}, you've retired <strong style="color:#22c55e">${amount} tCO₂</strong> in carbon credits.</p>
+        ${kv([
+          ['Certificate ID', certificateId], ['Project', projectName],
+          ['Beneficiary', beneficiary || 'Self'],
+          ['Tx hash', txHash ? `${txHash.slice(0, 20)}...` : '—'],
+        ])}
+        ${button(certUrl, 'View Certificate →')}`,
+    }),
+  }),
+
+  // ═══════════════════════════════ EMISSION TRACKING ═══════════════════════════
+
+  'emission-record-approved': ({ name, activity, co2e, dashboardUrl }) => ({
+    subject: `EtherTrack — Emission Record Approved`,
+    html: layout({
+      eyebrow: 'EMISSION TRACKING', title: 'Record Approved ✓',
+      bodyHtml: `
+        <p style="margin:0 0 16px">Hi ${name || 'there'}, your emission record has been approved and included in your inventory.</p>
+        ${kv([['Activity', activity], ['Emissions', `${co2e} tCO₂e`]])}
+        ${button(dashboardUrl, 'View in Dashboard →')}`,
+    }),
+  }),
+
+  'emission-record-rejected': ({ name, activity, co2e, reason, dashboardUrl }) => ({
+    subject: `EtherTrack — Emission Record Rejected`,
+    html: layout({
+      eyebrow: 'EMISSION TRACKING', title: 'Record Rejected', ...RED,
+      bodyHtml: `
+        <p style="margin:0 0 16px">Hi ${name || 'there'}, your emission record was rejected and needs correction.</p>
+        ${kv([['Activity', activity], ['Emissions', `${co2e} tCO₂e`]])}
+        ${reason ? warnBox(reason, '#f87171') : ''}
+        ${button(dashboardUrl, 'Review & Resubmit →', 'linear-gradient(135deg,#dc2626,#991b1b)')}`,
+    }),
+  }),
+
+  'emission-record-adjusted': ({ name, activity, field, oldValue, newValue, reason, dashboardUrl }) => ({
+    subject: `EtherTrack — Locked Emission Record Adjusted`,
+    html: layout({
+      eyebrow: 'EMISSION TRACKING', title: 'Record Adjusted 📝', ...AMBER,
+      bodyHtml: `
+        <p style="margin:0 0 16px">Hi ${name || 'there'}, a locked emission record was corrected and is now pending re-approval.</p>
+        ${kv([['Activity', activity], [field || 'Value', `${oldValue} → ${newValue}`]])}
+        ${reason ? warnBox(reason, '#facc15') : ''}
+        ${button(dashboardUrl, 'View Record →', 'linear-gradient(135deg,#f59e0b,#d97706)')}`,
+    }),
+  }),
+
+  'credits-sold': ({ name, projectName, quantity, amountINR, pending, walletUrl }) => ({
+    subject: `EtherTrack — Your Credits Sold: ₹${amountINR} ${pending ? 'Pending' : 'Credited'} 💰`,
+    html: layout({
+      eyebrow: 'MARKETPLACE · SALE', title: pending ? 'Credits Sold — Payment Pending' : 'Credits Sold 💰',
+      bodyHtml: `
+        <p style="margin:0 0 16px">Hi ${name || 'there'}, your listing just sold.</p>
+        ${kv([
+          ['Project', projectName], ['Quantity sold', `${quantity} tCO₂`],
+          [pending ? 'Amount pending' : 'Amount credited', `₹${amountINR}`],
+        ])}
+        ${pending ? `<p style="font-size:12px">This trade was settled in ETH — your INR proceeds will credit once the on-chain transaction confirms.</p>` : ''}
+        ${button(walletUrl, 'View Wallet →')}`,
+    }),
+  }),
+
+  // ═══════════════════════════════ PORTFOLIO / TOKENIZATION ═══════════════════
+
+  'credit-submitted': ({ name, projectName, quantity, submissionId, portfolioUrl }) => ({
+    subject: `EtherTrack — Credit Listing Submitted for Review`,
+    html: layout({
+      eyebrow: 'PORTFOLIO', title: 'Listing Submitted ✅',
+      bodyHtml: `
+        <p style="margin:0 0 16px">Hi ${name || 'there'}, we've received your carbon credit submission for review.</p>
+        ${kv([['Project', projectName], ['Quantity', `${quantity} tCO₂`], ['Submission ID', submissionId]])}
+        <p style="font-size:12px">Our compliance team typically reviews within 1-2 business days.</p>
+        ${button(portfolioUrl, 'View in Portfolio →')}`,
+    }),
+  }),
+
+  'tokenization-failed': ({ name, projectName, reason, portfolioUrl }) => ({
+    subject: `EtherTrack — Tokenization Failed for "${projectName}"`,
+    html: layout({
+      eyebrow: 'PORTFOLIO', title: 'Tokenization Failed ⚠', ...RED,
+      bodyHtml: `
+        <p style="margin:0 0 16px">Hi ${name || 'there'}, your approved credit <strong style="color:#f0fdf4">"${projectName}"</strong> could not be minted on-chain.</p>
+        ${reason ? warnBox(reason, '#f87171') : ''}
+        <p style="font-size:12px">Our team has been notified and will retry shortly. No action is needed from you.</p>
+        ${button(portfolioUrl, 'View in Portfolio →', 'linear-gradient(135deg,#dc2626,#991b1b)')}`,
+    }),
+  }),
+
+  'listing-confirmed': ({ name, projectName, quantity, pricePerCreditInr, marketUrl }) => ({
+    subject: `EtherTrack — "${projectName}" is Now Listed`,
+    html: layout({
+      eyebrow: 'MARKETPLACE', title: 'Listing Live 📋',
+      bodyHtml: `
+        <p style="margin:0 0 16px">Hi ${name || 'there'}, your credits are now live on the marketplace.</p>
+        ${kv([['Project', projectName], ['Quantity listed', `${quantity} tCO₂`], ...(pricePerCreditInr ? [['Price', `₹${pricePerCreditInr}/credit`]] : [])])}
+        ${button(marketUrl, 'View Listing →')}`,
+    }),
+  }),
+
+  'delisting-confirmed': ({ name, projectName, quantity, portfolioUrl }) => ({
+    subject: `EtherTrack — "${projectName}" Delisted`,
+    html: layout({
+      eyebrow: 'MARKETPLACE', title: 'Listing Removed',
+      bodyHtml: `
+        <p style="margin:0 0 16px">Hi ${name || 'there'}, your listing has been removed from the marketplace and returned to your portfolio.</p>
+        ${kv([['Project', projectName], ['Quantity returned', `${quantity} tCO₂`]])}
+        ${button(portfolioUrl, 'View Portfolio →')}`,
+    }),
+  }),
+
+  // ═══════════════════════════════ RETIREMENT ═════════════════════════════════
+
+  'org-retirement-requested': ({ name, projectName, quantity, orgName }) => ({
+    subject: `EtherTrack — Retirement Request Submitted`,
+    html: layout({
+      eyebrow: 'ORGANIZATION · RETIREMENT', title: 'Request Submitted ✅',
+      bodyHtml: `
+        <p style="margin:0 0 16px">Hi ${name || 'there'}, your retirement request for <strong style="color:#f0fdf4">${orgName}</strong> has been submitted for approval.</p>
+        ${kv([['Project', projectName], ['Quantity', `${quantity} tCO₂`]])}
+        <p style="font-size:12px">You'll be notified once an org admin reviews it.</p>`,
+    }),
+  }),
+
+  'org-retirement-rejected': ({ name, projectName, quantity, orgName, reason }) => ({
+    subject: `EtherTrack — Retirement Request Rejected`,
+    html: layout({
+      eyebrow: 'ORGANIZATION · RETIREMENT', title: 'Request Rejected', ...RED,
+      bodyHtml: `
+        <p style="margin:0 0 16px">Hi ${name || 'there'}, your retirement request for <strong style="color:#f0fdf4">${quantity} tCO₂ · ${projectName}</strong> at ${orgName} was rejected.</p>
+        ${reason ? warnBox(reason, '#f87171') : ''}`,
+    }),
+  }),
 
   'kyc-admin-new': ({ userEmail, fullName, idType, submissionId, submittedAt, adminUrl }) => ({
     subject: `[EtherTrack Admin] New KYC — ${fullName}`,

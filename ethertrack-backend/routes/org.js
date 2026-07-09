@@ -24,7 +24,7 @@ const crypto     = require('crypto');
 const { safeQuery: query, getClient } = require('../db/pool');
 const { authenticate }     = require('../middleware/auth');
 const { requireRole, getPermissions } = require('../middleware/rbac');
-const { sendOrgInviteEmail, sendSubscriptionExpiringSoonEmail, sendSubscriptionExpiredEmail } = require('../services/email');
+const { sendOrgInviteEmail, sendSubscriptionExpiringSoonEmail, sendSubscriptionExpiredEmail, sendOrgRetirementRequestedEmail, sendOrgRetirementRejectedEmail, sendRetirementEmail } = require('../services/email');
 const { createNotification } = require('./notifications');
 const { generateGSTInvoice, serveInvoice } = require('../services/invoice');
 
@@ -512,6 +512,12 @@ router.post('/:orgId/retirement-queue', authenticate, requireRole('owner', 'admi
        VALUES ($1,$2,'RETIRE_REQUESTED',$3,NOW())`,
       [req.params.orgId, req.user.id, `${qty} tCO₂ retirement requested for ${projectName}`]
     ).catch(() => {});
+
+    const { rows: [org] } = await query('SELECT name FROM organisations WHERE id=$1', [req.params.orgId]).catch(() => ({ rows: [{}] }));
+    sendOrgRetirementRequestedEmail(req.user.email, {
+      name: req.user.full_name, projectName, quantity: qty, orgName: org?.name,
+    }).catch(e => console.warn('[retirement-queue/post] email failed:', e.message));
+
     res.status(201).json({ message: 'Retirement request submitted', id: rows[0].id });
   } catch (e) {
     if (e.statusCode === 403) return res.status(403).json({ error: e.message });
@@ -526,9 +532,11 @@ router.post('/:orgId/retirement-queue/:itemId/approve', authenticate, requireRol
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
-      `SELECT q.*, cb.registry_serial
+      `SELECT q.*, cb.registry_serial, u.email AS requester_email, u.full_name AS requester_full_name, o.name AS org_name
        FROM org_retirement_queue q
        LEFT JOIN carbon_batches cb ON cb.id = q.batch_id
+       LEFT JOIN users u ON u.id = q.requester_id
+       LEFT JOIN organisations o ON o.id = q.org_id
        WHERE q.id = $1 AND q.org_id = $2 FOR UPDATE`,
       [itemId, orgId]
     );
@@ -576,6 +584,15 @@ router.post('/:orgId/retirement-queue/:itemId/approve', authenticate, requireRol
       [orgId, req.user.id, `${item.qty} tCO₂ retired from ${item.project_name} — cert ${certId}`]
     );
     await client.query('COMMIT');
+
+    if (item.requester_email) {
+      sendRetirementEmail(item.requester_email, {
+        name: item.requester_full_name, amount: item.qty, certificateId: certId,
+        projectName: item.project_name, beneficiary: item.beneficiary_name || 'Self',
+        certUrl: `${process.env.FRONTEND_URL}/verify/${certId}`,
+      }).catch(e => console.warn('[retirement-queue/approve] certificate email failed:', e.message));
+    }
+
     res.json({ success: true, certId, message: `Retirement approved — ${item.qty} tCO₂` });
   } catch (e) {
     await client.query('ROLLBACK');
@@ -597,7 +614,7 @@ router.post('/:orgId/retirement-queue/:itemId/reject', authenticate, requireRole
        SET status='rejected', rejected_by=$1, rejected_at=NOW(),
            rejection_reason=$2, updated_at=NOW()
        WHERE id=$3 AND org_id=$4 AND status='pending'
-       RETURNING id, project_name, qty`,
+       RETURNING id, project_name, qty, requester_id`,
       [req.user.id, reason.trim(), itemId, orgId]
     );
     if (!rows.length) return res.status(404).json({ error: 'Request not found or already processed' });
@@ -606,6 +623,20 @@ router.post('/:orgId/retirement-queue/:itemId/reject', authenticate, requireRole
        VALUES ($1,$2,'RETIRE_REJECTED',$3,NOW())`,
       [orgId, req.user.id, `Rejected ${rows[0].qty} tCO₂ for ${rows[0].project_name}. Reason: ${reason.trim()}`]
     ).catch(() => {});
+
+    try {
+      const { rows: [ctx] } = await query(
+        `SELECT u.email, u.full_name, o.name AS org_name FROM users u, organisations o WHERE u.id=$1 AND o.id=$2`,
+        [rows[0].requester_id, orgId]
+      );
+      if (ctx?.email) {
+        await sendOrgRetirementRejectedEmail(ctx.email, {
+          name: ctx.full_name, projectName: rows[0].project_name, quantity: rows[0].qty,
+          orgName: ctx.org_name, reason: reason.trim(),
+        });
+      }
+    } catch (e) { console.warn('[retirement-queue/reject] email failed:', e.message); }
+
     res.json({ success: true, message: 'Retirement request rejected' });
   } catch (e) {
     console.error('[org/retirement-queue/reject]', e.message);

@@ -51,6 +51,7 @@ const { authenticate, requireKYC }          = require('../middleware/auth');
 const { createNotification }                = require('./notifications');
 const chainLogger                           = require('../services/chainLogger');
 const { generateTradeInvoice, generateTradeBill, serveTradeInvoice } = require('../services/invoice');
+const { sendCreditsSoldEmail } = require('../services/email');
 
 // ── Razorpay client ──────────────────────────────────────────────────────────
 const razorpay = new Razorpay({
@@ -470,6 +471,14 @@ router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) 
         '/wallet', { tradeId, quantity: qty }).catch(() => {}),
     ]);
 
+    if (batch.seller_email) {
+      sendCreditsSoldEmail(batch.seller_email, {
+        name: batch.seller_name, projectName: batch.project_name, quantity: qty,
+        amountINR: fees.sellerGetsINR.toLocaleString('en-IN'), pending: paymentMode !== 'inr',
+        walletUrl: `${process.env.FRONTEND_URL}/wallet`,
+      }).catch(e => console.warn('[trades/checkout-verify] seller email failed:', e.message));
+    }
+
     const { rows: updatedBuyer }  = await query('SELECT inr_balance FROM users WHERE id = $1', [req.user.id]);
     const { rows: updatedSeller } = await query('SELECT inr_balance FROM users WHERE id = $1', [sellerId]);
 
@@ -749,6 +758,14 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
         `${qty} × ${batch.project_name} — ₹${fees.sellerGetsINR.toLocaleString('en-IN')} to your bank`,
         '/wallet', { tradeId, quantity: qty }).catch(() => {}),
     ]);
+
+    if (batch.seller_email) {
+      sendCreditsSoldEmail(batch.seller_email, {
+        name: batch.seller_name, projectName: batch.project_name, quantity: qty,
+        amountINR: fees.sellerGetsINR.toLocaleString('en-IN'), pending: false,
+        walletUrl: `${process.env.FRONTEND_URL}/wallet`,
+      }).catch(e => console.warn('[trades/checkout-verify] seller email failed:', e.message));
+    }
 
     return res.json({
       success: true, tradeId, quantity: qty,

@@ -5,6 +5,7 @@ const { authenticate, requireKYC, requireWallet, requireRole } = require('../mid
 const { uploadJSON, uploadFile, buildBatchMetadata } = require('../services/ipfs');
 const multer = require('multer');
 const { createNotification } = require('./notifications');
+const { sendMintSuccessEmail } = require('../services/email');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
@@ -143,6 +144,11 @@ router.post('/batches/:id/tokenise', authenticate, requireWallet, async (req, re
       `"${batch.project_name}" tokenised as Token #${tokenId} on Ethereum Sepolia. Ready to list on the marketplace.`,
       '/portfolio', { tokenId, txHash, batchId: req.params.id, projectName: batch.project_name }
     );
+
+    sendMintSuccessEmail(req.user.email, {
+      name: req.user.full_name, projectName: batch.project_name, tokenId, txHash,
+      portfolioUrl: `${process.env.FRONTEND_URL}/portfolio`,
+    }).catch(e => console.warn('[registry/tokenise] email failed:', e.message));
 
     res.json({ message: 'Batch tokenised and metadata uploaded to IPFS', batch: rows[0], ipfs: { hash: ipfsResult.hash, uri: ipfsResult.uri, url: ipfsResult.url } });
   } catch (e) { console.error('Tokenise error:', e); res.status(500).json({ error: 'Failed to record tokenisation' }); }

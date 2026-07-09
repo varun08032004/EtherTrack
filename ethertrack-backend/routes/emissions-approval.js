@@ -22,6 +22,7 @@ const router = require('express').Router();
 const { safeQuery: query } = require('../db/pool');
 const { authenticate } = require('../middleware/auth');
 const { createNotification } = require('./notifications');
+const { sendEmissionRecordApprovedEmail, sendEmissionRecordRejectedEmail, sendEmissionRecordAdjustedEmail } = require('../services/email');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS — mirrors routes/emissions.js conventions exactly
@@ -125,9 +126,11 @@ router.patch('/activities/:id/state', authenticate, async (req, res) => {
   try {
     // Fetch current record — ownership check happens here
     const { rows: existing } = await query(
-      `SELECT id, user_id, approval_state, activity, quantity, co2e, date
-       FROM emission_activities
-       WHERE id = $1`,
+      `SELECT ea.id, ea.user_id, ea.approval_state, ea.activity, ea.quantity, ea.co2e, ea.date,
+              u.email AS owner_email, u.full_name AS owner_full_name
+       FROM emission_activities ea
+       LEFT JOIN users u ON u.id = ea.user_id
+       WHERE ea.id = $1`,
       [id]
     );
 
@@ -210,6 +213,12 @@ router.patch('/activities/:id/state', authenticate, async (req, res) => {
         '/emission-tracking?tab=approvals',
         { recordId: id }
       ).catch(() => {});
+      if (record.owner_email) {
+        sendEmissionRecordRejectedEmail(record.owner_email, {
+          name: record.owner_full_name, activity: record.activity, co2e: record.co2e,
+          reason: cleanComment, dashboardUrl: `${process.env.FRONTEND_URL}/emission-tracking?tab=approvals`,
+        }).catch(e => console.warn('[emissions-approval] rejected email failed:', e.message));
+      }
     }
     if (newState === 'approved') {
       createNotification(
@@ -218,6 +227,12 @@ router.patch('/activities/:id/state', authenticate, async (req, res) => {
         '/emission-tracking?tab=approvals',
         { recordId: id }
       ).catch(() => {});
+      if (record.owner_email) {
+        sendEmissionRecordApprovedEmail(record.owner_email, {
+          name: record.owner_full_name, activity: record.activity, co2e: record.co2e,
+          dashboardUrl: `${process.env.FRONTEND_URL}/emission-tracking?tab=approvals`,
+        }).catch(e => console.warn('[emissions-approval] approved email failed:', e.message));
+      }
     }
 
     res.json({ message: `Record ${newState}`, record: updated[0] });
@@ -257,9 +272,11 @@ router.post('/activities/:id/adjustment', authenticate, async (req, res) => {
 
   try {
     const { rows: existing } = await query(
-      `SELECT id, user_id, approval_state, quantity, factor, scope, activity
-       FROM emission_activities
-       WHERE id = $1`,
+      `SELECT ea.id, ea.user_id, ea.approval_state, ea.quantity, ea.factor, ea.scope, ea.activity,
+              u.email AS owner_email, u.full_name AS owner_full_name
+       FROM emission_activities ea
+       LEFT JOIN users u ON u.id = ea.user_id
+       WHERE ea.id = $1`,
       [id]
     );
 
@@ -338,6 +355,14 @@ router.post('/activities/:id/adjustment', authenticate, async (req, res) => {
       '/emission-tracking?tab=approvals',
       { recordId: id, adjustmentId: adjRows[0].id }
     ).catch(() => {});
+
+    if (record.owner_email) {
+      sendEmissionRecordAdjustedEmail(record.owner_email, {
+        name: record.owner_full_name, activity: record.activity, field: cleanField,
+        oldValue: cleanOldVal, newValue: cleanNewVal, reason: cleanReason,
+        dashboardUrl: `${process.env.FRONTEND_URL}/emission-tracking?tab=approvals`,
+      }).catch(e => console.warn('[emissions-approval] adjusted email failed:', e.message));
+    }
 
     res.json({
       message: 'Adjustment recorded — record returned to reviewed state for re-approval',

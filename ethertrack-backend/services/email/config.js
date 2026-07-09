@@ -69,6 +69,34 @@ const TEMPLATE_CATEGORY = {
   // ── Sales (sales@) — routes/admin.js ──────────────────────────────────────
   'corporate-plan-activated':     'sales',
 
+  // ── Marketplace sale (billing@) — routes/trades.js checkout-verify ────────
+  // Seller only ever got an in-app notification when their listing sold —
+  // never an email, despite money landing in their account.
+  'credits-sold':                  'billing',
+
+  // ── Portfolio / tokenization (support@) — routes/portfolio.js, routes/admin.js, routes/registry.js ─
+  'credit-submitted':              'support',
+  'tokenization-failed':           'support',
+  'listing-confirmed':             'support',
+  'delisting-confirmed':           'support',
+
+  // ── Retirement (support@) — routes/transactions.js, routes/org.js ─────────
+  // Individual retirement (transactions.js POST /retirements) never emailed
+  // despite the retirement-certificate template existing since before this
+  // migration. Org-level retirement queue submit/approve/reject had zero
+  // notification of any kind — not even in-app.
+  'org-retirement-requested':      'support',
+  'org-retirement-rejected':       'support',
+  'retirement-certificate':        'support',
+
+  // ── Emission tracking (support@) — routes/emissions-approval.js ───────────
+  // Maker-checker approval workflow (draft→submitted→reviewed→approved/
+  // rejected/locked) had ONLY in-app notifications, zero email, despite
+  // being a compliance-relevant audit trail feature.
+  'emission-record-approved':      'support',
+  'emission-record-rejected':      'support',
+  'emission-record-adjusted':      'support',
+
   // ── Internal admin alerts (admin@) — routes/kyc.js ────────────────────────
   'kyc-admin-new':                'admin',
 

@@ -58,6 +58,7 @@ const { safeQuery: query, withTransaction } = require('../db/pool');
 const { authenticate } = require('../middleware/auth');
 const { verifyTradeTransaction, verifyRetirementTransaction } = require('../services/txVerifier');
 const statsCache = require('../services/statsCache');
+const { sendRetirementEmail } = require('../services/email');
 
 // ── [V4] Rate limiters — IPv6-safe ───────────────────────────────
 const readLimiter = rateLimit({
@@ -460,6 +461,12 @@ router.post('/retirements', authenticate, writeLimiter, async (req, res) => {
     });
 
     res.json({ message: 'Retirement recorded', certId, id: registryId });
+
+    sendRetirementEmail(req.user.email, {
+      name: req.user.full_name, amount: creditsInt, certificateId: certId,
+      projectName, beneficiary: beneficiaryName || beneficiary, txHash,
+      certUrl: `${process.env.FRONTEND_URL}/verify/${certId}`,
+    }).catch(e => console.warn('[tx/retirements] certificate email failed:', e.message));
   } catch (e) {
     console.error('[tx/retirements POST]', e.message);
     res.status(500).json({ error: 'Failed to record retirement' });

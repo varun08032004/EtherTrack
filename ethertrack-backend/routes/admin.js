@@ -23,7 +23,7 @@ const { safeQuery: query, withTransaction } = require('../db/pool');
 const { authenticate, requireRole, invalidateUserCache } = require('../middleware/auth');
 const {
   sendKycApprovedEmail, sendKycRejectedEmail, sendKycResubmissionRequiredEmail,
-  sendKycExpiringSoonEmail, sendMintSuccessEmail, sendCreditListingRejectedEmail,
+  sendKycExpiringSoonEmail, sendMintSuccessEmail, sendCreditListingRejectedEmail, sendTokenizationFailedEmail,
   sendBuyOrderCancelledEmail, sendAccountSuspendedEmail, sendAccountReinstatedEmail,
   sendAdminMessageToUserEmail, sendWalletUpdatedEmail, sendCorporatePlanActivatedEmail,
   sendPlatformAnnouncementEmail,
@@ -311,6 +311,13 @@ router.post('/credits/:id/approve', isAdmin, async (req, res) => {
           [`\n[MINT ERROR ${new Date().toISOString()}]: ${mintErr.message.slice(0, 300)}`, id]
         ).catch(() => {});
         await auditLog(req.user.id, 'CREDIT_MINT_FAILED', batch[0].user_id, `Batch ${id}: ${mintErr.message.slice(0, 300)}`);
+        try {
+          await sendTokenizationFailedEmail(batch[0].email, {
+            name: batch[0].full_name, projectName: batch[0].project_name,
+            reason: 'A temporary blockchain network issue prevented minting. Our team has been notified and will retry.',
+            portfolioUrl: `${process.env.FRONTEND_URL}/portfolio`,
+          });
+        } catch {}
       }
     });
   } catch (e) {
@@ -335,11 +342,31 @@ router.post('/credits/:id/retry-mint', isAdmin, async (req, res) => {
     if (result.tokenId != null) {
       await createNotification(batch.user_id, 'CREDIT', '🪙 Credit Tokenised', `"${batch.project_name}" minted as Token #${result.tokenId}.`, '/portfolio', { tokenId: result.tokenId });
       await auditLog(req.user.id, 'CREDIT_MINTED', batch.user_id, `Retry — Batch ${id} → Token #${result.tokenId}`);
+      sendMintSuccessEmail(batch.email, {
+        name: batch.full_name, projectName: batch.project_name,
+        tokenId: result.tokenId, txHash: result.txHash,
+        portfolioUrl: `${process.env.FRONTEND_URL}/portfolio`,
+      }).catch(e => console.warn('[retry-mint] success email failed:', e.message));
       res.json({ success: true, tokenId: result.tokenId, txHash: result.txHash });
     } else {
+      sendTokenizationFailedEmail(batch.email, {
+        name: batch.full_name, projectName: batch.project_name,
+        reason: 'The retry attempt was unsuccessful. Our team is investigating.',
+        portfolioUrl: `${process.env.FRONTEND_URL}/portfolio`,
+      }).catch(e => console.warn('[retry-mint] failure email failed:', e.message));
       res.status(500).json({ success: false, error: 'Mint failed' });
     }
   } catch (e) {
+    try {
+      const { rows } = await query(`SELECT cb.project_name, u.email, u.full_name FROM carbon_batches cb JOIN users u ON u.id=cb.user_id WHERE cb.id=$1`, [id]);
+      if (rows[0]?.email) {
+        await sendTokenizationFailedEmail(rows[0].email, {
+          name: rows[0].full_name, projectName: rows[0].project_name,
+          reason: 'The retry attempt was unsuccessful. Our team is investigating.',
+          portfolioUrl: `${process.env.FRONTEND_URL}/portfolio`,
+        });
+      }
+    } catch {}
     res.status(500).json({ success: false, error: process.env.NODE_ENV === 'production' ? 'Mint failed' : e.message });
   }
 });
@@ -424,8 +451,18 @@ router.post('/credits/:id/assign-wallet-and-mint', isAdmin, async (req, res) => 
     if (result.tokenId != null) {
       await createNotification(rows[0].user_id, 'CREDIT', '🪙 Credit Tokenised', `"${rows[0].project_name}" minted as Token #${result.tokenId}.`, '/portfolio', { tokenId: result.tokenId });
       await auditLog(req.user.id, 'CREDIT_MINTED', rows[0].user_id, `Assign+Mint — Batch ${id} → Token #${result.tokenId}`);
+      sendMintSuccessEmail(rows[0].email, {
+        name: rows[0].full_name, projectName: rows[0].project_name,
+        tokenId: result.tokenId, txHash: result.txHash,
+        portfolioUrl: `${process.env.FRONTEND_URL}/portfolio`,
+      }).catch(e => console.warn('[assign-wallet-and-mint] success email failed:', e.message));
       res.json({ success: true, tokenId: result.tokenId, txHash: result.txHash });
     } else {
+      sendTokenizationFailedEmail(rows[0].email, {
+        name: rows[0].full_name, projectName: rows[0].project_name,
+        reason: 'Minting failed after wallet assignment. Our team is investigating.',
+        portfolioUrl: `${process.env.FRONTEND_URL}/portfolio`,
+      }).catch(e => console.warn('[assign-wallet-and-mint] failure email failed:', e.message));
       res.status(500).json({ success: false, error: 'Mint failed after wallet assignment' });
     }
   } catch (e) { res.status(500).json({ error: process.env.NODE_ENV === 'production' ? 'Operation failed' : e.message }); }

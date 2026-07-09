@@ -11,6 +11,7 @@
 const router      = require('express').Router();
 const { safeQuery: query } = require('../db/pool');
 const { authenticate, requireKYC } = require('../middleware/auth');
+const { sendCreditSubmittedEmail, sendListingConfirmedEmail, sendDelistingConfirmedEmail } = require('../services/email');
 const rateLimit   = require('express-rate-limit');
 const Joi         = require('joi');
 
@@ -273,6 +274,13 @@ router.post(
         );
 
         await client.query('COMMIT');
+
+        const submissionId = `SUB-${String(rows[0].id).padStart(6, '0')}`;
+        sendCreditSubmittedEmail(req.user.email, {
+          name: req.user.full_name, projectName, quantity, submissionId,
+          portfolioUrl: `${process.env.FRONTEND_URL}/portfolio`,
+        }).catch(e => console.warn('[submit-credit] confirmation email failed:', e.message));
+
         res.status(201).json({ message: 'Credit submitted successfully.', id: rows[0].id });
       } catch (txErr) {
         await client.query('ROLLBACK');
@@ -327,7 +335,7 @@ router.post('/confirm-listing', authenticate, async (req, res) => {
   try {
     // Ownership check — only the batch owner can confirm listing
     const { rows } = await query(
-      `SELECT id, user_id, admin_status, token_id, available_credits FROM carbon_batches WHERE id = $1`,
+      `SELECT id, user_id, admin_status, token_id, available_credits, project_name FROM carbon_batches WHERE id = $1`,
       [batchId]
     );
     if (!rows.length) {
@@ -357,6 +365,12 @@ router.post('/confirm-listing', authenticate, async (req, res) => {
     );
 
     console.log(`[confirm-listing] batch=${batchId} listingId=${listingId} qty=${listedQty} price=${pricePerCreditInr} tx=${txHash}`);
+
+    sendListingConfirmedEmail(req.user.email, {
+      name: req.user.full_name, projectName: rows[0].project_name, quantity: listedQty,
+      pricePerCreditInr: pricePerCreditInr || null, marketUrl: `${process.env.FRONTEND_URL}/market`,
+    }).catch(e => console.warn('[confirm-listing] email failed:', e.message));
+
     res.json({ success: true, listingIdOnchain: listingId, listedQuantity: listedQty });
   } catch (e) {
     console.error('[confirm-listing]', e.message);
@@ -386,7 +400,7 @@ router.post('/confirm-delisting', authenticate, async (req, res) => {
 
   try {
     const { rows } = await query(
-      `SELECT id, user_id FROM carbon_batches WHERE id = $1`,
+      `SELECT id, user_id, project_name, listed_quantity FROM carbon_batches WHERE id = $1`,
       [batchId]
     );
     if (!rows.length) {
@@ -406,6 +420,12 @@ router.post('/confirm-delisting', authenticate, async (req, res) => {
     );
 
     console.log(`[confirm-delisting] batch=${batchId} user=${req.user.id}`);
+
+    sendDelistingConfirmedEmail(req.user.email, {
+      name: req.user.full_name, projectName: rows[0].project_name, quantity: rows[0].listed_quantity,
+      portfolioUrl: `${process.env.FRONTEND_URL}/portfolio`,
+    }).catch(e => console.warn('[confirm-delisting] email failed:', e.message));
+
     res.json({ success: true });
   } catch (e) {
     console.error('[confirm-delisting]', e.message);

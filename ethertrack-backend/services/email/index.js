@@ -31,6 +31,25 @@ module.exports = {
   sendAccountReinstatedEmail: (to, { name }) => send('account-reinstated', to, { name }),
   sendWalletUpdatedEmail: (to, { name, walletAddress }) => send('wallet-updated', to, { name, walletAddress }),
 
+  // ── Marketplace sale (billing@) ───────────────────────────────────────────
+  sendCreditsSoldEmail: (to, { name, projectName, quantity, amountINR, pending, walletUrl }) => send('credits-sold', to, { name, projectName, quantity, amountINR, pending, walletUrl }),
+
+  // ── Portfolio / tokenization (support@) ───────────────────────────────────
+  sendCreditSubmittedEmail: (to, { name, projectName, quantity, submissionId, portfolioUrl }) => send('credit-submitted', to, { name, projectName, quantity, submissionId, portfolioUrl }),
+  sendTokenizationFailedEmail: (to, { name, projectName, reason, portfolioUrl }) => send('tokenization-failed', to, { name, projectName, reason, portfolioUrl }),
+  sendListingConfirmedEmail: (to, { name, projectName, quantity, pricePerCreditInr, marketUrl }) => send('listing-confirmed', to, { name, projectName, quantity, pricePerCreditInr, marketUrl }),
+  sendDelistingConfirmedEmail: (to, { name, projectName, quantity, portfolioUrl }) => send('delisting-confirmed', to, { name, projectName, quantity, portfolioUrl }),
+
+  // ── Retirement (support@) ─────────────────────────────────────────────────
+  sendOrgRetirementRequestedEmail: (to, { name, projectName, quantity, orgName }) => send('org-retirement-requested', to, { name, projectName, quantity, orgName }),
+  sendOrgRetirementRejectedEmail: (to, { name, projectName, quantity, orgName, reason }) => send('org-retirement-rejected', to, { name, projectName, quantity, orgName, reason }),
+  sendRetirementEmail: (to, { name, amount, certificateId, projectName, beneficiary, txHash, certUrl }) => send('retirement-certificate', to, { name, amount, certificateId, projectName, beneficiary, txHash, certUrl }),
+
+  // ── Emission tracking (support@) ──────────────────────────────────────────
+  sendEmissionRecordApprovedEmail: (to, { name, activity, co2e, dashboardUrl }) => send('emission-record-approved', to, { name, activity, co2e, dashboardUrl }),
+  sendEmissionRecordRejectedEmail: (to, { name, activity, co2e, reason, dashboardUrl }) => send('emission-record-rejected', to, { name, activity, co2e, reason, dashboardUrl }),
+  sendEmissionRecordAdjustedEmail: (to, { name, activity, field, oldValue, newValue, reason, dashboardUrl }) => send('emission-record-adjusted', to, { name, activity, field, oldValue, newValue, reason, dashboardUrl }),
+
   // ── KYC (support@ / admin@) ──────────────────────────────────────────────
   sendKycSubmittedEmail: (to, { fullName, submissionId }) => send('kyc-submitted', to, { fullName, submissionId }),
   sendKycApprovedEmail: (to, { fullName, tier, dashboardUrl }) => send('kyc-approved', to, { fullName, tier, dashboardUrl }),

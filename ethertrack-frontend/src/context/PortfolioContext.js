@@ -153,6 +153,33 @@ const safeNum = (val, fallback = 0) => {
   return isNaN(n) || !isFinite(n) ? fallback : n;
 };
 
+// [FIX-8] Every on-chain call in this file used to do `throw e;` on failure,
+// which re-throws ethers.js's raw error object — including the entire
+// estimateGas/transaction/ABI payload — straight up to whatever component
+// calls showToast(e.message, 'error'). That's why users were seeing a wall
+// of hex data instead of "Insufficient credits". This pulls out just the
+// human-readable revert reason (or a sensible fallback) so every catch
+// block can throw a clean, single-sentence Error instead.
+const getContractErrorMessage = (e) => {
+  // Ethers v6 surfaces the Solidity require() string in a few possible
+  // places depending on the failure path — check the most specific first.
+  if (e?.reason)                              return e.reason;
+  if (e?.revert?.args?.[0])                   return e.revert.args[0];
+  if (e?.shortMessage && !/^could not/i.test(e.shortMessage)) return e.shortMessage;
+  if (e?.info?.error?.message)                return e.info.error.message.replace(/^execution reverted:\s*/i, '');
+  if (e?.error?.message)                      return e.error.message.replace(/^execution reverted:\s*/i, '');
+
+  // Common ethers/provider error codes that aren't contract reverts
+  if (e?.code === 'INSUFFICIENT_FUNDS')        return 'Insufficient ETH balance to cover this transaction and gas.';
+  if (e?.code === 'CALL_EXCEPTION')            return 'Transaction would fail — the contract rejected this action.';
+  if (e?.code === 'NETWORK_ERROR')             return 'Network connection issue. Please check your connection and try again.';
+  if (e?.code === 'TIMEOUT')                   return 'The transaction timed out. Please try again.';
+
+  // Last resort — never fall through to e.message, which on a raw ethers
+  // error can be the entire multi-KB stringified error object.
+  return 'Transaction failed. Please try again.';
+};
+
 // ── Token hex formatter ───────────────────────────────────────────
 const toTokenHex = (id) =>
   id != null ? `0x${Number(id).toString(16).padStart(8, '0').toUpperCase()}` : null;
@@ -1148,7 +1175,7 @@ export function PortfolioProvider({ children }) {
     } catch (e) {
       if (e.code === 4001 || e.code === 'ACTION_REJECTED')
         throw new Error('Transaction rejected by user.');
-      throw e;
+      throw new Error(getContractErrorMessage(e));
     } finally {
       safeSet(setLoading)(l => ({ ...l, tx: false }));
     }
@@ -1201,7 +1228,7 @@ export function PortfolioProvider({ children }) {
     return { success: true, txHash: tx.hash, listingId, receipt };
   } catch (e) {
     if (e.code === 4001 || e.code === 'ACTION_REJECTED') throw new Error('Transaction rejected by user.');
-    throw e;
+    throw new Error(getContractErrorMessage(e));
   } finally {
     safeSet(setLoading)(l => ({ ...l, tx: false }));
   }
@@ -1219,7 +1246,7 @@ export function PortfolioProvider({ children }) {
       return { success: true, txHash: tx.hash };
     } catch (e) {
       if (e.code === 4001 || e.code === 'ACTION_REJECTED') throw new Error('Transaction rejected by user.');
-      throw e;
+      throw new Error(getContractErrorMessage(e));
     } finally {
       safeSet(setLoading)(l => ({ ...l, tx: false }));
     }
@@ -1244,7 +1271,7 @@ export function PortfolioProvider({ children }) {
       return { success: true, txHash: tx.hash, blockNumber: receipt.blockNumber };
     } catch (e) {
       if (e.code === 4001 || e.code === 'ACTION_REJECTED') throw new Error('Transaction rejected by user.');
-      throw e;
+      throw new Error(getContractErrorMessage(e));
     } finally {
       retirementLockRef.current.delete(lockKey);
       safeSet(setLoading)(l => ({ ...l, tx: false }));
@@ -1267,7 +1294,7 @@ export function PortfolioProvider({ children }) {
       return { success: true, txHash: tx.hash };
     } catch (e) {
       if (e.code === 4001 || e.code === 'ACTION_REJECTED') throw new Error('Transaction rejected by user.');
-      throw e;
+      throw new Error(getContractErrorMessage(e));
     } finally {
       safeSet(setLoading)(l => ({ ...l, tx: false }));
     }
@@ -1292,7 +1319,7 @@ export function PortfolioProvider({ children }) {
       return { success: true, txHash: tx.hash };
     } catch (e) {
       if (e.code === 4001 || e.code === 'ACTION_REJECTED') throw new Error('Transaction rejected by user.');
-      throw e;
+      throw new Error(getContractErrorMessage(e));
     } finally {
       safeSet(setLoading)(l => ({ ...l, tx: false }));
     }
@@ -1309,7 +1336,7 @@ export function PortfolioProvider({ children }) {
       return { success: true, txHash: tx.hash };
     } catch (e) {
       if (e.code === 4001 || e.code === 'ACTION_REJECTED') throw new Error('Transaction rejected by user.');
-      throw e;
+      throw new Error(getContractErrorMessage(e));
     } finally {
       safeSet(setLoading)(l => ({ ...l, tx: false }));
     }
@@ -1330,7 +1357,7 @@ export function PortfolioProvider({ children }) {
       return { success: true, txHash: tx.hash };
     } catch (e) {
       if (e.code === 4001 || e.code === 'ACTION_REJECTED') throw new Error('Transaction rejected by user.');
-      throw e;
+      throw new Error(getContractErrorMessage(e));
     } finally {
       safeSet(setLoading)(l => ({ ...l, tx: false }));
     }
@@ -1354,7 +1381,7 @@ export function PortfolioProvider({ children }) {
       return { success: true, txHash: tx.hash };
     } catch (e) {
       if (e.code === 4001 || e.code === 'ACTION_REJECTED') throw new Error('Transaction rejected by user.');
-      throw e;
+      throw new Error(getContractErrorMessage(e));
     } finally {
       safeSet(setLoading)(l => ({ ...l, tx: false }));
     }
@@ -1380,7 +1407,7 @@ export function PortfolioProvider({ children }) {
       return { success: true, txHash: tx.hash };
     } catch (e) {
       if (e.code === 4001 || e.code === 'ACTION_REJECTED') throw new Error('Transaction rejected by user.');
-      throw e;
+      throw new Error(getContractErrorMessage(e));
     } finally {
       safeSet(setLoading)(l => ({ ...l, tx: false }));
     }
