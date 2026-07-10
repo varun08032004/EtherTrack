@@ -14,11 +14,11 @@
 //     versions of the same email (e.g. KYC approved, mint success) render identically.
 'use strict';
 
-const { send, sendEmail, enqueueEmail, startEmailWorker, getQueueStats, generateOTP } = require('./mailer');
+const { send, sendEmail, enqueueEmail, startEmailWorker, getQueueStats, generateOTP, verifyUnsubscribeToken } = require('./mailer');
 
 module.exports = {
   // low-level
-  send, sendEmail, enqueueEmail, startEmailWorker, getQueueStats, generateOTP,
+  send, sendEmail, enqueueEmail, startEmailWorker, getQueueStats, generateOTP, verifyUnsubscribeToken,
 
   // ── Auth / account (support@) ────────────────────────────────────────────
   sendVerificationEmail: (to, { name, otp }) => send('verify-account', to, { name, otp }),

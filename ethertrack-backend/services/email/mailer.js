@@ -13,6 +13,43 @@ const logger = require('../logger'); // adjust path to your real logger if diffe
 
 const { FROM, TEMPLATE_CATEGORY, IMMEDIATE_TEMPLATES } = require('./config');
 const { TEMPLATES } = require('./templates');
+const { safeQuery: dbQuery } = require('../../db/pool');
+
+// ── Unsubscribe (informational emails only — never for security/transactional) ─
+// Templates here are the ONLY ones a user can opt out of. Everything else
+// (KYC, security, money movement, approvals) is transactional and always
+// sends — Gmail/Yahoo's one-click-unsubscribe rules explicitly exempt
+// transactional mail, and a user shouldn't be able to "opt out" of knowing
+// their withdrawal failed.
+const INFORMATIONAL_TEMPLATES = new Set([
+  'platform-announcement',
+]);
+
+const UNSUB_SECRET = process.env.UNSUBSCRIBE_SECRET || process.env.JWT_SECRET || 'change-me-unsubscribe-secret';
+if (!process.env.UNSUBSCRIBE_SECRET && !process.env.JWT_SECRET) {
+  console.warn('[email] UNSUBSCRIBE_SECRET not set — falling back to a default. Set this in production.');
+}
+
+const generateUnsubscribeToken = (email) =>
+  crypto.createHmac('sha256', UNSUB_SECRET).update(email.toLowerCase()).digest('hex').slice(0, 32);
+
+const verifyUnsubscribeToken = (email, token) =>
+  generateUnsubscribeToken(email) === token;
+
+const buildUnsubscribeUrl = (email) => {
+  const token = generateUnsubscribeToken(email);
+  return `${process.env.BACKEND_URL || process.env.FRONTEND_URL}/api/unsubscribe?email=${encodeURIComponent(email)}&token=${token}`;
+};
+
+const isUnsubscribed = async (email) => {
+  try {
+    const { rows } = await dbQuery('SELECT marketing_emails_enabled FROM users WHERE email=$1', [email]);
+    return rows[0]?.marketing_emails_enabled === false;
+  } catch (e) {
+    console.warn('[email] preference check failed, sending anyway:', e.message);
+    return false; // fail open — don't block a send over a DB hiccup
+  }
+};
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
@@ -91,11 +128,23 @@ const htmlToText = (html) => html
 //      compat sendEmail() shim used by call sites not yet migrated to templates
 const sendNow = async (job) => {
   let subject, html, category;
+  const isInformational = job.template && INFORMATIONAL_TEMPLATES.has(job.template);
+
+  if (isInformational) {
+    const skip = await isUnsubscribed(job.to);
+    if (skip) {
+      logger.info({ template: job.template, to: maskEmail(job.to) }, 'email.skipped_unsubscribed');
+      return;
+    }
+  }
 
   if (job.template) {
     const tmplFn = TEMPLATES[job.template];
     if (!tmplFn) throw new Error(`Unknown email template: ${job.template}`);
-    ({ subject, html } = tmplFn(job.data || {}));
+    const data = isInformational
+      ? { ...job.data, unsubscribeUrl: buildUnsubscribeUrl(job.to) }
+      : job.data;
+    ({ subject, html } = tmplFn(data || {}));
     category = TEMPLATE_CATEGORY[job.template] || 'support';
   } else {
     subject = job.subject;
@@ -105,6 +154,14 @@ const sendNow = async (job) => {
 
   const payload = { from: FROM[category] || FROM.support, to: job.to, subject, html, text: htmlToText(html) };
   if (job.attachments?.length) payload.attachments = buildAttachments(job.attachments);
+
+  if (isInformational) {
+    const unsubUrl = buildUnsubscribeUrl(job.to);
+    payload.headers = {
+      'List-Unsubscribe': `<${unsubUrl}>`,
+      'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+    };
+  }
 
   const { error } = await resend.emails.send(payload);
   if (error) throw new Error(typeof error === 'string' ? error : JSON.stringify(error));
@@ -228,4 +285,5 @@ process.on('SIGINT', saveJournal);
 module.exports = {
   send, enqueueEmail, sendEmail,
   startEmailWorker, getQueueStats, generateOTP,
+  verifyUnsubscribeToken, INFORMATIONAL_TEMPLATES,
 };

@@ -77,7 +77,14 @@ if (process.env.NODE_ENV === 'development') {
   });
 }
 
-const API              = process.env.REACT_APP_API_URL || '';
+// [FIX-DASHBOARD-MARKET-EMPTY] Was falling back to '' (relative/same-origin
+// path) when REACT_APP_API_URL isn't set, while useMarket.js (used by the
+// actual buy/market page) falls back to 'http://localhost:5000'. In local
+// dev without the env var set, this file's public listings fetch would hit
+// the wrong origin and silently return nothing while the market page (using
+// the other fallback) worked fine. Aligned to the same fallback so both
+// hooks always agree on where the backend lives.
+const API              = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 const SEPOLIA_CHAIN_ID = '0xaa36a7';
 
 // ── ETH rate cache — module-level singleton ───────────────────────
@@ -422,6 +429,12 @@ export function PortfolioProvider({ children }) {
   const listenersRef        = useRef([]);
   const mountedRef          = useRef(true);
   const loadCreditsAbortRef = useRef(null);
+  // [FIX-DASHBOARD-MARKET-EMPTY] Set to true once on-chain listings load
+  // successfully (richer data than the public REST fetch). Guards the
+  // polling public fetch below from overwriting fresher on-chain listings
+  // with stale REST data every 30s — mirrors useMarket.js's `chainLoaded`.
+  const chainListingsLoadedRef = useRef(false);
+  const listingsPollRef        = useRef(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -513,7 +526,12 @@ export function PortfolioProvider({ children }) {
         })
         .filter(l => l.expiresAt > nowSec && l.amount > 0);
 
-      safeSet(setListings)(mapped);
+      // [FIX-DASHBOARD-MARKET-EMPTY] Don't let a stale/slower public-REST
+      // poll overwrite fresher on-chain listings once wallet+contracts have
+      // loaded successfully — mirrors useMarket.js's chainLoaded guard.
+      if (!chainListingsLoadedRef.current) {
+        safeSet(setListings)(mapped);
+      }
     } catch (e) {
       console.warn('[EtherTrack] API listings load failed:', e.message);
     } finally {
@@ -796,13 +814,34 @@ export function PortfolioProvider({ children }) {
   }, [safeSet, refreshBoughtCredits, refreshTradeHistory]);
 
   // ── [FIX-3] Mount effect — load trade history on startup ──────
+  // [FIX-DASHBOARD-MARKET-EMPTY] loadListingsFromAPI() (public REST, no
+  // wallet needed) was previously only ever reached indirectly through
+  // wallet-connected code paths (init()'s loadListings(c), or on-chain
+  // event handlers). If a user hadn't connected a wallet — or the wallet
+  // wasn't on Sepolia / connection failed — `listings` stayed `[]` forever,
+  // so the Dashboard's MarketCard showed "Be the first to list credits"
+  // even though the actual marketplace page (CarbonCredits.js, via the
+  // separate useMarket.js hook) fetches this exact same public endpoint
+  // unconditionally on mount and shows listings fine. Now this file does
+  // the same: fetch publicly right away, and poll every 30s to stay fresh,
+  // mirroring useMarket.js's fetchPublic()/POLL_MS pattern. The
+  // chainListingsLoadedRef guard (set in loadListings on-chain success)
+  // stops this poll from clobbering richer on-chain data once a wallet
+  // connects.
   useEffect(() => {
     init();
+    loadListingsFromAPI();
     refreshBoughtCredits();
     refreshTradeHistory();   // load trade history from DB on mount
     fetchMyRetirements().then(safeSet(setMyRetirements));
 
-    if (!window.ethereum) return;
+    listingsPollRef.current = setInterval(() => {
+      if (!chainListingsLoadedRef.current) loadListingsFromAPI();
+    }, 30_000);
+
+    if (!window.ethereum) {
+      return () => { if (listingsPollRef.current) clearInterval(listingsPollRef.current); };
+    }
 
     const handleAccountsChanged = () => { cleanupListeners(); init(); };
     const handleChainChanged    = () => { cleanupListeners(); init(); };
@@ -812,6 +851,7 @@ export function PortfolioProvider({ children }) {
 
     return () => {
       cleanupListeners();
+      if (listingsPollRef.current) clearInterval(listingsPollRef.current);
       window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
       window.ethereum.removeListener('chainChanged',    handleChainChanged);
     };
@@ -1056,8 +1096,14 @@ export function PortfolioProvider({ children }) {
         .filter(l => l.active && l.expiresAt > nowSec && l.amount > 0);
 
       safeSet(setListings)(valid);
+      // [FIX-DASHBOARD-MARKET-EMPTY] On-chain listings loaded successfully —
+      // stop the public-REST poll from overwriting this with (potentially
+      // stale) REST data on its next tick.
+      chainListingsLoadedRef.current = true;
     } catch (e) {
       console.error('[loadListings on-chain]', e);
+      // On-chain load failed — allow REST data through again.
+      chainListingsLoadedRef.current = false;
       await loadListingsFromAPI();
     } finally {
       safeSet(setLoading)(l => ({ ...l, listings: false }));

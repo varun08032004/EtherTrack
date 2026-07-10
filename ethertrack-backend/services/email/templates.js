@@ -4,10 +4,14 @@
 // invoice.js/etc.) already computes — minimal rewiring needed at call sites.
 'use strict';
 
-// Hosted logo. Defaults to your existing live site logo (ethertrack.in/logo.png)
-// so it works out of the box — override with EMAIL_LOGO_URL if you want a
-// different (e.g. transparent-background) version for dark email headers.
-const LOGO_URL = process.env.EMAIL_LOGO_URL || 'https://ethertrack.in/logo.png';
+// Hosted logo — served directly from THIS backend (server.js mounts
+// /public-assets as a static folder), not the frontend. This avoids any
+// dependency on frontend deploy state, CORS, or hotlink protection.
+// Set BACKEND_URL in your env (e.g. https://ethertrack-backend.onrender.com
+// or https://api.ethertrack.in if you have a custom domain for the API).
+// EMAIL_LOGO_URL still overrides this entirely if you ever want a different image.
+const LOGO_URL = process.env.EMAIL_LOGO_URL
+  || (process.env.BACKEND_URL ? `${process.env.BACKEND_URL}/public-assets/logo.png` : '');
 
 const LEGAL_FOOTER = 'EtherTrack Technologies Private Limited · Carbon Credit Exchange · Do not reply to this email';
 
@@ -311,13 +315,16 @@ const TEMPLATES = {
     }),
   }),
 
-  'platform-announcement': ({ name, subject, message }) => ({
+  'platform-announcement': ({ name, subject, message, unsubscribeUrl }) => ({
     subject: `EtherTrack — ${subject}`,
     html: layout({
       eyebrow: 'ANNOUNCEMENT', title: '📢 Platform Announcement', titleColor: '#f59e0b',
       bodyHtml: `
         <p style="margin:0 0 16px">Hi ${name || 'there'},</p>
         ${warnBox(message, '#f59e0b')}`,
+      footer: unsubscribeUrl
+        ? `${LEGAL_FOOTER} · <a href="${unsubscribeUrl}" style="color:#6ee7b799">Unsubscribe from announcements</a>`
+        : LEGAL_FOOTER,
     }),
   }),
 

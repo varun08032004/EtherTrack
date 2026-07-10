@@ -146,6 +146,7 @@ const cctsRoutes        = require('./routes/ccts');
 const alertRoutes       = require('./routes/alerts');
 const newsRoutes        = require('./routes/news');
 const supportRoutes     = require('./routes/support');
+const unsubscribeRoutes = require('./routes/unsubscribe');
 const orgRoutes                     = require('./routes/org');
 const { checkSubscriptionExpiries } = require('./routes/org');
 const { router: notificationRoutes }= require('./routes/notifications');
@@ -321,6 +322,13 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
   maxAge: '1d', etag: true, dotfiles: 'deny',
 }));
 
+// Serves the transparent EtherTrack logo used in transactional emails.
+// Hosted here (not from the frontend) so it works regardless of frontend
+// deploy state, CORS, or hotlink protection.
+app.use('/public-assets', express.static(path.join(__dirname, 'public-assets'), {
+  maxAge: '7d', etag: true, dotfiles: 'deny',
+}));
+
 const limiter = (windowMs, max, message) =>
   rateLimit({ windowMs, max, message: { error: message }, standardHeaders: true, legacyHeaders: false });
 
@@ -409,6 +417,7 @@ app.use('/api/auth',          authRoutes);
 app.use('/api/wallet',        walletRoutes);
 app.use('/api/user',          userRoutes);
 app.use('/api/support',       supportRoutes);
+app.use('/api/unsubscribe',   unsubscribeRoutes);
 app.use('/api/org',           orgRoutes);
 app.use('/api/kyc',           kycRoutes);
 app.use('/api/notifications', notificationRoutes);
