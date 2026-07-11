@@ -61,6 +61,7 @@ const NAV_GROUPS = [
     id: 'finance', label: 'Finance & Legal', icon: '💰',
     tabs: [
       { id: 'revenue',    label: 'Revenue',    icon: '💰' },
+      { id: 'subscriptions', label: 'Subscriptions', icon: '📊' },
       { id: 'compliance', label: 'Compliance', icon: '🛡', critBadge: true },
       { id: 'corporate',  label: 'Corporate',  icon: '🏢', badgeKey: 'corporateAccounts', badgeColor: 'amber' },
     ],
@@ -267,6 +268,7 @@ export default function AdminDashboard() {
   const [blacklist, setBlacklist]             = useState([]);
   const [announcements, setAnnouncements]     = useState([]);
   const [revenue, setRevenue]                 = useState(null);
+  const [subStats, setSubStats]                = useState(null);
   const [health, setHealth]                   = useState(null);
   const [projects, setProjects]               = useState([]);
 
@@ -288,6 +290,7 @@ export default function AdminDashboard() {
   const [userSearch, setUserSearch]           = useState('');
   const [userFilter, setUserFilter]           = useState('');
   const [revPeriod, setRevPeriod]             = useState('30');
+  const [exportPeriod, setExportPeriod]       = useState('this_month');
   const [retSearch, setRetSearch]             = useState('');
   const [retResults, setRetResults]           = useState(null);
 
@@ -398,12 +401,13 @@ export default function AdminDashboard() {
   const loadListings      = useCallback(async () => { setLoading(true); try { const d = await api('/api/admin/listings'); setListings(d?.listings ?? []); } catch {} finally { setLoading(false); } }, []);
   const loadBuyOrders     = useCallback(async (status = 'open') => { setLoading(true); try { const d = await api(`/api/admin/buy-orders?status=${status}`); setBuyOrders(d?.orders ?? []); } catch {} finally { setLoading(false); } }, []);
   const loadTrades        = useCallback(async (status = 'completed') => { setLoading(true); try { const d = await api(`/api/admin/trades?status=${status}&limit=100`); setTrades(d?.trades ?? []); } catch {} finally { setLoading(false); } }, []);
-  const loadUsers         = useCallback(async () => { setLoading(true); try { const p = new URLSearchParams(); if (userSearch) p.set('search', userSearch); if (userFilter) p.set('status', userFilter); const d = await api(`/api/admin/users?${p}`); setUsers(d?.users ?? []); } catch {} finally { setLoading(false); } }, [userSearch, userFilter]);
+  const loadUsers         = useCallback(async (filterOverride) => { setLoading(true); try { const f = filterOverride !== undefined ? filterOverride : userFilter; const p = new URLSearchParams(); if (userSearch) p.set('search', userSearch); if (f) p.set('status', f); const d = await api(`/api/admin/users?${p}`); setUsers(d?.users ?? []); } catch {} finally { setLoading(false); } }, [userSearch, userFilter]);
   const loadDisputes      = useCallback(async () => { setLoading(true); try { const d = await api('/api/admin/disputes'); setDisputes(d?.disputes ?? []); } catch {} finally { setLoading(false); } }, []);
   const loadAudit         = useCallback(async () => { setLoading(true); try { const d = await api('/api/admin/audit'); setAudit(d?.logs ?? []); } catch {} finally { setLoading(false); } }, []);
   const loadBlacklist     = useCallback(async () => { setLoading(true); try { const d = await api('/api/admin/serials/blacklist'); setBlacklist(d?.blacklist ?? []); } catch {} finally { setLoading(false); } }, []);
   const loadAnnouncements = useCallback(async () => { try { const d = await api('/api/admin/announcements'); setAnnouncements(d?.announcements ?? []); } catch {} }, []);
   const loadRevenue       = useCallback(async (p = '30') => { setLoading(true); try { const d = await api(`/api/admin/revenue?period=${p}`); setRevenue(d); } catch {} finally { setLoading(false); } }, []);
+  const loadSubStats      = useCallback(async () => { setLoading(true); try { const d = await api('/api/admin/subscriptions/stats'); setSubStats(d); } catch {} finally { setLoading(false); } }, []);
   const loadHealth        = useCallback(async () => { setHealthLoading(true); try { const d = await api('/api/admin/health/onchain'); setHealth(d); } catch {} finally { setHealthLoading(false); } }, []);
   const loadProjects      = useCallback(async () => { setLoading(true); try { const d = await api('/api/admin/projects'); setProjects(d?.projects ?? []); } catch {} finally { setLoading(false); } }, []);
   const loadKycExpiry     = useCallback(async () => { try { const d = await api('/api/admin/kyc-expiring'); setKycExpiring(d?.users ?? []); } catch {} }, []);
@@ -438,6 +442,7 @@ export default function AdminDashboard() {
     if (tab === 'accounts')      { loadUsers(); loadKycExpiry(); }
     if (tab === 'projects')      loadProjects();
     if (tab === 'revenue')       loadRevenue(revPeriod);
+    if (tab === 'subscriptions') loadSubStats();
     if (tab === 'health')        loadHealth();
     if (tab === 'blacklist')     loadBlacklist();
     if (tab === 'announcements') loadAnnouncements();
@@ -567,6 +572,55 @@ export default function AdminDashboard() {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+    } catch (e) {
+      toast_(`❌ Export failed: ${e.message}`, 4000, 'error');
+    }
+  };
+
+  // Turns a preset key into concrete from/to dates (YYYY-MM-DD) for the export endpoint.
+  const exportDateRange = (preset) => {
+    const now = new Date();
+    const to = now.toISOString().slice(0, 10);
+    let from;
+    if (preset === 'this_month') {
+      from = new Date(now.getFullYear(), now.getMonth(), 1);
+    } else if (preset === 'last_3_months') {
+      from = new Date(now.getFullYear(), now.getMonth() - 3, now.getDate());
+    } else if (preset === 'last_6_months') {
+      from = new Date(now.getFullYear(), now.getMonth() - 6, now.getDate());
+    } else if (preset === 'this_year') {
+      from = new Date(now.getFullYear(), 0, 1);
+    } else if (preset === 'last_12_months') {
+      from = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate());
+    } else {
+      return { from: null, to: null }; // 'all_time' — omit params entirely
+    }
+    return { from: from.toISOString().slice(0, 10), to };
+  };
+
+  const handleFinanceExport = async (type, period = 'all_time') => {
+    try {
+      const base = process.env.REACT_APP_API_URL || '';
+      const { from, to } = exportDateRange(period);
+      const params = new URLSearchParams({ type });
+      if (from) params.set('from', from);
+      if (to)   params.set('to', to);
+      const res  = await fetch(`${base}/api/admin/finance/export?${params}`, {
+        method: 'GET', credentials: 'include',
+      });
+      if (res.status === 401) { toast_('❌ Session expired — please log in again', 4000, 'error'); return; }
+      if (res.status === 403) { toast_('❌ Not authorised', 3000, 'error'); return; }
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = `ethertrack_${type}_${period}_${Date.now()}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast_(`✅ ${type} export downloaded`, 2500, 'success');
     } catch (e) {
       toast_(`❌ Export failed: ${e.message}`, 4000, 'error');
     }
@@ -704,7 +758,7 @@ export default function AdminDashboard() {
           <div style={S.card}>
             <SecHead>QUICK JUMP</SecHead>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              {[['KYC Queue','kyc'],['Credits','credits'],['Buy Orders','buyorders'],['Trades','trades'],['Retirements','retirements'],['Accounts','accounts'],['Revenue','revenue'],['Chain Health','health'],['Compliance','compliance'],['Corporate','corporate'],['Support','support']].map(([l,t]) => (
+              {[['KYC Queue','kyc'],['Credits','credits'],['Buy Orders','buyorders'],['Trades','trades'],['Retirements','retirements'],['Accounts','accounts'],['Revenue','revenue'],['Subscriptions','subscriptions'],['Chain Health','health'],['Compliance','compliance'],['Corporate','corporate'],['Support','support']].map(([l,t]) => (
                 <button key={t} style={S.quickBtn} onClick={() => setTab(t)}>{l} →</button>
               ))}
             </div>
@@ -715,7 +769,7 @@ export default function AdminDashboard() {
         {tab === 'kyc' && (
           <div>
             <div style={S.toolbar}>
-              <FilterRow options={['pending','approved','rejected']} value={kycFilter} onChange={v => { setKycFilter(v); }} />
+              <FilterRow options={['pending','approved','rejected']} value={kycFilter} onChange={v => { setKycFilter(v); loadKYC(v); }} />
               {selectedKycIds.length > 0 && (
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                   <select style={{ ...S.input, width: 90, padding: '5px 8px' }} value={kycTier} onChange={e => setKycTier(e.target.value)}>
@@ -757,7 +811,7 @@ export default function AdminDashboard() {
         {tab === 'credits' && (
           <div>
             <div style={S.toolbar}>
-              <FilterRow options={['pending','approved','rejected']} value={creditFilter} onChange={setCreditFilter} />
+              <FilterRow options={['pending','approved','rejected']} value={creditFilter} onChange={v => { setCreditFilter(v); loadCredits(v); }} />
               {failedMints.length > 0 && (
                 <button style={{ ...S.actReject, padding: '6px 12px', fontSize: 10 }} onClick={retryAllMints} disabled={retryingAll}>
                   {retryingAll ? 'RETRYING...' : `⚠ RETRY ${failedMints.length} FAILED`}
@@ -946,7 +1000,7 @@ export default function AdminDashboard() {
             )}
             <div style={S.toolbar}>
               <input style={{ ...S.input, flex: 1, minWidth: 200 }} placeholder="Search name or email..." value={userSearch} onChange={e => setUserSearch(e.target.value)} onKeyDown={e => e.key === 'Enter' && loadUsers()} />
-              <FilterRow options={[{value:'',label:'All'},{value:'frozen',label:'Frozen'},{value:'verified',label:'Verified'},{value:'pending',label:'Pending'}]} value={userFilter} onChange={setUserFilter} />
+              <FilterRow options={[{value:'',label:'All'},{value:'frozen',label:'Frozen'},{value:'verified',label:'Verified'},{value:'pending',label:'Pending'}]} value={userFilter} onChange={v => { setUserFilter(v); loadUsers(v); }} />
             </div>
             {loading ? <div style={S.loading}>Loading...</div> : (
               <div style={S.table}>
@@ -1193,6 +1247,23 @@ export default function AdminDashboard() {
             <div style={S.toolbar}>
               <FilterRow options={[{value:'7',label:'7D'},{value:'30',label:'30D'},{value:'90',label:'90D'},{value:'365',label:'1Y'}]} value={revPeriod} onChange={p => { setRevPeriod(p); loadRevenue(p); }} />
             </div>
+            <div style={{ ...S.toolbar, marginTop: -8 }}>
+              <FilterRow
+                options={[
+                  { value: 'this_month', label: 'This Month' },
+                  { value: 'last_3_months', label: '3 Months' },
+                  { value: 'last_6_months', label: '6 Months' },
+                  { value: 'this_year', label: 'This Year' },
+                  { value: 'last_12_months', label: '1 Year' },
+                  { value: 'all_time', label: 'All Time' },
+                ]}
+                value={exportPeriod}
+                onChange={setExportPeriod}
+              />
+              <button style={{ ...S.quickBtn, borderColor: '#22c55e44', color: '#22c55e' }} onClick={() => handleFinanceExport('subscriptions', exportPeriod)}>↓ EXPORT SUBSCRIPTIONS CSV</button>
+              <button style={{ ...S.quickBtn, borderColor: '#60a5fa44', color: '#60a5fa' }} onClick={() => handleFinanceExport('trades', exportPeriod)}>↓ EXPORT TRADE FEES CSV</button>
+              <button style={{ ...S.quickBtn, borderColor: '#f59e0b44', color: '#f59e0b' }} onClick={() => handleFinanceExport('combined', exportPeriod)}>↓ EXPORT COMBINED CSV</button>
+            </div>
             {loading || !revenue ? <div style={S.loading}>Loading...</div> : <>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(140px,1fr))', gap: 10, marginBottom: 16 }}>
                 {[{ l: `FEES(${revPeriod}D)`, v: fmtINR(revenue.summary?.period_fees_inr), c: '#22c55e' }, { l: 'TOTAL FEES', v: fmtINR(revenue.summary?.total_fees_inr), c: '#22c55e' }, { l: 'VOLUME', v: fmtINR(revenue.summary?.total_volume_inr), c: '#60a5fa' }, { l: 'CREDITS TRADED', v: `${parseInt(revenue.summary?.total_credits_traded || 0).toLocaleString()}t`, c: '#f59e0b' }, { l: 'TOTAL TRADES', v: revenue.summary?.total_trades || 0, c: '#a78bfa' }, { l: `ACTIVE USERS(${revPeriod}D)`, v: revenue.activeUsers || 0, c: '#34d399' }].map(({ l, v, c }) => (
@@ -1206,6 +1277,73 @@ export default function AdminDashboard() {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                 <div style={S.card}><SecHead>TOP 10 TRADERS</SecHead>{(revenue.topTraders || []).map((t, i) => <div key={t.email} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0', borderBottom: '1px solid #f59e0b08' }}><div><span style={{ fontSize: 8, color: '#f59e0b44', marginRight: 5 }}>#{i + 1}</span><span style={{ fontSize: 11, color: '#f0fdf4' }}>{t.full_name || t.email}</span><div style={{ fontSize: 8, color: '#f59e0b44' }}>{t.trade_count} trades</div></div><div style={{ fontSize: 11, color: '#22c55e' }}>{fmtINR(t.volume_inr)}</div></div>)}</div>
                 <div style={S.card}><SecHead>CREDITS BY STANDARD</SecHead>{(revenue.creditsByStandard || []).map(s => <div key={s.standard} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0', borderBottom: '1px solid #f59e0b08' }}><div><StatusBadge status={s.standard} /><span style={{ fontSize: 8, color: '#f59e0b44', marginLeft: 5 }}>{s.batches} batches</span></div><div style={{ fontSize: 11, color: '#f0fdf4' }}>{parseInt(s.total_credits).toLocaleString()}t</div></div>)}</div>
+              </div>
+            </>}
+          </div>
+        )}
+
+        {/* ══ SUBSCRIPTIONS ══ */}
+        {tab === 'subscriptions' && (
+          <div>
+            <div style={S.toolbar}>
+              <button style={S.quickBtn} onClick={loadSubStats} disabled={loading}>{loading ? '⟳ Loading...' : '↻ REFRESH'}</button>
+            </div>
+            {loading || !subStats ? <div style={S.loading}>Loading...</div> : <>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(140px,1fr))', gap: 10, marginBottom: 16 }}>
+                {[
+                  { l: 'ACTIVE PAID SUBS', v: subStats.totalActivePaid, c: '#22c55e' },
+                  { l: 'FREE USERS', v: subStats.freeUsers, c: '#60a5fa' },
+                  { l: 'CURRENT MRR', v: fmtINR(subStats.currentMRRInINR), c: '#22c55e' },
+                  { l: 'CANCELLED (ALL TIME)', v: subStats.cancelledTotal, c: '#f87171' },
+                  { l: 'ALL-TIME SUB REVENUE', v: fmtINR(subStats.allTimeSubscriptionRevenueINR), c: '#f59e0b' },
+                  { l: 'ALL-TIME PAYMENTS', v: subStats.allTimePayments, c: '#a78bfa' },
+                ].map(({ l, v, c }) => (
+                  <div key={l} style={S.statCard}><div style={{ fontSize: 18, fontWeight: 700, color: c, marginBottom: 2 }}>{v}</div><div style={{ fontSize: 8, color: '#f59e0bcc', letterSpacing: '.1em' }}>{l}</div></div>
+                ))}
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+                <div style={S.card}>
+                  <SecHead>ACTIVE SUBSCRIBERS BY TIER</SecHead>
+                  {(subStats.byTier || []).length === 0 && <div style={{ fontSize: 10, color: '#f59e0b66', padding: '8px 0' }}>No active paid subscribers yet</div>}
+                  {(subStats.byTier || []).map(t => (
+                    <div key={`${t.plan}-${t.cycle}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid #f59e0b08' }}>
+                      <div>
+                        <span style={{ fontSize: 11, color: '#f0fdf4', fontWeight: 700 }}>{(t.plan || '').toUpperCase()}</span>
+                        <span style={{ fontSize: 8, color: '#f59e0b66', marginLeft: 6 }}>{t.cycle}</span>
+                        <div style={{ fontSize: 8, color: '#f59e0b44' }}>{t.activeCount} subscriber{t.activeCount === 1 ? '' : 's'}</div>
+                      </div>
+                      <div style={{ fontSize: 11, color: '#22c55e' }}>{fmtINR(t.mrrINR)}/mo</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={S.card}>
+                  <SecHead>CANCELLATIONS BY MONTH</SecHead>
+                  {(subStats.cancelledByMonth || []).length === 0 && <div style={{ fontSize: 10, color: '#f59e0b66', padding: '8px 0' }}>No cancellations recorded</div>}
+                  {(subStats.cancelledByMonth || []).map(m => (
+                    <div key={m.month} style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: '1px solid #f59e0b08' }}>
+                      <span style={{ fontSize: 10, color: '#f59e0bcc' }}>{m.month}</span>
+                      <span style={{ fontSize: 10, color: '#f87171' }}>{m.count} cancelled</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div style={S.card}>
+                <SecHead>SUBSCRIPTION REVENUE BY MONTH</SecHead>
+                {(subStats.revenueByMonth || []).length === 0 && <div style={{ fontSize: 10, color: '#f59e0b66', padding: '8px 0' }}>No payments recorded yet</div>}
+                {(subStats.revenueByMonth || []).map((m, i) => (
+                  <div key={`${m.month}-${m.plan}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0', borderBottom: '1px solid #f59e0b08' }}>
+                    <div>
+                      <span style={{ fontSize: 10, color: '#f59e0bcc' }}>{m.month}</span>
+                      <span style={{ fontSize: 8, padding: '2px 6px', borderRadius: 3, background: '#f59e0b11', color: '#f59e0bcc', marginLeft: 8 }}>{(m.plan || '').toUpperCase()}</span>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontSize: 10, color: '#22c55e' }}>{fmtINR(m.revenueINR)}</div>
+                      <div style={{ fontSize: 8, color: '#f59e0b44' }}>{m.payments} payment{m.payments === 1 ? '' : 's'}</div>
+                    </div>
+                  </div>
+                ))}
               </div>
             </>}
           </div>

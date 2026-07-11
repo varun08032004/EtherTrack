@@ -1111,6 +1111,187 @@ router.post('/listings/:listingId/override-price', isAdmin, async (req, res) => 
 });
 
 // ── Revenue ───────────────────────────────────────────────────────
+// ── Subscription analytics (active/cancelled counts, tier breakdown, MRR, revenue by month) ──
+router.get('/subscriptions/stats', isAdmin, async (req, res) => {
+  try {
+    const [byTier, freeCount, cancelledByMonth, cancelledTotal, revenueByMonth, allTimeRevenue] = await Promise.all([
+      // Active paid subscribers by plan+cycle, with MRR normalized from each user's
+      // actual last-paid amount (not a hardcoded price — this naturally handles
+      // Corporate's custom per-deal pricing with zero special-casing).
+      query(`
+        WITH latest_payment AS (
+          SELECT DISTINCT ON (user_id) user_id, total_amount_paise
+          FROM subscription_payments
+          WHERE status = 'success'
+          ORDER BY user_id, created_at DESC
+        )
+        SELECT
+          u.subscription_plan  AS plan,
+          u.subscription_cycle AS cycle,
+          COUNT(*)::int AS active_count,
+          COALESCE(SUM(
+            CASE WHEN u.subscription_cycle = 'annual' THEN lp.total_amount_paise / 12.0
+                 ELSE lp.total_amount_paise END
+          ), 0)::bigint AS mrr_paise
+        FROM users u
+        LEFT JOIN latest_payment lp ON lp.user_id = u.id
+        WHERE u.subscription_plan != 'free' AND u.plan_selected = TRUE
+          AND (u.subscription_renewal_date IS NULL OR u.subscription_renewal_date > NOW())
+        GROUP BY u.subscription_plan, u.subscription_cycle
+        ORDER BY u.subscription_plan
+      `),
+      query(`SELECT COUNT(*)::int AS count FROM users WHERE subscription_plan = 'free' OR plan_selected = FALSE`),
+      // "Cancelled" = a subscription_history row where a paid plan was downgraded to free.
+      // First-time free selection (from_plan IS NULL) is NOT counted as a cancellation.
+      query(`
+        SELECT TO_CHAR(DATE_TRUNC('month', created_at), 'Mon YYYY') AS month, COUNT(*)::int AS count
+        FROM subscription_history
+        WHERE to_plan = 'free' AND from_plan IS NOT NULL AND from_plan != 'free'
+          AND created_at > NOW() - INTERVAL '12 months'
+        GROUP BY DATE_TRUNC('month', created_at)
+        ORDER BY DATE_TRUNC('month', created_at) DESC
+      `),
+      query(`
+        SELECT COUNT(*)::int AS count FROM subscription_history
+        WHERE to_plan = 'free' AND from_plan IS NOT NULL AND from_plan != 'free'
+      `),
+      query(`
+        SELECT TO_CHAR(DATE_TRUNC('month', created_at), 'Mon YYYY') AS month,
+               plan, COUNT(*)::int AS payments,
+               COALESCE(SUM(total_amount_paise), 0)::bigint AS revenue_paise
+        FROM subscription_payments
+        WHERE status = 'success' AND created_at > NOW() - INTERVAL '12 months'
+        GROUP BY DATE_TRUNC('month', created_at), plan
+        ORDER BY DATE_TRUNC('month', created_at) DESC
+      `),
+      query(`SELECT COALESCE(SUM(total_amount_paise), 0)::bigint AS total_paise, COUNT(*)::int AS total_payments FROM subscription_payments WHERE status = 'success'`),
+    ]);
+
+    const toINR = (paise) => Math.round(Number(paise) / 100);
+
+    res.json({
+      byTier: byTier.rows.map(r => ({ plan: r.plan, cycle: r.cycle, activeCount: r.active_count, mrrINR: toINR(r.mrr_paise) })),
+      totalActivePaid: byTier.rows.reduce((sum, r) => sum + r.active_count, 0),
+      freeUsers: freeCount.rows[0].count,
+      currentMRRInINR: toINR(byTier.rows.reduce((sum, r) => sum + Number(r.mrr_paise), 0)),
+      cancelledTotal: cancelledTotal.rows[0].count,
+      cancelledByMonth: cancelledByMonth.rows,
+      revenueByMonth: revenueByMonth.rows.map(r => ({ month: r.month, plan: r.plan, payments: r.payments, revenueINR: toINR(r.revenue_paise) })),
+      allTimeSubscriptionRevenueINR: toINR(allTimeRevenue.rows[0].total_paise),
+      allTimePayments: allTimeRevenue.rows[0].total_payments,
+    });
+  } catch (e) {
+    console.error('[admin/subscriptions/stats]', e.message);
+    res.status(500).json({ error: 'Failed to fetch subscription stats' });
+  }
+});
+
+// ── Finance export (CSV) — trades fees / subscription revenue / combined ──
+// For ERP injection. type=trades|subscriptions|combined. Optional from/to
+// query params (YYYY-MM-DD) to scope the date range, defaults to all-time.
+router.get('/finance/export', isAdmin, async (req, res) => {
+  const type = ['trades', 'subscriptions', 'combined'].includes(req.query.type) ? req.query.type : 'combined';
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || '') ? req.query.from : '2000-01-01';
+  const to   = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to   || '') ? req.query.to   : '2100-01-01';
+
+  const csvCell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+
+  try {
+    if (type === 'trades') {
+      const { rows } = await query(
+        `SELECT t.created_at, t.id AS trade_id, bu.email AS buyer_email, su.email AS seller_email,
+                cb.project_name, t.quantity, t.subtotal_inr, pf.buyer_fee_inr, pf.seller_fee_inr,
+                pf.total_fee_inr, pf.gst_inr, pf.gst_type, pf.cgst_inr, pf.sgst_inr, pf.igst_inr,
+                pf.platform_net_inr, pf.payment_mode
+         FROM trades t
+         JOIN platform_fees pf ON pf.trade_id = t.id
+         LEFT JOIN users bu ON bu.id = t.buyer_id
+         LEFT JOIN users su ON su.id = t.seller_id
+         LEFT JOIN carbon_batches cb ON cb.id = t.batch_id
+         WHERE t.status = 'completed' AND t.created_at::date BETWEEN $1 AND $2
+         ORDER BY t.created_at DESC`,
+        [from, to]
+      );
+      const headers = ['DATE','TRADE ID','BUYER','SELLER','PROJECT','QUANTITY (tCO2)','SUBTOTAL (INR)','BUYER FEE (INR)','SELLER FEE (INR)','TOTAL FEE (INR)','GST TYPE','CGST (INR)','SGST (INR)','IGST (INR)','TOTAL GST (INR)','PLATFORM NET (INR)','PAYMENT MODE'];
+      const csvRows = rows.map(r => [
+        new Date(r.created_at).toISOString(), r.trade_id, r.buyer_email, r.seller_email, r.project_name,
+        r.quantity, r.subtotal_inr, r.buyer_fee_inr, r.seller_fee_inr, r.total_fee_inr,
+        r.gst_type || 'cgst_sgst (assumed — pre-migration record)', r.cgst_inr || 0, r.sgst_inr || 0, r.igst_inr || 0, r.gst_inr, r.platform_net_inr, r.payment_mode,
+      ].map(csvCell).join(','));
+      const csv = [headers.join(','), ...csvRows].join('\n');
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="ethertrack_trade_fees_${Date.now()}.csv"`);
+      res.setHeader('Cache-Control', 'no-store');
+      return res.send(csv);
+    }
+
+    if (type === 'subscriptions') {
+      const { rows } = await query(
+        `SELECT sp.created_at, sp.id AS payment_id, u.email, sp.plan, sp.cycle,
+                sp.amount_paise, sp.gst_amount_paise, sp.total_amount_paise, sp.pay_method,
+                sp.gst_type, sp.cgst_paise, sp.sgst_paise, sp.igst_paise
+         FROM subscription_payments sp
+         LEFT JOIN users u ON u.id = sp.user_id
+         WHERE sp.status = 'success' AND sp.created_at::date BETWEEN $1 AND $2
+         ORDER BY sp.created_at DESC`,
+        [from, to]
+      );
+      const headers = ['DATE','PAYMENT ID','USER EMAIL','PLAN','CYCLE','AMOUNT (INR)','GST TYPE','CGST (INR)','SGST (INR)','IGST (INR)','TOTAL GST (INR)','TOTAL (INR)','PAYMENT METHOD'];
+      const csvRows = rows.map(r => [
+        new Date(r.created_at).toISOString(), r.payment_id, r.email, r.plan, r.cycle,
+        (r.amount_paise / 100).toFixed(2),
+        r.gst_type || 'cgst_sgst (assumed — pre-migration record)',
+        ((r.cgst_paise || 0) / 100).toFixed(2), ((r.sgst_paise || 0) / 100).toFixed(2), ((r.igst_paise || 0) / 100).toFixed(2),
+        (r.gst_amount_paise / 100).toFixed(2), (r.total_amount_paise / 100).toFixed(2), r.pay_method,
+      ].map(csvCell).join(','));
+      const csv = [headers.join(','), ...csvRows].join('\n');
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="ethertrack_subscription_revenue_${Date.now()}.csv"`);
+      res.setHeader('Cache-Control', 'no-store');
+      return res.send(csv);
+    }
+
+    // combined — unified income ledger: one row per income event, both
+    // sources normalized to the same shape. This is the shape most useful
+    // for a straight ERP ledger import.
+    const [tradeRows, subRows] = await Promise.all([
+      query(
+        `SELECT t.created_at AS date, 'trade_fee' AS source, t.id AS ref_id,
+                pf.total_fee_inr AS amount_inr, pf.gst_inr,
+                CONCAT('Trade #', t.id, ' — ', cb.project_name) AS description
+         FROM trades t
+         JOIN platform_fees pf ON pf.trade_id = t.id
+         LEFT JOIN carbon_batches cb ON cb.id = t.batch_id
+         WHERE t.status = 'completed' AND t.created_at::date BETWEEN $1 AND $2`,
+        [from, to]
+      ),
+      query(
+        `SELECT sp.created_at AS date, 'subscription' AS source, sp.id AS ref_id,
+                (sp.total_amount_paise / 100.0) AS amount_inr, (sp.gst_amount_paise / 100.0) AS gst_inr,
+                CONCAT(u.email, ' — ', sp.plan, ' (', sp.cycle, ')') AS description
+         FROM subscription_payments sp
+         LEFT JOIN users u ON u.id = sp.user_id
+         WHERE sp.status = 'success' AND sp.created_at::date BETWEEN $1 AND $2`,
+        [from, to]
+      ),
+    ]);
+    const combined = [...tradeRows.rows, ...subRows.rows].sort((a, b) => new Date(b.date) - new Date(a.date));
+    const headers = ['DATE','SOURCE','REF ID','AMOUNT (INR)','GST (INR)','DESCRIPTION'];
+    const csvRows = combined.map(r => [
+      new Date(r.date).toISOString(), r.source, r.ref_id, Number(r.amount_inr).toFixed(2), Number(r.gst_inr).toFixed(2), r.description,
+    ].map(csvCell).join(','));
+    const totalRow = ['', '', 'TOTAL', combined.reduce((s, r) => s + Number(r.amount_inr), 0).toFixed(2), '', ''].map(csvCell).join(',');
+    const csv = [headers.join(','), ...csvRows, totalRow].join('\n');
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="ethertrack_combined_income_${Date.now()}.csv"`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(csv);
+  } catch (e) {
+    console.error('[admin/finance/export]', e.message);
+    res.status(500).json({ error: 'Export failed' });
+  }
+});
+
 router.get('/revenue', isAdmin, async (req, res) => {
   const period = Math.min(parseInt(req.query.period || '30', 10), 365);
   try {

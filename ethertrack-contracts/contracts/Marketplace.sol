@@ -385,6 +385,101 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
     }
 
     /**
+     * @notice [NEW] Actually SETTLES an INR/Razorpay purchase on-chain —
+     *         transfers the escrowed credit tokens from this contract to
+     *         the buyer's real wallet, records a Trade entry, and writes
+     *         the same tamper-evident audit log as logINRTrade(), all in
+     *         one transaction. This is the function that was MISSING
+     *         previously: logINRTrade() alone only wrote an audit record
+     *         and never moved any tokens, which is why buyers' on-chain
+     *         balances stayed at zero despite the DB marking trades
+     *         'completed'. Called by the backend signer wallet once a
+     *         buyer's INR/Razorpay payment is confirmed. Requires zero
+     *         signature from either buyer or seller — the tokens are
+     *         already escrowed in this contract from listing time.
+     *
+     * @param listingId      the listing being sold from
+     * @param buyer          buyer's wallet (must be KYC verified)
+     * @param amount         quantity of credits to transfer
+     * @param priceINR       price per credit in PAISE (₹1000 = 100000 paise)
+     * @param tradeId        keccak256(abi.encodePacked(dbTradeUUID)) — unique per trade
+     * @param payMode        MODE_INR_WALLET or MODE_RAZORPAY
+     * @param timestamp      unix timestamp of DB settlement
+     */
+    function settleINRTrade(
+        uint256 listingId,
+        address buyer,
+        uint256 amount,
+        uint256 priceINR,
+        bytes32 tradeId,
+        uint8   payMode,
+        uint256 timestamp
+    ) external onlySigner whenNotPaused nonReentrant listingExists(listingId) returns (uint256 recordedTradeId) {
+        require(
+            payMode == MODE_INR_WALLET || payMode == MODE_RAZORPAY,
+            "Marketplace: use buyCredit for ETH trades"
+        );
+        require(inrTradeHashes[tradeId] == bytes32(0), "Marketplace: trade already logged");
+        require(kycRegistry.isKYCVerified(buyer),      "Buyer not KYC verified");
+        require(amount > 0,                             "Amount must be > 0");
+        require(priceINR > 0,                           "Marketplace: zero price");
+
+        Listing storage listing = listings[listingId];
+        require(listing.seller != buyer,               "Cannot buy own listing");
+        require(amount <= listing.amountRemaining,      "Exceeds available amount");
+
+        listing.amountRemaining -= amount;
+        if (listing.amountRemaining == 0) listing.active = false;
+
+        // Record the trade in the same `trades` mapping ETH trades use, so
+        // getTrade()/getBuyerTrades()/getSellerTrades() work identically
+        // regardless of payment mode.
+        recordedTradeId = _recordTrade(
+            listingId,
+            type(uint256).max,
+            buyer,
+            listing.seller,
+            listing.tokenId,
+            amount,
+            0,          // pricePerUnit (ETH) — not applicable, paid in INR
+            priceINR,
+            0,          // totalPrice (ETH) — not applicable
+            0, 0, 0,    // fees handled off-chain by the payment gateway
+            false
+        );
+
+        // The actual settlement: move the escrowed tokens to the buyer.
+        // No approval needed — this contract already holds them from
+        // listing time.
+        creditToken.safeTransferFrom(address(this), buyer, listing.tokenId, amount, "");
+
+        // Same tamper-evident audit trail as logINRTrade(), so
+        // verifyTrade()/getINRTradeLog() work identically for settled trades.
+        bytes32 hash = keccak256(abi.encodePacked(
+            tradeId, listing.tokenId, amount, priceINR,
+            payMode, buyer, listing.seller, timestamp
+        ));
+        inrTradeHashes[tradeId] = hash;
+        inrTradeLogs[tradeId]   = INRTradeLog({
+            tradeId:     tradeId,
+            tokenId:     listing.tokenId,
+            quantity:    amount,
+            priceINR:    priceINR,
+            payMode:     payMode,
+            buyer:       buyer,
+            seller:      listing.seller,
+            timestamp:   timestamp,
+            tradeHash:   hash,
+            blockLogged: block.number
+        });
+
+        emit INRTradeLogged(
+            tradeId, listing.tokenId, amount, priceINR,
+            payMode, buyer, listing.seller, hash, timestamp
+        );
+    }
+
+    /**
      * @notice Public on-chain verification — anyone can call this.
      *         Regulators, auditors, counterparties can verify any trade
      *         without trusting EtherTrack's database.
@@ -489,6 +584,66 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
         _tryMatchListing(listingId);
     }
 
+    /**
+     * @notice [NEW] Operator-executed listing — lets the backend list a
+     *         seller's credits on their behalf, so sellers who trade via
+     *         INR never need to open MetaMask for routine listing.
+     *
+     *         REQUIRES the seller to have called
+     *         `creditToken.setApprovalForAll(marketplaceAddress, true)`
+     *         ONE TIME (a single one-off approval transaction) — after
+     *         that, this function can escrow their tokens with zero
+     *         further signatures from the seller, forever.
+     */
+    function listCreditFor(
+        address seller,
+        uint256 tokenId,
+        uint256 amount,
+        uint256 pricePerUnit,
+        uint256 pricePerUnitINR,
+        uint256 duration
+    ) external onlySigner whenNotPaused returns (uint256 listingId) {
+        require(kycRegistry.isKYCVerified(seller), "Seller not KYC verified");
+        require(amount > 0,          "Amount must be > 0");
+        require(pricePerUnit > 0,    "ETH price must be > 0");
+        require(pricePerUnitINR > 0, "INR price must be > 0");
+        require(
+            creditToken.balanceOf(seller, tokenId) >= amount,
+            "Insufficient credits"
+        );
+        require(!creditToken.isExpired(tokenId), "Credit expired");
+
+        uint256 dur = duration == 0 ? DEFAULT_DURATION : duration;
+        require(dur <= MAX_DURATION, "Duration too long");
+
+        listingId = _nextListingId++;
+
+        listings[listingId] = Listing({
+            listingId:       listingId,
+            seller:          seller,
+            tokenId:         tokenId,
+            amount:          amount,
+            amountRemaining: amount,
+            pricePerUnit:    pricePerUnit,
+            pricePerUnitINR: pricePerUnitINR,
+            listedAt:        block.timestamp,
+            expiresAt:       block.timestamp + dur,
+            active:          true
+        });
+
+        sellerListings[seller].push(listingId);
+        tokenListings[tokenId].push(listingId);
+
+        // Escrows the seller's tokens into this contract. Requires the
+        // seller's one-time setApprovalForAll(marketplace, true) — see
+        // NatSpec above.
+        creditToken.safeTransferFrom(seller, address(this), tokenId, amount, "");
+
+        emit CreditListed(listingId, seller, tokenId, amount, pricePerUnit, pricePerUnitINR);
+
+        _tryMatchListing(listingId);
+    }
+
     function updateListingPrice(
         uint256 listingId,
         uint256 newPriceEth,
@@ -516,6 +671,27 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
             );
         }
         emit ListingCancelled(listingId, msg.sender);
+    }
+
+    /**
+     * @notice [NEW] Operator-executed delisting — returns escrowed tokens
+     *         to the seller with zero seller signature required, since the
+     *         Marketplace already holds the tokens itself once listed.
+     */
+    function cancelListingFor(
+        address seller,
+        uint256 listingId
+    ) external onlySigner listingExists(listingId) {
+        Listing storage listing = listings[listingId];
+        require(listing.seller == seller, "Marketplace: seller mismatch");
+        listing.active = false;
+        if (listing.amountRemaining > 0) {
+            creditToken.safeTransferFrom(
+                address(this), seller,
+                listing.tokenId, listing.amountRemaining, ""
+            );
+        }
+        emit ListingCancelled(listingId, seller);
     }
 
     // ═════════════════════════════════════════════════════════════════════════

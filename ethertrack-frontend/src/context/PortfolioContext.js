@@ -47,6 +47,39 @@
 //          Requires trade rows to carry `rawCreatedAt` (raw ISO timestamp)
 //          for recency-weighted price discovery — added to
 //          normaliseTradeRow and the on-chain optimistic trade entry.
+//
+// [FIX-8]  getContractErrorMessage — every on-chain call used to do
+//          `throw e;` on failure, re-throwing ethers.js's raw error object
+//          (including the entire estimateGas/transaction/ABI payload)
+//          straight up to whatever component calls showToast(e.message).
+//          Now pulls out just the human-readable revert reason.
+//
+// [FIX-9]  [NEW] listCredit / delistCredit are now OPERATOR-EXECUTED via the
+//          backend instead of the user's own MetaMask wallet. The backend
+//          (using its operator wallet, same as Marketplace's signerWallet)
+//          calls listCreditFor()/cancelListingFor() on-chain on the user's
+//          behalf — the seller's tokens are still moved by a REAL on-chain
+//          transaction, it's just signed by the backend instead of
+//          requiring a MetaMask popup for every listing/delisting action.
+//          Requires the seller to have granted
+//          creditToken.setApprovalForAll(marketplace, true) ONCE, ever —
+//          same one-time approval pattern OpenSea/Uniswap use. If that
+//          approval is missing, the backend call fails with a clear error
+//          rather than silently doing nothing.
+//
+//          retireCredit and buyCredit (ETH path) are UNCHANGED — retiring
+//          stays self-service (MetaMask) until CarbonCreditToken's operator
+//          migration is deployed (deliberately postponed to avoid orphaning
+//          already-minted credits — see project notes), and ETH/crypto
+//          buys stay MetaMask-based by design, since that's the user's own
+//          funds moving and they must authorize it themselves. INR-paid
+//          purchases settle separately via a Razorpay webhook calling
+//          settleINRTradeOnChain() in the backend — not through this file.
+//
+//          REQUIRES: Marketplace v3 deployed (listCreditFor/cancelListingFor)
+//          and backend routes routes/operator-trading.js mounted at
+//          /api/portfolio — until then, listCredit/delistCredit will fail
+//          with a clear error rather than silently doing nothing.
 // ─────────────────────────────────────────────────────────────────────────────
 'use strict';
 
@@ -77,13 +110,6 @@ if (process.env.NODE_ENV === 'development') {
   });
 }
 
-// [FIX-DASHBOARD-MARKET-EMPTY] Was falling back to '' (relative/same-origin
-// path) when REACT_APP_API_URL isn't set, while useMarket.js (used by the
-// actual buy/market page) falls back to 'http://localhost:5000'. In local
-// dev without the env var set, this file's public listings fetch would hit
-// the wrong origin and silently return nothing while the market page (using
-// the other fallback) worked fine. Aligned to the same fallback so both
-// hooks always agree on where the backend lives.
 const API              = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 const SEPOLIA_CHAIN_ID = '0xaa36a7';
 
@@ -147,51 +173,29 @@ const ABI = {
 export const STANDARD_ENUM      = { VCS: 0, GS: 1, CDM: 2, ACR: 3 };
 export const STANDARD_FROM_ENUM = { 0: 'VCS', 1: 'GS', 2: 'CDM', 3: 'ACR' };
 
-// [FIX-6] Re-exported from utils/creditPricing so existing call sites
-// (`import { vintagePenalty } from '../context/PortfolioContext'`, e.g. in
-// PortfolioV3.jsx) keep working without changes. Do NOT redefine this
-// function here — it must stay the single source of truth shared with
-// getMarketPrice's depreciation step.
 export const vintagePenalty = vintagePenaltyFn;
 
-// ── Safe number parser ────────────────────────────────────────────
 const safeNum = (val, fallback = 0) => {
   const n = Number(val);
   return isNaN(n) || !isFinite(n) ? fallback : n;
 };
 
-// [FIX-8] Every on-chain call in this file used to do `throw e;` on failure,
-// which re-throws ethers.js's raw error object — including the entire
-// estimateGas/transaction/ABI payload — straight up to whatever component
-// calls showToast(e.message, 'error'). That's why users were seeing a wall
-// of hex data instead of "Insufficient credits". This pulls out just the
-// human-readable revert reason (or a sensible fallback) so every catch
-// block can throw a clean, single-sentence Error instead.
 const getContractErrorMessage = (e) => {
-  // Ethers v6 surfaces the Solidity require() string in a few possible
-  // places depending on the failure path — check the most specific first.
   if (e?.reason)                              return e.reason;
   if (e?.revert?.args?.[0])                   return e.revert.args[0];
   if (e?.shortMessage && !/^could not/i.test(e.shortMessage)) return e.shortMessage;
   if (e?.info?.error?.message)                return e.info.error.message.replace(/^execution reverted:\s*/i, '');
   if (e?.error?.message)                      return e.error.message.replace(/^execution reverted:\s*/i, '');
-
-  // Common ethers/provider error codes that aren't contract reverts
   if (e?.code === 'INSUFFICIENT_FUNDS')        return 'Insufficient ETH balance to cover this transaction and gas.';
   if (e?.code === 'CALL_EXCEPTION')            return 'Transaction would fail — the contract rejected this action.';
   if (e?.code === 'NETWORK_ERROR')             return 'Network connection issue. Please check your connection and try again.';
   if (e?.code === 'TIMEOUT')                   return 'The transaction timed out. Please try again.';
-
-  // Last resort — never fall through to e.message, which on a raw ethers
-  // error can be the entire multi-KB stringified error object.
   return 'Transaction failed. Please try again.';
 };
 
-// ── Token hex formatter ───────────────────────────────────────────
 const toTokenHex = (id) =>
   id != null ? `0x${Number(id).toString(16).padStart(8, '0').toUpperCase()}` : null;
 
-// ── Auth fetch ────────────────────────────────────────────────────
 const authFetch = async (path, opts = {}) => {
   const token = localStorage.getItem('et_access');
   const isFormData = opts.body instanceof FormData;
@@ -228,7 +232,6 @@ const publicFetch = async (path) => {
   return res.json();
 };
 
-// ── ETH rate ─────────────────────────────────────────────────────
 const fetchETHRate = async () => {
   const now = Date.now();
   if (_ethRateCache && now - _ethRateFetchedAt < ETH_RATE_TTL) return _ethRateCache;
@@ -260,7 +263,6 @@ const fetchETHRate = async () => {
   return ETH_RATE_FALLBACK;
 };
 
-// ── DB helpers ────────────────────────────────────────────────────
 const fetchDBKycStatus = async () => {
   try {
     const d = await authFetch('/api/auth/me');
@@ -309,10 +311,6 @@ const fetchListingsFromAPI = async () => {
   } catch { return []; }
 };
 
-// ── [FIX-1] Trade history DB fetch ───────────────────────────────
-// Fetches the authenticated user's trade history from the trades table.
-// This is the source of truth for TradingHistory.jsx — the blockchain
-// event listener only fires for ETH trades and only while the page is open.
 const fetchTradeHistoryFromDB = async () => {
   try {
     const d = await authFetch('/api/trades/history');
@@ -320,8 +318,22 @@ const fetchTradeHistoryFromDB = async () => {
   } catch { return []; }
 };
 
-// ── Normalise a raw DB trade row into the shape the UI expects ────
-// Matches the field names used by TradingHistory.jsx and CarbonCredits.jsx
+// [FIX-9] Backend calls for operator-executed listing/delisting — no
+// MetaMask signature required. See CHANGELOG note at top of file.
+const listCreditViaBackend = async (tokenId, amount, priceInEth, priceInINR, durationDays) => {
+  return authFetch('/api/portfolio/list-credit', {
+    method: 'POST',
+    body: JSON.stringify({ tokenId, amount, priceInEth, priceInINR, durationDays }),
+  });
+};
+
+const delistCreditViaBackend = async (listingIdOnchain) => {
+  return authFetch('/api/portfolio/delist-credit', {
+    method: 'POST',
+    body: JSON.stringify({ listingIdOnchain }),
+  });
+};
+
 const normaliseTradeRow = (t) => ({
   id          : `TXN-${t.id}`,
   type        : t.seller_id && t.buyer_id && t.seller_id === t.buyer_id
@@ -332,7 +344,6 @@ const normaliseTradeRow = (t) => ({
   amount      : safeNum(t.quantity, 0),
   projectName : t.project_name || '—',
   priceINR    : parseFloat(t.price_per_credit_inr || 0),
-  // [FIX-1] Use stored INR values directly — not recalculated from ETH rate
   totalINR    : parseFloat(t.buyer_pays_inr || 0),
   totalEth    : parseFloat(t.total_eth || 0),
   txHash      : t.tx_hash || null,
@@ -342,22 +353,15 @@ const normaliseTradeRow = (t) => ({
                       hour: '2-digit', minute: '2-digit',
                     })
                   : '—',
-  // [FIX-7] Raw ISO timestamp, kept separately from the display-formatted
-  // `time` string above. buildMarketBuckets() needs this for recency-
-  // weighted trade pricing — without it, every trade would be treated as
-  // "right now" and old trades would incorrectly dominate price discovery
-  // just as much as fresh ones.
   rawCreatedAt: t.created_at || null,
   status      : t.status === 'completed' ? 'Confirmed' : (t.status || 'Confirmed'),
   paymentMode : t.payment_mode || 'inr',
   isAMM       : false,
-  // Fields used by TradingHistory.jsx FIX-1 (stored INR values)
   priceINR         : parseFloat(t.price_per_credit_inr || 0),
   price_per_credit_inr : parseFloat(t.price_per_credit_inr || 0),
   buyer_pays_inr   : parseFloat(t.buyer_pays_inr || 0),
 });
 
-// ── Map a DB credit row to the shape the UI expects ───────────────
 const mapDbCredit = (db, addr = '') => ({
   id             : `db-${db.id}`,
   tokenId        : db.token_id ?? null,
@@ -398,9 +402,6 @@ const mapDbCredit = (db, addr = '') => ({
   coBenefitsVerified      : db.co_benefits_verified || false,
 });
 
-// ─────────────────────────────────────────────────────────────────
-// Context
-// ─────────────────────────────────────────────────────────────────
 const PortfolioContext = createContext(null);
 
 export function PortfolioProvider({ children }) {
@@ -429,10 +430,6 @@ export function PortfolioProvider({ children }) {
   const listenersRef        = useRef([]);
   const mountedRef          = useRef(true);
   const loadCreditsAbortRef = useRef(null);
-  // [FIX-DASHBOARD-MARKET-EMPTY] Set to true once on-chain listings load
-  // successfully (richer data than the public REST fetch). Guards the
-  // polling public fetch below from overwriting fresher on-chain listings
-  // with stale REST data every 30s — mirrors useMarket.js's `chainLoaded`.
   const chainListingsLoadedRef = useRef(false);
   const listingsPollRef        = useRef(null);
 
@@ -441,12 +438,10 @@ export function PortfolioProvider({ children }) {
     return () => { mountedRef.current = false; };
   }, []);
 
-  // ── Guard: only setState if still mounted ──────────────────────
   const safeSet = useCallback((setter) => (...args) => {
     if (mountedRef.current) setter(...args);
   }, []);
 
-  // ── ETH rate polling ───────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
     const update = async () => {
@@ -458,7 +453,6 @@ export function PortfolioProvider({ children }) {
     return () => { cancelled = true; clearInterval(id); };
   }, []);
 
-  // ── Build contract instances ───────────────────────────────────
   const buildContracts = useCallback((_signer) => ({
     token  : new ethers.Contract(ADDRESSES.CarbonCreditToken, ABI.CarbonCreditToken, _signer),
     market : new ethers.Contract(ADDRESSES.Marketplace, ABI.Marketplace, _signer),
@@ -467,7 +461,6 @@ export function PortfolioProvider({ children }) {
       : null,
   }), []);
 
-  // ── Listeners cleanup ─────────────────────────────────────────
   const cleanupListeners = useCallback(() => {
     listenersRef.current.forEach(({ contract, event, handler }) => {
       try { contract.off(event, handler); } catch {}
@@ -475,8 +468,6 @@ export function PortfolioProvider({ children }) {
     listenersRef.current = [];
   }, []);
 
-  // ── Load listings from API (no wallet needed) ─────────────────
-  // [FIX-4] mapper correctly reads batchId (UUID) separate from listingId (onchain int)
   const loadListingsFromAPI = useCallback(async () => {
     if (!mountedRef.current) return;
     safeSet(setLoading)(l => ({ ...l, listings: true }));
@@ -495,9 +486,7 @@ export function PortfolioProvider({ children }) {
           const expiresAt   = safeNum(l.expiresAt || l.expires_at, nowSec + 86400 * 30);
 
           return {
-            // [FIX-4] batchId = UUID from carbon_batches.id (used for DB trade recording)
             batchId         : l.batchId || null,
-            // listingId = onchain integer (used for smart contract calls)
             listingId       : safeNum(l.listingId ?? l.listingIdOnchain ?? l.listing_id_onchain, 0),
             listingIdOnchain: safeNum(l.listingIdOnchain ?? l.listingId ?? l.listing_id_onchain, 0),
             seller          : (l.seller || '').toLowerCase(),
@@ -526,9 +515,6 @@ export function PortfolioProvider({ children }) {
         })
         .filter(l => l.expiresAt > nowSec && l.amount > 0);
 
-      // [FIX-DASHBOARD-MARKET-EMPTY] Don't let a stale/slower public-REST
-      // poll overwrite fresher on-chain listings once wallet+contracts have
-      // loaded successfully — mirrors useMarket.js's chainLoaded guard.
       if (!chainListingsLoadedRef.current) {
         safeSet(setListings)(mapped);
       }
@@ -539,8 +525,6 @@ export function PortfolioProvider({ children }) {
     }
   }, [safeSet]);
 
-  // ── [FIX-2] refreshTradeHistory — load trade history from DB ──
-  // Called on mount and after every buy so TradingHistory.jsx is always current.
   const refreshTradeHistory = useCallback(async () => {
     if (!mountedRef.current) return;
     safeSet(setLoading)(l => ({ ...l, trades: true }));
@@ -555,7 +539,6 @@ export function PortfolioProvider({ children }) {
     }
   }, [safeSet]);
 
-  // ── Refresh bought credits ────────────────────────────────────
   const refreshBoughtCredits = useCallback(async () => {
     if (!mountedRef.current) return [];
     try {
@@ -615,7 +598,6 @@ export function PortfolioProvider({ children }) {
     }
   }, [safeSet]);
 
-  // ── Wallet init ───────────────────────────────────────────────
   const initInProgress = useRef(false);
 
   const init = useCallback(async () => {
@@ -736,7 +718,6 @@ export function PortfolioProvider({ children }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [buildContracts, cleanupListeners, refreshBoughtCredits, safeSet]);
 
-  // ── Event listeners ───────────────────────────────────────────
   const setupListeners = useCallback((c, address) => {
     const addr = address.toLowerCase();
 
@@ -755,16 +736,10 @@ export function PortfolioProvider({ children }) {
           loadBuyOrders();
           if (isBuyer) {
             refreshBoughtCredits();
-            // [FIX-2] Also refresh DB trade history on ETH trades so
-            // TradingHistory.jsx stays in sync with the trades table
             refreshTradeHistory();
           }
         }, 2500);
 
-        // Optimistically prepend to tradeHistory for immediate UI feedback.
-        // refreshTradeHistory (called above after 2.5s) will replace this
-        // with the authoritative DB record once the blockchain listener
-        // has triggered the backend to write the trade.
         safeSet(setTradeHistory)(prev => [{
           id           : `TXN-${Date.now()}`,
           type         : isBuyer ? 'Buy' : 'Sell',
@@ -778,8 +753,6 @@ export function PortfolioProvider({ children }) {
           buyerFeeINR  : Number(buyerFee),
           sellerFeeINR : Number(sellerFee),
           time         : new Date().toLocaleString('en-IN'),
-          // [FIX-7] Raw timestamp for recency-weighted market pricing —
-          // this optimistic entry is "now", so use the current instant.
           rawCreatedAt : new Date().toISOString(),
           status       : 'Confirmed',
           isAMM,
@@ -813,26 +786,11 @@ export function PortfolioProvider({ children }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [safeSet, refreshBoughtCredits, refreshTradeHistory]);
 
-  // ── [FIX-3] Mount effect — load trade history on startup ──────
-  // [FIX-DASHBOARD-MARKET-EMPTY] loadListingsFromAPI() (public REST, no
-  // wallet needed) was previously only ever reached indirectly through
-  // wallet-connected code paths (init()'s loadListings(c), or on-chain
-  // event handlers). If a user hadn't connected a wallet — or the wallet
-  // wasn't on Sepolia / connection failed — `listings` stayed `[]` forever,
-  // so the Dashboard's MarketCard showed "Be the first to list credits"
-  // even though the actual marketplace page (CarbonCredits.js, via the
-  // separate useMarket.js hook) fetches this exact same public endpoint
-  // unconditionally on mount and shows listings fine. Now this file does
-  // the same: fetch publicly right away, and poll every 30s to stay fresh,
-  // mirroring useMarket.js's fetchPublic()/POLL_MS pattern. The
-  // chainListingsLoadedRef guard (set in loadListings on-chain success)
-  // stops this poll from clobbering richer on-chain data once a wallet
-  // connects.
   useEffect(() => {
     init();
     loadListingsFromAPI();
     refreshBoughtCredits();
-    refreshTradeHistory();   // load trade history from DB on mount
+    refreshTradeHistory();
     fetchMyRetirements().then(safeSet(setMyRetirements));
 
     listingsPollRef.current = setInterval(() => {
@@ -858,7 +816,6 @@ export function PortfolioProvider({ children }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Load my credits — internal ────────────────────────────────
   const loadMyCreditsInternal = useCallback(async (c, addr) => {
     const _c    = c    || contracts;
     const _addr = addr || walletAddress;
@@ -1041,7 +998,6 @@ export function PortfolioProvider({ children }) {
 
   const loadMyCredits = loadMyCreditsInternal;
 
-  // ── loadListings ──────────────────────────────────────────────
   const loadListings = useCallback(async (c) => {
     const _c = c || contracts;
     if (!_c) return loadListingsFromAPI();
@@ -1065,7 +1021,7 @@ export function PortfolioProvider({ children }) {
           return {
             listingId        : Number(l.listingId),
             listingIdOnchain : Number(l.listingId),
-            batchId          : null, // on-chain listings don't carry batchId; API listings do
+            batchId          : null,
             seller           : l.seller.toLowerCase(),
             tokenId,
             amount           : Number(l.amountRemaining),
@@ -1096,13 +1052,9 @@ export function PortfolioProvider({ children }) {
         .filter(l => l.active && l.expiresAt > nowSec && l.amount > 0);
 
       safeSet(setListings)(valid);
-      // [FIX-DASHBOARD-MARKET-EMPTY] On-chain listings loaded successfully —
-      // stop the public-REST poll from overwriting this with (potentially
-      // stale) REST data on its next tick.
       chainListingsLoadedRef.current = true;
     } catch (e) {
       console.error('[loadListings on-chain]', e);
-      // On-chain load failed — allow REST data through again.
       chainListingsLoadedRef.current = false;
       await loadListingsFromAPI();
     } finally {
@@ -1111,7 +1063,6 @@ export function PortfolioProvider({ children }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contracts, loadListingsFromAPI, safeSet]);
 
-  // ── loadBuyOrders ─────────────────────────────────────────────
   const loadBuyOrders = useCallback(async (c) => {
     const _c = c || contracts;
     if (!_c) return;
@@ -1140,7 +1091,6 @@ export function PortfolioProvider({ children }) {
     }
   }, [contracts, safeSet]);
 
-  // ── loadAMMPools ──────────────────────────────────────────────
   const loadAMMPools = useCallback(async (c) => {
     const _c = c || contracts;
     if (!_c?.amm) return;
@@ -1171,7 +1121,6 @@ export function PortfolioProvider({ children }) {
     }
   }, [contracts, safeSet]);
 
-  // ── KYC refresh ───────────────────────────────────────────────
   const refreshKYC = useCallback(async () => {
     try {
       const v = await fetchDBKycStatus();
@@ -1179,10 +1128,6 @@ export function PortfolioProvider({ children }) {
       return v;
     } catch { return false; }
   }, [safeSet]);
-
-  // ─────────────────────────────────────────────────────────────
-  // Transaction functions
-  // ─────────────────────────────────────────────────────────────
 
   const requireWallet = () => {
     if (!contracts)     throw new Error('Wallet not connected. Please connect MetaMask.');
@@ -1228,77 +1173,93 @@ export function PortfolioProvider({ children }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contracts, walletAddress, safeSet, loadMyCreditsInternal]);
 
-  const listCredit = useCallback(async (tokenId, amount, priceInEth, priceInINR, durationDays = 30) => {
-  requireWallet();
-  if (!tokenId && tokenId !== 0) throw new Error('Invalid token ID.');
-  if (amount <= 0)               throw new Error('Amount must be greater than zero.');
-  if (parseFloat(priceInEth) <= 0) throw new Error('Price must be greater than zero.');
-
-  safeSet(setLoading)(l => ({ ...l, tx: true }));
-  try {
-    const approved = await contracts.token.isApprovedForAll(walletAddress, ADDRESSES.Marketplace);
-    if (!approved) {
-      const approveTx = await contracts.token.setApprovalForAll(ADDRESSES.Marketplace, true);
-      await approveTx.wait();
-    }
-    const rate     = _ethRateCache || ETH_RATE_FALLBACK;
-    const inrPrice = priceInINR > 0
-      ? Math.round(priceInINR)
-      : Math.round(parseFloat(priceInEth) * rate);
-    const tx      = await contracts.market.listCredit(
-      tokenId, amount,
-      ethers.parseEther(String(priceInEth)),
-      inrPrice,
-      durationDays * 86400
-    );
-    const receipt = await tx.wait();
-
-    // ── Extract listingId from CreditListed event ──
-    let listingId = null;
+  // [FIX-9] listCredit is now OPERATOR-EXECUTED via the backend — no
+  // MetaMask popup. The backend signs the real on-chain listCreditFor()
+  // transaction using its operator wallet; the seller's tokens still move
+  // via a genuine on-chain escrow transfer, same as before. Requires the
+  // seller to have granted setApprovalForAll(marketplace, true) ONCE ever —
+  // if that's missing, the backend returns a clear error telling the user
+  // to do the one-time approval, rather than failing silently.
+  //
+  // Only requires a connected wallet to know WHO is listing — no direct
+  // contract call happens here anymore, so `contracts`/`chainOk` are not
+  // required.
+  // [FIX-SELLER-APPROVAL] listCredit is now backend-executed (no MetaMask),
+  // but that only works if the seller has already granted the Marketplace
+  // one-time setApprovalForAll — which the backend cannot do on the
+  // seller's behalf (that would defeat the entire point of requiring their
+  // own signature for this one specific action). These two functions let
+  // the UI check that status and prompt for it exactly once per wallet.
+  const isSellerApproved = useCallback(async () => {
+    if (!contracts || !walletAddress) return null; // unknown — needs wallet connected to check
     try {
-      for (const log of receipt.logs) {
-        try {
-          const parsed = contracts.market.interface.parseLog(log);
-          if (parsed?.name === 'CreditListed') {
-            listingId = Number(parsed.args.listingId);
-            break;
-          }
-        } catch {}
-      }
+      return await contracts.token.isApprovedForAll(walletAddress, ADDRESSES.Marketplace);
     } catch (e) {
-      console.warn('[listCredit] Could not parse CreditListed event:', e.message);
+      console.warn('[isSellerApproved] check failed:', e.message);
+      return null;
     }
+  }, [contracts, walletAddress]);
 
-    await Promise.allSettled([loadMyCreditsInternal(), loadListings(), loadListingsFromAPI()]);
-    // Return listingId so PortfolioV3 can sync it to DB via /confirm-listing
-    return { success: true, txHash: tx.hash, listingId, receipt };
-  } catch (e) {
-    if (e.code === 4001 || e.code === 'ACTION_REJECTED') throw new Error('Transaction rejected by user.');
-    throw new Error(getContractErrorMessage(e));
-  } finally {
-    safeSet(setLoading)(l => ({ ...l, tx: false }));
-  }
-// eslint-disable-next-line react-hooks/exhaustive-deps
-}, [contracts, walletAddress, safeSet, loadMyCreditsInternal, loadListings, loadListingsFromAPI]);
-
-  const delistCredit = useCallback(async (listingId) => {
+  const approveMarketplace = useCallback(async () => {
     requireWallet();
-    if (!listingId && listingId !== 0) throw new Error('Invalid listing ID.');
     safeSet(setLoading)(l => ({ ...l, tx: true }));
     try {
-      const tx = await contracts.market.cancelListing(listingId);
-      await tx.wait();
-      await Promise.allSettled([loadMyCreditsInternal(), loadListings(), loadListingsFromAPI()]);
-      return { success: true, txHash: tx.hash };
+      const tx = await contracts.token.setApprovalForAll(ADDRESSES.Marketplace, true);
+      const receipt = await tx.wait();
+      return { success: true, txHash: tx.hash, blockNumber: receipt.blockNumber };
     } catch (e) {
-      if (e.code === 4001 || e.code === 'ACTION_REJECTED') throw new Error('Transaction rejected by user.');
+      if (e.code === 4001 || e.code === 'ACTION_REJECTED') throw new Error('Approval rejected — you\'ll need to approve once before listing credits.');
       throw new Error(getContractErrorMessage(e));
     } finally {
       safeSet(setLoading)(l => ({ ...l, tx: false }));
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contracts, safeSet, loadMyCreditsInternal, loadListings, loadListingsFromAPI]);
+  }, [contracts, walletAddress, safeSet]);
 
+  const listCredit = useCallback(async (tokenId, amount, priceInEth, priceInINR, durationDays = 30) => {
+    if (!walletAddress) throw new Error('Wallet not connected. Please connect your wallet.');
+    if (!tokenId && tokenId !== 0) throw new Error('Invalid token ID.');
+    if (amount <= 0)               throw new Error('Amount must be greater than zero.');
+    if (parseFloat(priceInEth) <= 0) throw new Error('Price must be greater than zero.');
+
+    safeSet(setLoading)(l => ({ ...l, tx: true }));
+    try {
+      const result = await listCreditViaBackend(tokenId, amount, priceInEth, priceInINR, durationDays);
+      await Promise.allSettled([loadMyCreditsInternal(), loadListings(), loadListingsFromAPI()]);
+      return { success: true, txHash: result.txHash, listingId: result.listingId };
+    } catch (e) {
+      throw new Error(e.message || 'Listing failed. Please try again.');
+    } finally {
+      safeSet(setLoading)(l => ({ ...l, tx: false }));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walletAddress, safeSet, loadMyCreditsInternal, loadListings, loadListingsFromAPI]);
+
+  // [FIX-9] delistCredit is now OPERATOR-EXECUTED via the backend — no
+  // MetaMask popup, zero approval needed (Marketplace already holds the
+  // escrowed tokens itself from listing time).
+  const delistCredit = useCallback(async (listingIdOnchain) => {
+    if (!walletAddress) throw new Error('Wallet not connected. Please connect your wallet.');
+    if (listingIdOnchain == null) throw new Error('Invalid listing ID.');
+
+    safeSet(setLoading)(l => ({ ...l, tx: true }));
+    try {
+      const result = await delistCreditViaBackend(listingIdOnchain);
+      await Promise.allSettled([loadMyCreditsInternal(), loadListings(), loadListingsFromAPI()]);
+      return { success: true, txHash: result.txHash };
+    } catch (e) {
+      throw new Error(e.message || 'Delisting failed. Please try again.');
+    } finally {
+      safeSet(setLoading)(l => ({ ...l, tx: false }));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walletAddress, safeSet, loadMyCreditsInternal, loadListings, loadListingsFromAPI]);
+
+  // retireCredit — UNCHANGED, still self-service via MetaMask. Operator-
+  // executed retirement (retireCreditFor) requires a CarbonCreditToken
+  // migration that's deliberately on hold to avoid orphaning already-minted
+  // credits. Revisit once that migration ships — should follow the same
+  // backend-call pattern as listCredit/delistCredit above.
   const retireCredit = useCallback(async (tokenId, amount) => {
     requireWallet();
     if (tokenId == null) throw new Error('Invalid token ID.');
@@ -1325,6 +1286,9 @@ export function PortfolioProvider({ children }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contracts, walletAddress, safeSet, loadMyCreditsInternal]);
 
+  // buyCredit — UNCHANGED, ETH/crypto path stays MetaMask-based by design.
+  // INR-paid purchases settle separately via a Razorpay webhook calling
+  // settleINRTradeOnChain() in the backend — not through this function.
   const buyCredit = useCallback(async (listingId, amount, totalEth) => {
     requireWallet();
     if (!listingId && listingId !== 0) throw new Error('Invalid listing ID.');
@@ -1460,16 +1424,6 @@ export function PortfolioProvider({ children }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contracts, walletAddress, safeSet, loadMyCreditsInternal, loadAMMPools]);
 
-  // ── [FIX-7] Real market pricing data ────────────────────────────
-  // Built once per render from the live listings/tradeHistory/buyOrders
-  // already in state. tokenMetaMap resolves tokenId -> project metadata
-  // (buy orders and trades only carry tokenId); marketBuckets aggregates
-  // supply/demand/trade-price per (projectType, standard) bucket.
-  //
-  // Exposed via context as `marketBuckets` so PortfolioV3.jsx and
-  // DashboardCards.jsx price and badge credits off this EXACT same
-  // snapshot that `stats` below uses — this is what keeps Dashboard and
-  // the Portfolio page reconciled.
   const tokenMetaMap = useMemo(
     () => buildTokenMetaMap({ listings, myCredits, myBoughtCredits }),
     [listings, myCredits, myBoughtCredits]
@@ -1480,18 +1434,9 @@ export function PortfolioProvider({ children }) {
     [listings, tradeHistory, buyOrders, tokenMetaMap]
   );
 
-  // ── Stats ─────────────────────────────────────────────────────
-  // [FIX-5] Now includes myBoughtCredits (previously only myCredits, so
-  // bought credits were silently excluded from the Dashboard's PORTFOLIO
-  // VALUE / TOTAL CREDITS cards) and prices every credit through the same
-  // getMarketPrice() used by PortfolioV3.jsx's statTotals, instead of the
-  // raw `c.pricePerCredit` DB fallback (which defaults to a flat ₹850 for
-  // most credits). costBasis is new — Dashboard.jsx already reads
-  // `stats?.costBasis` for its P&L card but nothing previously set it, so
-  // P&L was silently always computed against 0.
   const stats = useMemo(() => {
     const ownedActive  = myCredits.filter(c => c.status !== 'RETIRED');
-    const boughtActive = myBoughtCredits; // normalised bought credits are never RETIRED
+    const boughtActive = myBoughtCredits;
     const allActive    = [...ownedActive, ...boughtActive];
 
     const totalCredits = allActive.reduce(
@@ -1505,8 +1450,6 @@ export function PortfolioProvider({ children }) {
       return s + safeNum(c.heldCredits ?? c.credits, 0) * price;
     }, 0);
 
-    // Cost basis — bought credits only, priced at actual purchase price.
-    // Feeds Dashboard's P&L card via calcPnL(totalValue, costBasis).
     const costBasis = myBoughtCredits.reduce(
       (s, c) => s + safeNum(c.pricePerCredit, 0) * safeNum(c.heldCredits ?? c.credits, 0),
       0
@@ -1529,43 +1472,29 @@ export function PortfolioProvider({ children }) {
 
   return (
     <PortfolioContext.Provider value={{
-      // Wallet state
       provider, signer, walletAddress, contracts, chainOk,
       walletMismatch, walletMismatchInfo, error,
-      // KYC
       isKYCVerified, refreshKYC,
-      // Credits
       myCredits, myBoughtCredits, myRetirements,
-      // Market
       listings, buyOrders, tradeHistory, ammPools,
-      // [FIX-7] Shared market-pricing snapshot — PortfolioV3.jsx and
-      // DashboardCards.jsx must use this (via getMarketPrice /
-      // getDemandSupplyBadge from utils/creditPricing) rather than
-      // deriving their own local pricing.
       marketBuckets,
-      // Stats
       stats,
-      // Loading
       loading,
-      // Rates
       ethINRRate     : resolvedRate,
       ETH_INR_RATE   : resolvedRate,
       ethRateLoaded  : ethINRRate !== null,
-      // Actions
       registerCredit, listCredit, delistCredit, retireCredit,
       buyCredit, placeBuyOrder, cancelBuyOrder,
+      isSellerApproved, approveMarketplace,
       ammSwapETHForCredits, ammSwapCreditsForETH, ammAddLiquidity,
-      // Loaders
       loadMyCredits,
       loadListings,
       loadListingsFromAPI,
       loadBuyOrders,
       loadAMMPools,
       refreshBoughtCredits,
-      // [FIX-2] Exposed so CarbonCredits.jsx can call after every buy
       refreshTradeHistory,
       refreshRetirements : () => fetchMyRetirements().then(safeSet(setMyRetirements)),
-      // Utils
       vintagePenalty, STANDARD_ENUM, STANDARD_FROM_ENUM,
     }}>
       {children}

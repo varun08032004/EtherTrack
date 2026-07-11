@@ -6,11 +6,34 @@ const RPC_URL         = process.env.ALCHEMY_RPC;
 const MINTER_KEY      = process.env.MINTER_PRIVATE_KEY;
 const TOKEN_ADDRESS   = process.env.CARBON_CREDIT_TOKEN_ADDRESS;
 const KYC_REG_ADDRESS = process.env.KYC_REGISTRY_ADDRESS;
+const MARKETPLACE_ADDRESS = process.env.MARKETPLACE_ADDRESS;
+
+// [NEW] Operator-only functions added to CarbonCreditToken.sol / Marketplace.sol
+// so INR/Razorpay-paying users never need to open MetaMask for routine
+// listing, buying, or retiring. The backend's MINTER_KEY wallet must be set
+// as the `operator` on CarbonCreditToken (setOperator) and already IS the
+// `signerWallet` on Marketplace (constructor arg) — see scripts/setup-operator.js.
+const MARKETPLACE_ABI = [
+  'function listCreditFor(address seller, uint256 tokenId, uint256 amount, uint256 pricePerUnit, uint256 pricePerUnitINR, uint256 duration) external returns (uint256 listingId)',
+  'function cancelListingFor(address seller, uint256 listingId) external',
+  'function settleINRTrade(uint256 listingId, address buyer, uint256 amount, uint256 priceINR, bytes32 tradeId, uint8 payMode, uint256 timestamp) external returns (uint256 recordedTradeId)',
+  'function listings(uint256) view returns (uint256 listingId, address seller, uint256 tokenId, uint256 amount, uint256 amountRemaining, uint256 pricePerUnit, uint256 pricePerUnitINR, uint256 listedAt, uint256 expiresAt, bool active)',
+  'event CreditListed(uint256 indexed listingId, address indexed seller, uint256 indexed tokenId, uint256 amount, uint256 pricePerUnit, uint256 pricePerUnitINR)',
+  'event INRTradeLogged(bytes32 indexed tradeId, uint256 indexed tokenId, uint256 quantity, uint256 priceINR, uint8 payMode, address buyer, address seller, bytes32 tradeHash, uint256 timestamp)',
+];
+
+const MODE_INR_WALLET = 0;
+const MODE_RAZORPAY   = 1;
 
 const TOKEN_ABI = [
   'function mintCredit((address to,uint256 amount,string projectName,string location,uint8 standard,string projectType,string developer,uint256 vintageYear,uint256 expiryDate,string serialNumber,string metadataURI) p) returns (uint256)',
   'function serialRegistered(string) view returns (bool)',
   'event CreditMinted(uint256 indexed tokenId, address indexed to, uint256 amount, string projectName, uint8 standard, string serialNumber)',
+  'function retireCreditFor(address beneficiary, uint256 tokenId, uint256 amount) external',
+  'function balanceOf(address account, uint256 id) view returns (uint256)',
+  'function setOperator(address _operator) external',
+  'function operator() view returns (address)',
+  'event CreditRetired(uint256 indexed tokenId, address indexed retiredBy, uint256 amount, string projectName)',
 ];
 
 const KYC_ABI = [
@@ -69,8 +92,11 @@ const getContracts = () => {
   const kycContract   = KYC_REG_ADDRESS
     ? new ethers.Contract(KYC_REG_ADDRESS, KYC_ABI, minterWallet)
     : null;
+  const marketContract = MARKETPLACE_ADDRESS
+    ? new ethers.Contract(MARKETPLACE_ADDRESS, MARKETPLACE_ABI, minterWallet)
+    : null;
 
-  return { provider, minterWallet, tokenContract, kycContract };
+  return { provider, minterWallet, tokenContract, kycContract, marketContract };
 };
 
 // ── Check on-chain KYC ────────────────────────────────────────────
@@ -284,4 +310,95 @@ const mintApprovedCredit = async (batchId, { force = false } = {}) => {
   return { tokenId, txHash: tx.hash, ethRate };
 };
 
-module.exports = { mintApprovedCredit, verifyKYCOnChain, getLiveETHRate };
+// ══════════════════════════════════════════════════════════════════
+// [NEW] Operator-executed functions — backend signs & pays gas, so
+// INR/Razorpay-paying users never see a MetaMask popup for routine
+// listing, delisting, buying, or retiring. Crypto/ETH-paying users
+// continue to sign their own transactions via the frontend as before —
+// these functions are NOT used for that path.
+// ══════════════════════════════════════════════════════════════════
+
+/** Retire credits on a user's behalf. beneficiary must already hold
+ *  `amount` of `tokenId` on-chain — this never fabricates ownership. */
+const retireCreditForOnChain = async (beneficiaryWallet, tokenId, amount) => {
+  const { tokenContract } = getContracts();
+  console.log(`🔥 Retiring ${amount} of token ${tokenId} for ${beneficiaryWallet} (operator-executed)...`);
+  const tx = await tokenContract.retireCreditFor(beneficiaryWallet, tokenId, amount);
+  const receipt = await tx.wait();
+  if (receipt.status !== 1) throw new Error(`retireCreditFor reverted — tx: ${tx.hash}`);
+  console.log(`   ✅ Retired on-chain, block ${receipt.blockNumber}, tx: ${tx.hash}`);
+  return { txHash: tx.hash, blockNumber: receipt.blockNumber };
+};
+
+/** List a seller's credits on their behalf. Requires the seller to have
+ *  already called creditToken.setApprovalForAll(marketplace, true) once. */
+const listCreditForOnChain = async (sellerWallet, tokenId, amount, priceEth, priceINR, durationSeconds = 0) => {
+  const { marketContract } = getContracts();
+  if (!marketContract) throw new Error('MARKETPLACE_ADDRESS not set in .env');
+
+  const priceWei = ethers.parseEther(String(priceEth));
+  console.log(`📈 Listing ${amount} of token ${tokenId} for seller ${sellerWallet} (operator-executed)...`);
+
+  const tx = await marketContract.listCreditFor(
+    sellerWallet, tokenId, amount, priceWei, Math.round(priceINR), durationSeconds
+  );
+  const receipt = await tx.wait();
+  if (receipt.status !== 1) throw new Error(`listCreditFor reverted — tx: ${tx.hash}`);
+
+  let listingId = null;
+  for (const log of receipt.logs) {
+    try {
+      const parsed = marketContract.interface.parseLog(log);
+      if (parsed?.name === 'CreditListed') { listingId = Number(parsed.args.listingId); break; }
+    } catch { /* not our event, skip */ }
+  }
+  if (listingId === null) throw new Error('CreditListed event not found in receipt — listing may not have registered');
+
+  console.log(`   ✅ Listed on-chain, listingId ${listingId}, tx: ${tx.hash}`);
+  return { txHash: tx.hash, blockNumber: receipt.blockNumber, listingId };
+};
+
+/** Cancel a listing on the seller's behalf. Zero approval needed — the
+ *  Marketplace already holds the escrowed tokens itself. */
+const cancelListingForOnChain = async (sellerWallet, listingIdOnchain) => {
+  const { marketContract } = getContracts();
+  if (!marketContract) throw new Error('MARKETPLACE_ADDRESS not set in .env');
+
+  console.log(`📉 Cancelling listing ${listingIdOnchain} for seller ${sellerWallet} (operator-executed)...`);
+  const tx = await marketContract.cancelListingFor(sellerWallet, listingIdOnchain);
+  const receipt = await tx.wait();
+  if (receipt.status !== 1) throw new Error(`cancelListingFor reverted — tx: ${tx.hash}`);
+  console.log(`   ✅ Delisted on-chain, tx: ${tx.hash}`);
+  return { txHash: tx.hash, blockNumber: receipt.blockNumber };
+};
+
+/** THE fix for the core bug: actually transfers escrowed tokens from a
+ *  listing to the buyer for an INR/Razorpay-paid purchase. Call this once
+ *  payment is confirmed — this is what was missing before (logINRTrade()
+ *  alone never moved any tokens). */
+const settleINRTradeOnChain = async ({
+  listingIdOnchain, buyerWallet, amount, priceINRPaise, dbTradeId, payMode = 'razorpay', timestamp,
+}) => {
+  const { marketContract } = getContracts();
+  if (!marketContract) throw new Error('MARKETPLACE_ADDRESS not set in .env');
+
+  const tradeIdHash = ethers.keccak256(ethers.toUtf8Bytes(String(dbTradeId)));
+  const modeEnum    = payMode === 'inr_wallet' ? MODE_INR_WALLET : MODE_RAZORPAY;
+  const ts           = timestamp || Math.floor(Date.now() / 1000);
+
+  console.log(`💰 Settling INR trade ${dbTradeId} — listing ${listingIdOnchain}, ${amount} credits to ${buyerWallet}...`);
+
+  const tx = await marketContract.settleINRTrade(
+    listingIdOnchain, buyerWallet, amount, Math.round(priceINRPaise), tradeIdHash, modeEnum, ts
+  );
+  const receipt = await tx.wait();
+  if (receipt.status !== 1) throw new Error(`settleINRTrade reverted — tx: ${tx.hash}`);
+
+  console.log(`   ✅ Settled on-chain, block ${receipt.blockNumber}, tx: ${tx.hash}`);
+  return { txHash: tx.hash, blockNumber: receipt.blockNumber };
+};
+
+module.exports = {
+  mintApprovedCredit, verifyKYCOnChain, getLiveETHRate,
+  retireCreditForOnChain, listCreditForOnChain, cancelListingForOnChain, settleINRTradeOnChain,
+};

@@ -1,33 +1,26 @@
-// scripts/redeploy-marketplace-v2.js
+// scripts/redeploy-marketplace-v3.js
 // ─────────────────────────────────────────────────────────────────────────────
-// Redeploys ONLY the Marketplace contract (v2 — with logINRTrade/
-// batchLogINRTrades/verifyTrade), reusing your EXISTING CarbonCreditToken,
-// KYCRegistry, Treasury, and AMMPool addresses. Does NOT touch those other
-// contracts or their state (KYC verifications, credit balances, etc.).
+// Redeploys ONLY the Marketplace contract (v3 — adds listCreditFor,
+// cancelListingFor, settleINRTrade for operator-executed/MetaMask-free
+// trading), reusing your EXISTING CarbonCreditToken, KYCRegistry, Treasury,
+// and AMMPool addresses. Mirrors redeploy-marketplace-v2.js exactly — same
+// constructor signature, same signerWallet concept, same wiring steps.
 //
-// WHY: your currently-deployed Marketplace is the old v1 version (4-arg
-// constructor, no logINRTrade). This script deploys the v2 version (5-arg
-// constructor, includes signerWallet) and rewires Treasury/AMMPool to
-// recognize the new address.
+// SAFE: does not touch CarbonCreditToken or its state. Your existing minted
+// credits, balances, and KYC verifications are untouched.
 //
-// BEFORE RUNNING — set these in your .env (some likely already there from
-// the original deployment):
-//   CARBON_CREDIT_TOKEN_ADDRESS   — existing, reused as-is
-//   KYC_REGISTRY_ADDRESS          — existing, reused as-is
-//   TREASURY_ADDRESS              — existing, reused as-is
-//   AMM_POOL_ADDRESS              — existing, reused as-is (optional — skipped if unset)
-//   CHAIN_SIGNER_PRIVATE_KEY      — used to derive the on-chain signerWallet
-//                                    (or set SIGNER_WALLET directly to override)
+// BEFORE RUNNING — same env vars as v2:
+//   CARBON_CREDIT_TOKEN_ADDRESS, KYC_REGISTRY_ADDRESS, TREASURY_ADDRESS,
+//   AMM_POOL_ADDRESS (optional), CHAIN_SIGNER_PRIVATE_KEY (or SIGNER_WALLET)
 //
-// IMPORTANT CAVEAT: any listings, buy orders, or trade history stored in the
-// OLD Marketplace contract's own mappings do NOT carry over — those live
-// only in the old contract's storage. This only matters for ETH-side
-// listings/orders that were placed against the old Marketplace address.
-// If you have live listings on it, you'll need to either let them expire
-// naturally or handle migration separately — this script does not attempt
-// that.
+// The signerWallet here MUST be the same wallet as MINTER_PRIVATE_KEY in
+// ethertrack-backend/.env — that's the wallet that will call
+// listCreditFor/cancelListingFor/settleINRTrade via services/minter.js.
 //
-// Run: npx hardhat run scripts/redeploy-marketplace-v2.js --network sepolia
+// CAVEAT: any listings/orders on the OLD Marketplace (v2) do not carry over —
+// same caveat as the v2 script.
+//
+// Run: npx hardhat run scripts/redeploy-marketplace-v3.js --network sepolia
 // ─────────────────────────────────────────────────────────────────────────────
 
 const hre  = require("hardhat");
@@ -59,7 +52,8 @@ async function main() {
   };
   const explorer = EXPLORERS[network] || '';
 
-  console.log("🔁 EtherTrack Marketplace v2 — targeted redeploy");
+  console.log("🔁 EtherTrack Marketplace v3 — targeted redeploy");
+  console.log("   (adds listCreditFor / cancelListingFor / settleINRTrade)");
   console.log("══════════════════════════════════════════════════════");
   console.log(`Network:  ${network} (chainId: ${chainId})`);
   console.log(`Deployer: ${deployer.address}`);
@@ -72,7 +66,9 @@ async function main() {
   const treasuryAddress    = requireEnv('TREASURY_ADDRESS');
   const ammPoolAddress     = process.env.AMM_POOL_ADDRESS || null;
 
-  // ── Signer wallet — must match CHAIN_SIGNER_PRIVATE_KEY used by chainLogger.js ──
+  // ── Signer wallet — MUST match MINTER_PRIVATE_KEY used by services/minter.js.
+  // This wallet is what calls listCreditFor/cancelListingFor/settleINRTrade,
+  // so it MUST be the same wallet as the backend's operator functions use.
   let signerWallet = process.env.SIGNER_WALLET;
   if (!signerWallet) {
     const key = requireEnv('CHAIN_SIGNER_PRIVATE_KEY');
@@ -87,6 +83,11 @@ async function main() {
   console.log(`  AMMPool           : ${ammPoolAddress || '(not set — will skip wiring)'}`);
   console.log(`  Signer wallet     : ${signerWallet}`);
   console.log("");
+  console.log("⚠️  IMPORTANT: confirm this signerWallet's private key matches");
+  console.log("   MINTER_PRIVATE_KEY in ethertrack-backend/.env — services/minter.js's");
+  console.log("   listCreditForOnChain/cancelListingForOnChain/settleINRTradeOnChain");
+  console.log("   will sign with that key and it must match this address, or every");
+  console.log("   operator-only call will revert with 'Marketplace: not signer'.\n");
 
   // ── Sanity check: confirm bytecode actually exists at each reused address ──
   for (const [name, addr] of Object.entries({
@@ -103,19 +104,19 @@ async function main() {
   }
   console.log("✅ All reused addresses verified to have deployed bytecode.\n");
 
-  // ── Deploy Marketplace v2 ───────────────────────────────────────────────
-  console.log("🚀 Deploying Marketplace v2...");
+  // ── Deploy Marketplace v3 ───────────────────────────────────────────────
+  console.log("🚀 Deploying Marketplace v3...");
   const Marketplace = await hre.ethers.getContractFactory("Marketplace");
   const marketplace = await Marketplace.deploy(
     deployer.address,     // initialOwner
     creditTokenAddress,   // creditTokenAddress
     kycRegistryAddress,   // kycRegistryAddress
     treasuryAddress,      // treasuryAddress
-    signerWallet          // _signerWallet — the new v2 arg
+    signerWallet          // _signerWallet
   );
   await marketplace.waitForDeployment();
   const newMarketplaceAddress = await marketplace.getAddress();
-  console.log(`   ✅ Marketplace v2 deployed: ${newMarketplaceAddress}`);
+  console.log(`   ✅ Marketplace v3 deployed: ${newMarketplaceAddress}`);
 
   // ── Post-deployment wiring ─────────────────────────────────────────────
   console.log("\n⚙️  Post-deployment configuration...");
@@ -123,9 +124,8 @@ async function main() {
   const treasury = await hre.ethers.getContractAt("Treasury", treasuryAddress);
   await treasury.authorizeDepositor(newMarketplaceAddress);
   console.log("   ✅ New Marketplace authorized as Treasury depositor");
-  console.log("   ⚠️  Old Marketplace's depositor authorization was NOT revoked.");
-  console.log("      If Treasury exposes a revoke/deauthorize function, consider");
-  console.log("      calling it manually against the OLD Marketplace address.");
+  console.log("   ⚠️  Old Marketplace (v2)'s depositor authorization was NOT revoked.");
+  console.log("      Consider revoking it manually if Treasury exposes that function.");
 
   if (ammPoolAddress) {
     await marketplace.setAMMPool(ammPoolAddress);
@@ -133,8 +133,7 @@ async function main() {
     await marketplace.setAMMThreshold(100);
     console.log("   ✅ AMM threshold set: ≤100 credits → AMM, >100 → Order Book");
   } else {
-    console.log("   ⚠️  AMM_POOL_ADDRESS not set — skipped AMM wiring. Run");
-    console.log("      marketplace.setAMMPool(<address>) manually if you use one.");
+    console.log("   ⚠️  AMM_POOL_ADDRESS not set — skipped AMM wiring.");
   }
 
   // ── Save deployment record ─────────────────────────────────────────────
@@ -147,8 +146,9 @@ async function main() {
     chainId: chainId.toString(),
     deployer: deployer.address,
     timestamp: new Date().toISOString(),
-    action: 'marketplace-v2-redeploy',
+    action: 'marketplace-v3-redeploy',
     newMarketplaceAddress,
+    newFunctions: ['listCreditFor', 'cancelListingFor', 'settleINRTrade'],
     reused: {
       CarbonCreditToken: creditTokenAddress,
       KYCRegistry: kycRegistryAddress,
@@ -159,15 +159,15 @@ async function main() {
   };
 
   fs.writeFileSync(
-    path.join(deploymentsDir, `${network}_marketplace-v2_${timestamp}.json`),
+    path.join(deploymentsDir, `${network}_marketplace-v3_${timestamp}.json`),
     JSON.stringify(deploymentData, null, 2)
   );
-  console.log(`\n📁 Saved deployment record: deployments/${network}_marketplace-v2_${timestamp}.json`);
+  console.log(`\n📁 Saved deployment record: deployments/${network}_marketplace-v3_${timestamp}.json`);
 
   // ── Summary ─────────────────────────────────────────────────────────────
   console.log("");
   console.log("══════════════════════════════════════════════════════");
-  console.log("🎉 MARKETPLACE V2 REDEPLOYED");
+  console.log("🎉 MARKETPLACE V3 REDEPLOYED");
   console.log("══════════════════════════════════════════════════════");
   const link = explorer ? `\n  ${explorer}/${newMarketplaceAddress}` : '';
   console.log(`New Marketplace address: ${newMarketplaceAddress}${link}`);
@@ -177,6 +177,10 @@ async function main() {
   console.log("");
   console.log("UPDATE THIS IN YOUR FRONTEND .env:");
   console.log(`REACT_APP_MARKETPLACE_ADDRESS=${newMarketplaceAddress}`);
+  console.log("");
+  console.log("NEXT STEP — sellers must approve the new Marketplace ONCE before");
+  console.log("listCreditFor() can escrow their tokens on their behalf:");
+  console.log(`  creditToken.setApprovalForAll("${newMarketplaceAddress}", true)`);
   console.log("══════════════════════════════════════════════════════");
 
   if (network !== 'localhost') {

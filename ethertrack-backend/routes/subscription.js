@@ -16,7 +16,7 @@ const { body, query: qv, validationResult } = require('express-validator');
 
 const { safeQuery: query, withTransaction } = require('../db/pool');
 const { authenticate, requireKYC }          = require('../middleware/auth');
-const { generateGSTInvoice, serveInvoice }  = require('../services/invoice');
+const { generateGSTInvoice, serveInvoice, getGSTType }  = require('../services/invoice');
 const { createNotification }               = require('../routes/notifications');
 const { sendPaymentFailedEmail, sendPlanSelectedEmail, sendSubscriptionCancelledEmail } = require('../services/email');
 const { rateLimit, ipKeyGenerator }        = require('express-rate-limit');
@@ -132,6 +132,15 @@ const checkIdempotency = async (userId, key) => {
 
 // FIX: pass amount_paise/100 as explicit $18 param to avoid pg type conflict
 const insertPayment = async (f) => {
+  // Persist the CGST/SGST-vs-IGST determination at insert time — previously
+  // this was computed correctly at PDF-generation time but never saved,
+  // making it impossible to bulk-export the split for GST return filing.
+  const gstType = getGSTType(f.gstin, f.buyerStateCode);
+  const isIgst  = gstType === 'igst';
+  const cgstPaise = isIgst ? 0 : Math.round((f.gst_amount_paise || 0) / 2);
+  const sgstPaise = isIgst ? 0 : Math.round((f.gst_amount_paise || 0) / 2);
+  const igstPaise = isIgst ? (f.gst_amount_paise || 0) : 0;
+
   const { rows } = await query(
     `INSERT INTO subscription_payments
        (user_id, plan, cycle,
@@ -139,8 +148,9 @@ const insertPayment = async (f) => {
         pay_method, status, idempotency_key,
         razorpay_order_id, wallet_address, signature,
         metamask_address, metamask_message,
-        gstin, pan, renewal_date, amount)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+        gstin, pan, renewal_date, amount,
+        gst_type, buyer_state_code, cgst_paise, sgst_paise, igst_paise)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
      RETURNING id`,
     [
       f.user_id, f.plan, f.cycle,
@@ -155,6 +165,7 @@ const insertPayment = async (f) => {
       f.pan                || null,
       f.renewal_date       || null,
       f.amount_paise / 100,
+      gstType, f.buyerStateCode || null, cgstPaise, sgstPaise, igstPaise,
     ]
   );
   return rows[0].id;

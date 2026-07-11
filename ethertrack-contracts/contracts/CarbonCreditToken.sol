@@ -20,6 +20,24 @@ contract CarbonCreditToken is ERC1155, ERC1155Supply, ERC1155Burnable, Ownable, 
 
     KYCRegistry public kycRegistry;
 
+    // ── [NEW] Operator role — a backend-controlled wallet (or the Marketplace
+    // contract itself) authorized to execute actions on behalf of users who
+    // pay via INR/Razorpay, so those users never need to sign a MetaMask
+    // transaction for routine listing/buying/retiring. The operator can only
+    // ever move tokens that a wallet ALREADY legitimately holds/escrowed —
+    // it cannot mint into existence or bypass KYC checks. ──────────────────
+    address public operator;
+
+    event OperatorUpdated(address indexed oldOperator, address indexed newOperator);
+
+    modifier onlyOperator() {
+        require(
+            msg.sender == operator || msg.sender == owner(),
+            "CarbonCreditToken: not operator"
+        );
+        _;
+    }
+
     // ── Credit Standards ──────────────────────────────────
     enum Standard { VCS, GS, CDM, ACR }
 
@@ -184,6 +202,38 @@ contract CarbonCreditToken is ERC1155, ERC1155Supply, ERC1155Burnable, Ownable, 
         emit CreditRetired(tokenId, msg.sender, amount, creditMetadata[tokenId].projectName);
     }
 
+    /**
+     * @notice [NEW] Operator-executed retirement — lets the backend retire
+     *         credits on a user's behalf (e.g. a user who paid via INR/UPI
+     *         and never personally holds a MetaMask session open) WITHOUT
+     *         requiring their signature. This does NOT let the operator
+     *         retire credits arbitrarily — `beneficiary` must already
+     *         genuinely hold `amount` of `tokenId` on-chain (checked below,
+     *         same as the self-service retireCredit above), and the burn is
+     *         attributed to `beneficiary`, not the operator, so GHG
+     *         Protocol / BRSR retirement records remain correctly credited
+     *         to whoever actually retired the credit.
+     */
+    function retireCreditFor(
+        address beneficiary,
+        uint256 tokenId,
+        uint256 amount
+    ) external onlyOperator whenNotPaused nonReentrant onlyKYCVerified(beneficiary) {
+        require(amount > 0,                                  "Amount must be > 0");
+        require(balanceOf(beneficiary, tokenId) >= amount,   "Insufficient credits");
+
+        totalRetired[tokenId]              += amount;
+        retiredBy[beneficiary][tokenId]    += amount;
+
+        if (totalSupply(tokenId) - amount == 0) {
+            creditMetadata[tokenId].active = false;
+        }
+
+        _burn(beneficiary, tokenId, amount);
+
+        emit CreditRetired(tokenId, beneficiary, amount, creditMetadata[tokenId].projectName);
+    }
+
     // ── Transfer Override (KYC check) ─────────────────────
     function safeTransferFrom(
         address from,
@@ -236,6 +286,14 @@ contract CarbonCreditToken is ERC1155, ERC1155Supply, ERC1155Burnable, Ownable, 
     // ── Admin ─────────────────────────────────────────────
     function pause()   external onlyOwner { _pause();   }
     function unpause() external onlyOwner { _unpause(); }
+
+    // [NEW] Set the backend operator wallet authorized to call
+    // retireCreditFor() on behalf of beneficiaries.
+    function setOperator(address _operator) external onlyOwner {
+        require(_operator != address(0), "Zero address");
+        emit OperatorUpdated(operator, _operator);
+        operator = _operator;
+    }
 
     // ── Required overrides ────────────────────────────────
     function _update(

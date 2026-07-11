@@ -34,6 +34,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
   LineChart, Line, Legend,
 } from 'recharts';
+import SellerApprovalBanner from '../components/SellerApprovalBanner';
 
 // ── RBAC ─────────────────────────────────────────────────────────
 const PERMISSIONS = {
@@ -1948,6 +1949,7 @@ const result = await retireCredit(credit.tokenId, qty);
           </div>
 
           <KYCExpiryBanner navigate={navigate}/>
+          <SellerApprovalBanner />
 
           {walletAddress && !isKYCVerified && (
             <div role="alert" style={{ marginBottom:20, padding:'12px 16px', background:'#110a00',

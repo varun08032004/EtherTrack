@@ -1,0 +1,8 @@
+{
+  "network": "sepolia",
+  "chainId": "11155111",
+  "deployer": "0xE026653F4fDfe7Bd02fd1F6534Da631DD3410489",
+  "timestamp": "2026-07-11T06:56:49.127Z",
+  "creditLedgerAddress": "0x2BB7311A29f435975Ea9DaBDafba94FD66731352",
+  "operator": "0xE026653F4fDfe7Bd02fd1F6534Da631DD3410489"
+}

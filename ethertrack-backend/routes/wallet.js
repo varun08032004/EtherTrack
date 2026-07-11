@@ -25,6 +25,18 @@ const { safeQuery: query, pool }       = require('../db/pool');
 const { authenticate, invalidateUserCache } = require('../middleware/auth');
 const { createNotification }           = require('./notifications');
 const { sendWalletConnectedEmail, sendDepositConfirmedEmail, sendWithdrawalProcessedEmail, sendWithdrawalFailedEmail, sendBankAccountAddedEmail, sendBankAccountRemovedEmail } = require('../services/email');
+const { verifyKYCOnChain } = require('../services/minter');
+
+// ── Audit log helper (mirrors routes/admin.js's auditLog) ────────────────────
+const auditLog = async (adminId, action, targetUserId, details) => {
+  try {
+    await query(
+      `INSERT INTO admin_audit_log (admin_id, action, target_user_id, details)
+       VALUES ($1,$2,$3,$4)`,
+      [adminId, action, targetUserId || null, details || null]
+    );
+  } catch (e) { console.warn('[auditLog] failed:', e.message); }
+};
 
 // ── Compliance stubs ──────────────────────────────────────────────────────────
 const runComplianceChecks = async (userId, amount, type) => ({
@@ -970,6 +982,37 @@ router.post('/bind', authenticate, walletWriteLimiter, async (req, res) => {
     await invalidateUserCache(req.user.id);
 
     log.info({ userId: req.user.id, wallet: mask(walletAddress) }, 'Wallet bound');
+
+    // [FIX-4] Backfill on-chain KYC registration for users who verified KYC
+    // BEFORE binding a wallet. routes/admin.js's `/kyc/:id/approve` only
+    // calls verifyKYCOnChain() if a wallet_address already exists at
+    // approval time — if it doesn't, the on-chain call is silently skipped
+    // with no audit entry and no user-facing error, leaving the DB marked
+    // kyc_verified=TRUE while KYCRegistry has no record for the wallet.
+    // Binding a wallet is the other moment this can be corrected, so we
+    // check and (re)trigger it here too.
+    try {
+      const { rows: kycRows } = await query(
+        'SELECT kyc_verified, kyc_data_hash FROM users WHERE id = $1',
+        [req.user.id]
+      );
+      if (kycRows[0]?.kyc_verified) {
+        setImmediate(async () => {
+          try {
+            const r = await verifyKYCOnChain(walletAddress.toLowerCase(), kycRows[0].kyc_data_hash);
+            if (!r.skipped) {
+              log.info({ userId: req.user.id, txHash: r.txHash }, 'KYC on-chain registered after wallet bind');
+              await auditLog(req.user.id, 'KYC_ONCHAIN_REGISTERED_ON_BIND', req.user.id, `TX: ${r.txHash}`);
+            }
+          } catch (e) {
+            log.warn({ userId: req.user.id, err: e.message }, 'KYC on-chain registration on wallet bind failed');
+            await auditLog(req.user.id, 'KYC_ONCHAIN_FAILED_ON_BIND', req.user.id, e.message);
+          }
+        });
+      }
+    } catch (e) {
+      log.warn({ userId: req.user.id, err: e.message }, 'KYC on-chain sync check failed');
+    }
 
     sendWalletConnectedEmail(req.user.email, {
       name: req.user.full_name, walletAddress: walletAddress.toLowerCase(),

@@ -1046,4 +1046,7 @@ module.exports = {
   serveInvoice, serveTradeInvoice,
   patchInvoiceWithChainConfirmation,
   computeIntegrityHash, // needed by routes/verify.js to recompute + display the hash
+  getGSTType, // needed by subscription.js/trades.js to persist the CGST/SGST-vs-IGST
+              // determination at insert time — previously computed only at PDF-render
+              // time and never saved, making bulk GST filing exports impossible.
 };

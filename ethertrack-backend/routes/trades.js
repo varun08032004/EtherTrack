@@ -39,6 +39,15 @@
  *
  * [INVOICE-ROUTE]  GET /api/trades/:id/invoice — authenticated buyer can
  *                  download their trade GST invoice (or ETH bill) as PDF.
+ *
+ * [GST-SPLIT]      platform_fees now persists the CGST/SGST-vs-IGST
+ *                  determination (gst_type, cgst_inr, sgst_inr, igst_inr) at
+ *                  insert time instead of only computing it at PDF-render
+ *                  time — needed for bulk GST return filing exports.
+ *
+ * [SELLER-EMAIL]   Sellers now get an email when their listing sells, not
+ *                  just an in-app notification — previously only the buyer
+ *                  ever received anything by email (their invoice/bill).
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -50,7 +59,7 @@ const { safeQuery: query, withTransaction } = require('../db/pool');
 const { authenticate, requireKYC }          = require('../middleware/auth');
 const { createNotification }                = require('./notifications');
 const chainLogger                           = require('../services/chainLogger');
-const { generateTradeInvoice, generateTradeBill, serveTradeInvoice } = require('../services/invoice');
+const { generateTradeInvoice, generateTradeBill, serveTradeInvoice, getGSTType } = require('../services/invoice');
 const { sendCreditsSoldEmail } = require('../services/email');
 
 // ── Razorpay client ──────────────────────────────────────────────────────────
@@ -361,14 +370,27 @@ router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) 
       );
       tradeId = tradeRows[0].id;
 
+      // [GST-SPLIT] Persist the CGST/SGST-vs-IGST determination now instead
+      // of only computing it later at PDF-render time — needed for bulk
+      // GST return filing exports. buyerStateCode is not collected at
+      // checkout, so this resolves via GSTIN prefix when provided, or the
+      // same-state assumption otherwise (same default as the PDF logic).
+      const gstType = getGSTType(buyerGstin, undefined);
+      const isIgst  = gstType === 'igst';
+      const cgstInr = isIgst ? 0 : fees.gstINR / 2;
+      const sgstInr = isIgst ? 0 : fees.gstINR / 2;
+      const igstInr = isIgst ? fees.gstINR : 0;
+
       await client.query(
         `INSERT INTO platform_fees
            (trade_id, buyer_fee_inr, seller_fee_inr, total_fee_inr, gst_inr,
-            platform_net_inr, fee_eth, eth_rate, payment_mode, status)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'collected')
+            platform_net_inr, fee_eth, eth_rate, payment_mode, status,
+            gst_type, cgst_inr, sgst_inr, igst_inr)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'collected',$10,$11,$12,$13)
          ON CONFLICT DO NOTHING`,
         [tradeId, fees.buyerFeeINR, fees.sellerFeeINR, fees.totalFeeINR,
-         fees.gstINR, fees.platformNetINR, feeETH, ethRate, paymentMode]
+         fees.gstINR, fees.platformNetINR, feeETH, ethRate, paymentMode,
+         gstType, cgstInr, sgstInr, igstInr]
       ).catch(() => {});
 
       if (paymentMode === 'eth') {
@@ -471,12 +493,14 @@ router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) 
         '/wallet', { tradeId, quantity: qty }).catch(() => {}),
     ]);
 
+    // [SELLER-EMAIL] Seller only ever got the in-app notification above —
+    // never an email, despite money landing in their account.
     if (batch.seller_email) {
       sendCreditsSoldEmail(batch.seller_email, {
         name: batch.seller_name, projectName: batch.project_name, quantity: qty,
         amountINR: fees.sellerGetsINR.toLocaleString('en-IN'), pending: paymentMode !== 'inr',
         walletUrl: `${process.env.FRONTEND_URL}/wallet`,
-      }).catch(e => console.warn('[trades/checkout-verify] seller email failed:', e.message));
+      }).catch(e => console.warn('[trades/record] seller email failed:', e.message));
     }
 
     const { rows: updatedBuyer }  = await query('SELECT inr_balance FROM users WHERE id = $1', [req.user.id]);
@@ -516,6 +540,23 @@ router.post('/checkout-order', authenticate, requireKYC, tradeLimiter, async (re
 
   if (!batchId || !quantity || !pricePerCreditINR)
     return res.status(400).json({ error: 'batchId, quantity, pricePerCreditINR required' });
+
+  // [FIX-INR-SETTLEMENT] listingId used to be optional here, which allowed
+  // a trade to be created with nothing to actually settle against on-chain
+  // later — this was the root cause of trades being marked 'completed' in
+  // the DB while never actually transferring the underlying token (the bug
+  // this whole INR flow needed fixing). A real on-chain listing (escrowed
+  // via listCredit/listCreditFor) is now required before a purchase can be
+  // initiated at all.
+  if (listingId == null) {
+    return res.status(400).json({
+      error: 'This batch is not yet listed on-chain. Ask the seller to list it before it can be purchased.',
+    });
+  }
+  // [FIX-LEDGER] Wallet is no longer required here — a buyer with no linked
+  // wallet is delivered credits via CreditLedger (pooled custody + on-chain
+  // audit log, see services/creditLedger.js) instead of a direct token
+  // transfer. See checkout-verify below for the actual branch.
 
   const qty          = parseInt(quantity);
   const pricePerCredit = parseFloat(pricePerCreditINR);
@@ -616,7 +657,7 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
 
   try {
     const { rows: batches } = await query(
-      `SELECT cb.*, u.id AS seller_id, u.wallet_address AS seller_wallet, u.email AS seller_email
+      `SELECT cb.*, u.id AS seller_id, u.wallet_address AS seller_wallet, u.email AS seller_email, u.full_name AS seller_name
        FROM carbon_batches cb JOIN users u ON u.id = cb.user_id
        WHERE cb.id = $1`, [order.batch_id]
     );
@@ -690,14 +731,21 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
         );
       }
 
+      // [GST-SPLIT] No GSTIN is ever captured on this checkout path — always
+      // resolves to the same-state assumption, same as the existing PDF logic.
+      const cgstInr2 = fees.gstINR / 2;
+      const sgstInr2 = fees.gstINR / 2;
+
       await client.query(
         `INSERT INTO platform_fees
            (trade_id, buyer_fee_inr, seller_fee_inr, total_fee_inr, gst_inr,
-            platform_net_inr, fee_eth, eth_rate, payment_mode, status, razorpay_payment_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'direct_razorpay','collected',$9)
+            platform_net_inr, fee_eth, eth_rate, payment_mode, status, razorpay_payment_id,
+            gst_type, cgst_inr, sgst_inr, igst_inr)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'direct_razorpay','collected',$9,'cgst_sgst',$10,$11,0)
          ON CONFLICT DO NOTHING`,
         [tradeId, fees.buyerFeeINR, fees.sellerFeeINR, fees.totalFeeINR, fees.gstINR,
-         fees.platformNetINR, fees.totalFeeINR / ethRate, ethRate, razorpay_payment_id]
+         fees.platformNetINR, fees.totalFeeINR / ethRate, ethRate, razorpay_payment_id,
+         cgstInr2, sgstInr2]
       ).catch(() => {});
 
       // [FIX-LISTED-QTY] decrement listed_quantity alongside available_credits
@@ -727,16 +775,72 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
       );
     });
 
-    chainLogger.logTrade({
-      dbTradeId:         tradeId,
-      tokenId:           batch.token_id,
-      quantity:          qty,
-      pricePerCreditINR: pricePerCredit,
-      paymentMode:       'direct_razorpay',
-      buyerWallet:       req.user.wallet_address || null,
-      sellerWallet:      batch.seller_wallet,
-      settledAt:         new Date(),
-    }).catch(err => console.error('[checkout-verify] chain log error:', err.message));
+    // [FIX-INR-SETTLEMENT / FIX-LEDGER] This used to call chainLogger.logTrade(),
+    // which only writes an audit-log entry and NEVER actually transfers or
+    // records the underlying credit — that's why 11 historical trades were
+    // marked 'completed'/'confirmed' in the DB while the buyer's real balance
+    // stayed at zero. Now branches on whether the buyer has a linked wallet:
+    //   - Has a wallet  → settleINRTradeOnChain: real ERC-1155 transfer from
+    //                      Marketplace's escrow into the buyer's own wallet.
+    //   - No wallet     → logOwnershipChangeOnChain: credit stays in pooled
+    //                      custody, ownership recorded via CreditLedger's
+    //                      tamper-evident on-chain log instead. No wallet,
+    //                      no MetaMask, ever — but still fully on-chain and
+    //                      independently verifiable.
+    // Either way, 'confirmed' now means a real on-chain action happened.
+    try {
+      if (req.user.wallet_address) {
+        const { settleINRTradeOnChain } = require('../services/minter');
+        const result = await settleINRTradeOnChain({
+          listingIdOnchain : order.listing_id,
+          buyerWallet      : req.user.wallet_address,
+          amount           : qty,
+          priceINRPaise    : Math.round(pricePerCredit * 100),
+          dbTradeId        : tradeId,
+          payMode          : 'razorpay',
+          timestamp        : Math.floor(Date.now() / 1000),
+        });
+
+        await query(
+          `UPDATE trades SET chain_status = 'confirmed', chain_tx_hash = $1, chain_block = $2 WHERE id = $3`,
+          [result.txHash, result.blockNumber, tradeId]
+        );
+        console.log(`[checkout-verify] Trade ${tradeId} settled on-chain (wallet) — TX: ${result.txHash}`);
+      } else {
+        const { logOwnershipChangeOnChain } = require('../services/creditLedger');
+        const result = await logOwnershipChangeOnChain({
+          userId      : req.user.id,
+          tokenId     : batch.token_id,
+          amountDelta : qty,
+          actionType  : 'BUY',
+          refTable    : 'trades',
+          refId       : tradeId,
+          note        : `Purchase — ${batch.project_name}`,
+        });
+
+        await query(
+          `UPDATE trades SET chain_status = 'confirmed', chain_tx_hash = $1, chain_block = $2 WHERE id = $3`,
+          [result.txHash, result.blockNumber, tradeId]
+        );
+        console.log(`[checkout-verify] Trade ${tradeId} logged on-chain (ledger, no wallet) — TX: ${result.txHash}`);
+      }
+    } catch (chainErr) {
+      // Payment already succeeded (Razorpay captured real money) — we must
+      // NOT fail the HTTP response at this point, but we MUST make the
+      // failure visible and actionable rather than silently marking
+      // 'confirmed' like the old code path did.
+      await query(
+        `UPDATE trades SET chain_status = 'failed' WHERE id = $1`,
+        [tradeId]
+      ).catch(() => {});
+      await query(
+        `INSERT INTO admin_audit_log (admin_id, action, target_user_id, details)
+         VALUES ($1,$2,$3,$4)`,
+        [req.user.id, 'INR_TRADE_ONCHAIN_SETTLEMENT_FAILED', req.user.id,
+         `Trade ${tradeId} — payment captured but on-chain settlement failed: ${chainErr.message}`]
+      ).catch(() => {});
+      console.error(`[checkout-verify] ⚠️ On-chain settlement FAILED for trade ${tradeId} — payment already captured. Needs manual remediation:`, chainErr.message);
+    }
 
     fireTradeInvoice({
       tradeId,
@@ -759,6 +863,8 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
         '/wallet', { tradeId, quantity: qty }).catch(() => {}),
     ]);
 
+    // [SELLER-EMAIL] Seller only ever got the in-app notification above —
+    // never an email, despite money landing in their account.
     if (batch.seller_email) {
       sendCreditsSoldEmail(batch.seller_email, {
         name: batch.seller_name, projectName: batch.project_name, quantity: qty,
