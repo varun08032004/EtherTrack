@@ -129,6 +129,7 @@ const verifyRoutes      = require('./routes/verify');
 // Separate file/mount from routes/verify.js above (which already owns /api/verify
 // for something else) to avoid overwriting existing behavior.
 const invoiceVerifyRoutes = require('./routes/invoiceVerify');
+const opsIntegrationRoutes = require('./routes/opsIntegration'); // read-only revenue feed for the internal ops ERP (etpl_ops)
 const tradeRoutes       = require('./routes/trades');
 const marketRoutes      = require('./routes/market');
 const ipfsRoutes        = require('./routes/ipfsRoute');
@@ -354,6 +355,7 @@ app.use('/api/support/tickets',     limiter(60 * 60 * 1000,  10,  'Too many supp
 app.use('/api/erp/:erpId/test',     limiter(60 * 60 * 1000,  10,  'Too many ERP connection tests. Try again later.'));
 app.use('/api/erp/:erpId/pull',     limiter(60 * 60 * 1000,   5,  'Too many ERP data pulls. Try again later.'));
 app.use('/api/erp',                 limiter(15 * 60 * 1000,  60,  'Too many ERP requests. Try again later.'));
+app.use('/api/ops-integration',     limiter(60 * 1000,        20,  'Too many sync requests. Try again later.'));
 // [FIX-INVOICE-VERIFY v16] Public QR-scan endpoint — modest per-IP ceiling on
 // top of the route's own internal limiter (30/min), since this is reachable
 // by anyone who scans a printed invoice, not just logged-in users.
@@ -405,6 +407,7 @@ app.use('/api/market',        marketRoutes);
 app.use('/api/verify',        verifyRoutes);
 // [FIX-INVOICE-VERIFY v16] Public invoice/bill verification (QR code target)
 app.use('/api/invoices',      invoiceVerifyRoutes);
+app.use('/api/ops-integration', opsIntegrationRoutes); // scoped, read-only — see SRS §18.8
 app.use('/api/news',          newsRoutes);
 app.use('/api/auth',          authRoutes);
 app.use('/api/wallet',        walletRoutes);

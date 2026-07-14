@@ -183,11 +183,50 @@ const verifyLedgerBalance = async (userId, tokenId) => {
   };
 };
 
+/**
+ * Transfers ownership between two wallet-free (ledger) users — e.g. a sale
+ * between a ledger seller and a ledger buyer. Executes as two on-chain log
+ * entries (SELL debit on seller, BUY credit on buyer) rather than a single
+ * atomic contract call — CreditLedger.sol doesn't have a combined transfer
+ * function yet. Not atomic on-chain (two separate transactions), but each
+ * individually is a real, immutable log entry; if the second call fails
+ * after the first succeeds, the mismatch is caught by verifyLedgerBalance()
+ * and needs manual reconciliation — same operational discipline as any
+ * two-phase ledger operation.
+ */
+const transferLedgerOwnership = async ({
+  sellerId, buyerId, tokenId, amount, refTable, refId, note = '',
+}) => {
+  const sellerResult = await logOwnershipChangeOnChain({
+    userId: sellerId, tokenId, amountDelta: -amount, actionType: 'SELL',
+    refTable, refId, note,
+  });
+
+  try {
+    const buyerResult = await logOwnershipChangeOnChain({
+      userId: buyerId, tokenId, amountDelta: amount, actionType: 'BUY',
+      refTable, refId, note,
+    });
+    return { sellerResult, buyerResult };
+  } catch (buyerErr) {
+    // Seller's debit already succeeded on-chain and cannot be undone — this
+    // is exactly the scenario verifyLedgerBalance()/the reconciliation cron
+    // exists to catch. Surface it loudly rather than pretending it's fine.
+    console.error(
+      `[transferLedgerOwnership] CRITICAL: seller debit succeeded (tx ${sellerResult.txHash}) ` +
+      `but buyer credit failed: ${buyerErr.message}. Needs manual reconciliation for ` +
+      `seller=${sellerId} buyer=${buyerId} tokenId=${tokenId} amount=${amount}`
+    );
+    throw new Error(`Transfer partially failed — seller debited but buyer not credited. TX: ${sellerResult.txHash}. Contact support.`);
+  }
+};
+
 module.exports = {
   computeUserIdHash,
   getOrCreateUserIdHash,
   logOwnershipChangeOnChain,
   logRetirementOnChain,
+  transferLedgerOwnership,
   getLedgerBalance,
   verifyLedgerBalance,
   ACTION_TYPE,

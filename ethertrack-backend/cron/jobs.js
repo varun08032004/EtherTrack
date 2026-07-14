@@ -524,3 +524,79 @@ console.log('   🔍 KYC expiry enforcement     — every hour at :00');
 console.log('   📋 Listing expiry cleanup     — every hour at :30');
 console.log('   🧹 Activity log TTL cleanup   — daily at 03:00 IST');
 console.log('   ⛓ On-chain KYC sync self-heal — every 30 minutes');
+
+// ══════════════════════════════════════════════════════════════════
+// CRON #6 — Credit ledger reconciliation
+// Runs every hour at :15
+//
+// WHY: CreditLedger.sol tracks each wallet-free user's balance on-chain
+// (userTokenBalance), and credit_ledger_balances mirrors it in the DB for
+// fast reads. These two numbers should ALWAYS match — if they ever drift
+// (a failed transaction that partially applied, a bug, manual DB edit,
+// etc.), that's exactly the kind of silent inconsistency this whole
+// session has been about catching early rather than discovering months
+// later via a support ticket. This periodically compares DB vs on-chain
+// for every user with a ledger balance and logs any mismatch loudly.
+// ══════════════════════════════════════════════════════════════════
+cron.schedule('15 * * * *', async () => {
+  const LOCK_KEY = 'cron:ledger-reconcile:lock';
+  const LOCK_TTL = 50 * 60;
+
+  const locked = await acquireLock(LOCK_KEY, LOCK_TTL);
+  if (!locked) {
+    console.log('📒 [CRON] Ledger reconciliation — lock held by another instance, skipping');
+    return;
+  }
+
+  console.log('📒 [CRON] Running credit ledger reconciliation...');
+  try {
+    const { verifyLedgerBalance } = require('../services/creditLedger');
+
+    const { rows: balances } = await query(`
+      SELECT user_id, token_id FROM credit_ledger_balances
+      WHERE balance > 0 OR total_retired > 0
+    `).catch(() => ({ rows: [] }));
+
+    if (!balances.length) {
+      console.log('📒 [CRON] No ledger balances to reconcile.');
+      return;
+    }
+
+    let matched = 0, mismatched = 0, errored = 0;
+
+    for (const b of balances) {
+      try {
+        const result = await verifyLedgerBalance(b.user_id, b.token_id);
+        if (result.matches) {
+          matched++;
+        } else {
+          mismatched++;
+          console.error(
+            `⚠️  [CRON] LEDGER MISMATCH — user ${b.user_id}, token ${b.token_id}: ` +
+            `DB says ${result.db}, on-chain says ${result.onChain}`
+          );
+          await query(
+            `INSERT INTO admin_audit_log (admin_id, action, target_user_id, details)
+             VALUES ($1,$2,$3,$4)`,
+            [b.user_id, 'LEDGER_BALANCE_MISMATCH', b.user_id,
+             `tokenId=${b.token_id} DB=${result.db} onChain=${result.onChain}`]
+          ).catch(() => {});
+        }
+      } catch (e) {
+        errored++;
+        console.error(`❌ [CRON] Reconciliation check failed for user ${b.user_id}, token ${b.token_id}:`, e.message);
+      }
+    }
+
+    console.log(`📒 [CRON] Reconciliation complete — ✅ ${matched} matched · ⚠️ ${mismatched} mismatched · ❌ ${errored} errored`);
+    if (mismatched > 0) {
+      console.warn(`⚠️  [CRON] ${mismatched} ledger mismatch(es) found — check admin_audit_log for 'LEDGER_BALANCE_MISMATCH' entries. Needs manual investigation.`);
+    }
+  } catch (e) {
+    console.error('❌ [CRON] Ledger reconciliation cron error:', e.message);
+  } finally {
+    await releaseLock(LOCK_KEY);
+  }
+}, { timezone: 'Asia/Kolkata' });
+
+console.log('   📒 Credit ledger reconciliation — every hour at :15');

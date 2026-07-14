@@ -318,6 +318,36 @@ const fetchTradeHistoryFromDB = async () => {
   } catch { return []; }
 };
 
+// [FIX-LEDGER] Wallet-free users' holdings — pooled custody, tracked via
+// CreditLedger.sol + credit_ledger_balances instead of on-chain balanceOf().
+const fetchLedgerCredits = async () => {
+  try {
+    const d = await authFetch('/api/portfolio/my-ledger-credits');
+    return Array.isArray(d?.credits) ? d.credits : [];
+  } catch { return []; }
+};
+
+const listCreditLedgerViaBackend = async (tokenId, batchId, amount, priceInINR, durationDays) => {
+  return authFetch('/api/portfolio/list-credit-ledger', {
+    method: 'POST',
+    body: JSON.stringify({ tokenId, batchId, amount, priceInINR, durationDays }),
+  });
+};
+
+const delistCreditLedgerViaBackend = async (listingId) => {
+  return authFetch('/api/portfolio/delist-credit-ledger', {
+    method: 'POST',
+    body: JSON.stringify({ listingId }),
+  });
+};
+
+const retireCreditLedgerViaBackend = async (tokenId, amount) => {
+  return authFetch('/api/portfolio/retire-credit-ledger', {
+    method: 'POST',
+    body: JSON.stringify({ tokenId, amount }),
+  });
+};
+
 // [FIX-9] Backend calls for operator-executed listing/delisting — no
 // MetaMask signature required. See CHANGELOG note at top of file.
 const listCreditViaBackend = async (tokenId, amount, priceInEth, priceInINR, durationDays) => {
@@ -415,6 +445,7 @@ export function PortfolioProvider({ children }) {
   const [walletMismatchInfo, setWalletMismatchInfo] = useState(null);
   const [myCredits,          setMyCredits]          = useState([]);
   const [myBoughtCredits,    setMyBoughtCredits]    = useState([]);
+  const [myLedgerCredits,    setMyLedgerCredits]    = useState([]);
   const [myRetirements,      setMyRetirements]      = useState([]);
   const [listings,           setListings]           = useState([]);
   const [buyOrders,          setBuyOrders]          = useState([]);
@@ -594,6 +625,18 @@ export function PortfolioProvider({ children }) {
       return normalised;
     } catch (e) {
       console.error('[refreshBoughtCredits]', e);
+      return [];
+    }
+  }, [safeSet]);
+
+  const refreshLedgerCredits = useCallback(async () => {
+    if (!mountedRef.current) return [];
+    try {
+      const raw = await fetchLedgerCredits();
+      safeSet(setMyLedgerCredits)(raw);
+      return raw;
+    } catch (e) {
+      console.error('[refreshLedgerCredits]', e);
       return [];
     }
   }, [safeSet]);
@@ -791,6 +834,7 @@ export function PortfolioProvider({ children }) {
     loadListingsFromAPI();
     refreshBoughtCredits();
     refreshTradeHistory();
+    refreshLedgerCredits();
     fetchMyRetirements().then(safeSet(setMyRetirements));
 
     listingsPollRef.current = setInterval(() => {
@@ -1255,6 +1299,47 @@ export function PortfolioProvider({ children }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [walletAddress, safeSet, loadMyCreditsInternal, loadListings, loadListingsFromAPI]);
 
+  // [FIX-LEDGER] Wallet-free equivalents of listCredit/delistCredit/retireCredit
+  // — no wallet, no MetaMask, ever. Backend calls CreditLedger.sol directly.
+  const listCreditLedger = useCallback(async (tokenId, batchId, amount, priceInINR, durationDays = 30) => {
+    safeSet(setLoading)(l => ({ ...l, tx: true }));
+    try {
+      const result = await listCreditLedgerViaBackend(tokenId, batchId, amount, priceInINR, durationDays);
+      await refreshLedgerCredits();
+      return { success: true, listingId: result.listingId };
+    } catch (e) {
+      throw new Error(e.message || 'Listing failed. Please try again.');
+    } finally {
+      safeSet(setLoading)(l => ({ ...l, tx: false }));
+    }
+  }, [safeSet, refreshLedgerCredits]);
+
+  const delistCreditLedger = useCallback(async (listingId) => {
+    safeSet(setLoading)(l => ({ ...l, tx: true }));
+    try {
+      await delistCreditLedgerViaBackend(listingId);
+      await refreshLedgerCredits();
+      return { success: true };
+    } catch (e) {
+      throw new Error(e.message || 'Delisting failed. Please try again.');
+    } finally {
+      safeSet(setLoading)(l => ({ ...l, tx: false }));
+    }
+  }, [safeSet, refreshLedgerCredits]);
+
+  const retireCreditLedger = useCallback(async (tokenId, amount) => {
+    safeSet(setLoading)(l => ({ ...l, tx: true }));
+    try {
+      const result = await retireCreditLedgerViaBackend(tokenId, amount);
+      await refreshLedgerCredits();
+      return { success: true, txHash: result.txHash, blockNumber: result.blockNumber };
+    } catch (e) {
+      throw new Error(e.message || 'Retirement failed. Please try again.');
+    } finally {
+      safeSet(setLoading)(l => ({ ...l, tx: false }));
+    }
+  }, [safeSet, refreshLedgerCredits]);
+
   // retireCredit — UNCHANGED, still self-service via MetaMask. Operator-
   // executed retirement (retireCreditFor) requires a CarbonCreditToken
   // migration that's deliberately on hold to avoid orphaning already-minted
@@ -1475,7 +1560,7 @@ export function PortfolioProvider({ children }) {
       provider, signer, walletAddress, contracts, chainOk,
       walletMismatch, walletMismatchInfo, error,
       isKYCVerified, refreshKYC,
-      myCredits, myBoughtCredits, myRetirements,
+      myCredits, myBoughtCredits, myLedgerCredits, myRetirements,
       listings, buyOrders, tradeHistory, ammPools,
       marketBuckets,
       stats,
@@ -1484,6 +1569,7 @@ export function PortfolioProvider({ children }) {
       ETH_INR_RATE   : resolvedRate,
       ethRateLoaded  : ethINRRate !== null,
       registerCredit, listCredit, delistCredit, retireCredit,
+      listCreditLedger, delistCreditLedger, retireCreditLedger,
       buyCredit, placeBuyOrder, cancelBuyOrder,
       isSellerApproved, approveMarketplace,
       ammSwapETHForCredits, ammSwapCreditsForETH, ammAddLiquidity,
@@ -1494,6 +1580,7 @@ export function PortfolioProvider({ children }) {
       loadAMMPools,
       refreshBoughtCredits,
       refreshTradeHistory,
+      refreshLedgerCredits,
       refreshRetirements : () => fetchMyRetirements().then(safeSet(setMyRetirements)),
       vintagePenalty, STANDARD_ENUM, STANDARD_FROM_ENUM,
     }}>
