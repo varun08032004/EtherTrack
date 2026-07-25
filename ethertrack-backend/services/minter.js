@@ -164,6 +164,26 @@ const mintApprovedCredit = async (batchId, { force = false } = {}) => {
   if (batch.admin_status !== 'approved')
     throw new Error(`Batch ${batchId} is not approved (admin_status: ${batch.admin_status})`);
 
+  // ── [COMPLIANCE-GATE] India CCTS Carbon Credit Certificates (credit_type
+  // === 'compliance') cannot be minted/listed/traded on EtherTrack's own
+  // on-chain marketplace. Per the CERC (Terms and Conditions for Purchase
+  // and Sale of Carbon Credit Certificates) Regulations, 2026, CCCs may
+  // only be dealt with through CERC-registered Power Exchanges (IEX, PXIL,
+  // HPX) or a mode CERC specifically permits — never OTC/peer-to-peer.
+  // This is a hard block, not a feature flag: it must never be bypassed by
+  // `force`, admin retry, or manual wallet assignment. Compliance batches
+  // stay in a read-only "tracked" state (see admin.js /approve) for the
+  // user's own BRSR/CCTS reporting until EtherTrack has an actual Exchange
+  // membership or broker-partner relationship in place.
+  if (batch.credit_type === 'compliance') {
+    throw new Error(
+      `Batch ${batchId} is a compliance-type credit (India CCTS CCC). ` +
+      `Minting/trading on EtherTrack's own marketplace is not permitted — ` +
+      `CCCs must be traded only through a CERC-registered Power Exchange. ` +
+      `This batch should remain in tracked-only status.`
+    );
+  }
+
   // ✅ FIX: Use 'status' column (not batch_status — that column doesn't exist)
   // Allow retry if status is tokenised but token_id is NULL (partial failure)
   // OR if force=true (admin retry)

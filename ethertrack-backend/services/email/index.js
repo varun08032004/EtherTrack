@@ -57,7 +57,7 @@ module.exports = {
   sendKycResubmissionRequiredEmail: (to, { fullName, reason, kycUrl }) => send('kyc-resubmission-required', to, { fullName, reason, kycUrl }),
   sendKycExpiringSoonEmail: (to, { fullName, daysLeft, expiresOn, kycUrl }) => send('kyc-expiring-soon', to, { fullName, daysLeft, expiresOn, kycUrl }),
   sendKycExpiredEmail: (to, { fullName, expiredOn, listingsRemovedCount, kycUrl }) => send('kyc-expired', to, { fullName, expiredOn, listingsRemovedCount, kycUrl }),
-  sendKycAdminAlert: (to, { userEmail, fullName, idType, submissionId, submittedAt, adminUrl }) => send('kyc-admin-new', to, { userEmail, fullName, idType, submissionId, submittedAt, adminUrl }),
+  sendKycAdminAlert: (to, { userEmail, fullName, idType, submissionId, submittedAt, adminUrl, kycType, entityName, gstin }) => send('kyc-admin-new', to, { userEmail, fullName, idType, submissionId, submittedAt, adminUrl, kycType, entityName, gstin }),
 
   // ── Marketplace (support@) ───────────────────────────────────────────────
   sendCreditListingRejectedEmail: (to, { name, projectName, reason, portfolioUrl }) => send('credit-listing-rejected', to, { name, projectName, reason, portfolioUrl }),

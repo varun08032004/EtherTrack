@@ -1,7 +1,14 @@
 // RetirementCertificate.js
-// CHANGES FROM YOUR VERSION:
-//   [1] handleDownloadPDF now calls /api/certificates/:certId/pdf (server-side Puppeteer)
-//       instead of jsPDF. No more .txt fallback for enterprise auditors.
+// [CERT-OWNERSHIP] [NEW] Added `certificateType` prop ('OWNERSHIP' |
+// 'RETIREMENT', defaults to 'RETIREMENT' so every existing call site keeps
+// working unchanged). Adjusts title/labels for the two cases — the PDF
+// download button needs NO changes at all, since /api/certificates/:certId/pdf
+// on the backend now auto-detects which type a given certId is and renders
+// the correct one; this component only needed its on-page text updated.
+//
+// PRIOR CHANGES (unchanged from your version):
+//   [1] handleDownloadPDF calls /api/certificates/:certId/pdf (server-side
+//       PDFKit) instead of jsPDF. No more .txt fallback for enterprise auditors.
 //   [2] Verifier badge shown when credit.verifier is passed
 //   [3] aria-label + data-testid on action buttons
 
@@ -47,9 +54,10 @@ function QRCodeImg({ value, size = 120 }) {
   );
 }
 
-// [1] verifiers prop — array from useRBAC, same as PortfolioV3 passes
-export function RetirementCertificate({ credit, txHash, onClose, verifiers }) {
+// [CERT-OWNERSHIP] certificateType prop added — 'OWNERSHIP' | 'RETIREMENT'
+export function RetirementCertificate({ credit, txHash, onClose, verifiers, certificateType = 'RETIREMENT' }) {
   const [pdfLoading, setPdfLoading] = useState(false);
+  const isOwnership = certificateType === 'OWNERSHIP';
 
   const date           = new Date().toLocaleDateString('en-IN', { day:'2-digit', month:'long', year:'numeric' });
   const tokenDisplay   = credit.tokenHex || (credit.tokenId ? `0x${Number(credit.tokenId).toString(16).padStart(8,'0').toUpperCase()}` : '—');
@@ -61,17 +69,14 @@ export function RetirementCertificate({ credit, txHash, onClose, verifiers }) {
   const verifiedBy     = credit.acvaName || 'Pending third-party verification';
   const caLabel        = CA_OPTIONS.find(o => o.value === credit.correspondingAdjustment)?.label || 'None';
   const sdgList        = (credit.sdgTags || []).join(', ') || '—';
+  const isPooledCustody = credit.custodyModel === 'pooled';
 
-  // [2] Connected verifier — shown as independent verification badge
   const connectedVerifier = verifiers?.find(v => v.status === 'connected');
 
-  // [1] Server-side PDF — calls Puppeteer backend instead of jsPDF
-  //     No more .txt fallback. If the server is down the button shows an error toast.
   const handleDownloadPDF = async () => {
     if (!certId) return;
     setPdfLoading(true);
     try {
-      // Opens in new tab — browser handles the PDF download natively
       window.open(
         `${process.env.REACT_APP_API_URL || 'http://localhost:5000'}/api/certificates/${certId}/pdf`,
         '_blank',
@@ -96,12 +101,23 @@ export function RetirementCertificate({ credit, txHash, onClose, verifiers }) {
 
       <div style={{ position:'relative', zIndex:1 }}>
         <div style={{ textAlign:'center', marginBottom:24 }}>
-          <div style={{ fontSize:10, color:'#22c55e88', letterSpacing:'.2em', marginBottom:8 }}>ETHERTRACK CARBON EXCHANGE — CORPORATE CERTIFICATE</div>
-          <div style={{ fontSize:22, fontWeight:700, color:'#f0fdf4', fontFamily:'Syne,sans-serif', marginBottom:4 }}>Carbon Retirement Certificate</div>
+          <div style={{ fontSize:10, color:'#22c55e88', letterSpacing:'.2em', marginBottom:8 }}>
+            ETHERTRACK CARBON EXCHANGE — {isOwnership ? 'PROOF OF OWNERSHIP' : 'CORPORATE CERTIFICATE'}
+          </div>
+          <div style={{ fontSize:22, fontWeight:700, color:'#f0fdf4', fontFamily:'Syne,sans-serif', marginBottom:4 }}>
+            {isOwnership ? 'Carbon Credit Certificate of Ownership' : 'Carbon Retirement Certificate'}
+          </div>
           <div style={{ fontSize:10, color:'#86efac66', letterSpacing:'.1em' }}>ISO 14064-3 · GHG PROTOCOL · BRSR · CDP · TCFD · ETHEREUM SEPOLIA</div>
         </div>
 
-        {/* [2] Verifier badge — shown when org has connected a third-party verifier */}
+        {isPooledCustody && (
+          <div style={{ background:'#0a1628', border:'1px solid #60a5fa22', borderRadius:8,
+            padding:'10px 14px', marginBottom:16, fontSize:10, color:'#60a5fa88', lineHeight:1.7 }}>
+            ℹ️ This credit is held in EtherTrack's pooled custody — no personal wallet required.
+            The transaction below is real, permanent, and independently verifiable by anyone.
+          </div>
+        )}
+
         {connectedVerifier && (
           <div style={{ background:'#0d0a1a', border:'1px solid #a78bfa44', borderRadius:10, padding:'14px 18px', marginBottom:16, display:'flex', alignItems:'center', gap:14 }}>
             <span style={{ fontSize:20 }}>🔍</span>
@@ -117,10 +133,11 @@ export function RetirementCertificate({ credit, txHash, onClose, verifiers }) {
           </div>
         )}
 
-        {/* Beneficiary */}
         {(credit.beneficiaryName || credit.beneficiaryEntity) && (
           <div style={{ background:'#0a1628', border:'1px solid #60a5fa33', borderRadius:10, padding:'14px 18px', marginBottom:16 }}>
-            <div style={{ fontSize:9, color:'#60a5fa88', letterSpacing:'.14em', marginBottom:8 }}>RETIREMENT BENEFICIARY — CORPORATE ENTITY</div>
+            <div style={{ fontSize:9, color:'#60a5fa88', letterSpacing:'.14em', marginBottom:8 }}>
+              {isOwnership ? 'CERTIFICATE HOLDER' : 'RETIREMENT BENEFICIARY'} — CORPORATE ENTITY
+            </div>
             <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:10 }}>
               {[
                 { l:'ENTITY NAME', v:credit.beneficiaryName   || '—' },
@@ -136,7 +153,6 @@ export function RetirementCertificate({ credit, txHash, onClose, verifiers }) {
           </div>
         )}
 
-        {/* ICVCM CCP badge */}
         {credit.icvcm_ccp_eligible && (
           <div style={{ background:'#0e1a00', border:'1px solid #84cc1633', borderRadius:8, padding:'10px 14px', marginBottom:12, display:'flex', alignItems:'center', gap:10 }}>
             <span style={{ fontSize:16 }}>🏅</span>
@@ -147,25 +163,30 @@ export function RetirementCertificate({ credit, txHash, onClose, verifiers }) {
           </div>
         )}
 
-        {/* Fields grid */}
         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginBottom:20 }}>
           {[
             { label:'CERTIFICATE ID',  value:certId || 'PENDING',                                   color:'#22c55e' },
             { label:'TOKEN ID',        value:tokenDisplay,                                           color:'#60a5fa' },
             { label:'CREDIT TYPE',     value:creditTypeLabel,                                        color:credit.creditType==='compliance'?'#f97316':'#22c55e' },
-            { label:'OFFSET SCOPE',    value:scopeLabel,                                             color:'#a78bfa' },
+            ...(isOwnership ? [] : [{ label:'OFFSET SCOPE', value:scopeLabel, color:'#a78bfa' }]),
             { label:'ARTICLE 6 / CA',  value:caLabel,                                               color:'#22c55e' },
             { label:'SDG CO-BENEFITS', value:sdgList,                                               color:'#60a5fa' },
             { label:'PROJECT NAME',    value:credit.projectName,                                    color:'#f0fdf4' },
             { label:'SERIAL NO.',      value:credit.serialNumber,                                   color:'#f0fdf4' },
             { label:'REGISTRY',        value:reg.label,                                             color:reg.color },
-            { label:'CREDITS RETIRED', value:`${(credit.retiredQty||credit.credits)?.toLocaleString()} tCO₂e`, color:'#22c55e' },
+            { label: isOwnership ? 'CREDITS HELD' : 'CREDITS RETIRED',
+              value:`${(credit.retiredQty||credit.credits)?.toLocaleString()} tCO₂e`, color:'#22c55e' },
             { label:'VINTAGE YEAR',    value:credit.vintageYear,                                    color:'#f0fdf4' },
             { label:'COUNTRY',         value:credit.country || credit.location,                     color:'#f0fdf4' },
-            { label:'REPORTING STD',   value:credit.reportingStandard || 'GHG Protocol',            color:'#86efac88' },
-            { label:'PURPOSE',         value:credit.purpose || 'Voluntary Offset',                  color:'#86efac88' },
+            ...(isOwnership ? [] : [
+              { label:'REPORTING STD', value:credit.reportingStandard || 'GHG Protocol', color:'#86efac88' },
+              { label:'PURPOSE',       value:credit.purpose || 'Voluntary Offset',       color:'#86efac88' },
+            ]),
             { label:'ACVA VERIFIER',   value:verifiedBy,                                            color:'#facc15' },
-            { label:'RETIREMENT DATE', value:date,                                                  color:'#f0fdf4' },
+            { label: isOwnership ? 'ISSUED DATE' : 'RETIREMENT DATE', value:date, color:'#f0fdf4' },
+            { label:'CUSTODY MODEL',
+              value: isPooledCustody ? 'Pooled Custody (Wallet-Free)' : 'Personal Wallet',
+              color: isPooledCustody ? '#60a5fa' : '#22c55e' },
           ].map(({ label, value, color }) => (
             <div key={label} style={{ background:'#0a0f0c88', borderRadius:8, padding:'10px 14px', border:'1px solid #0f2a1a' }}>
               <div style={{ fontSize:8, color:'#86efac55', letterSpacing:'.12em', marginBottom:4 }}>{label}</div>
@@ -191,13 +212,14 @@ export function RetirementCertificate({ credit, txHash, onClose, verifiers }) {
               <div style={{ fontSize:9, color:'#22c55e88', letterSpacing:'.12em', marginBottom:6 }}>PUBLIC VERIFICATION URL</div>
               <div style={{ fontSize:10, color:'#22c55e66', wordBreak:'break-all', marginBottom:8, fontFamily:'monospace' }}>{verifyUrl}</div>
               <div style={{ fontSize:9, color:'#86efac66', lineHeight:1.7 }}>
-                Scan to independently verify this retirement on-chain. Suitable for CDP, BRSR, TCFD submissions.
+                {isOwnership
+                  ? 'Scan to independently verify this ownership record on-chain.'
+                  : 'Scan to independently verify this retirement on-chain. Suitable for CDP, BRSR, TCFD submissions.'}
               </div>
             </div>
           </div>
         )}
 
-        {/* Actions */}
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', paddingTop:16, borderTop:'1px solid #0f2a1a', gap:10, flexWrap:'wrap' }}>
           <div style={{ fontSize:9, color:'#86efac44', letterSpacing:'.06em' }}>
             ETHERTRACK · ISO 14064-3 · GHG PROTOCOL · BRSR · CDP · TCFD · PARIS AGREEMENT ART.6
@@ -211,7 +233,6 @@ export function RetirementCertificate({ credit, txHash, onClose, verifiers }) {
                 🔗 VERIFY PUBLIC
               </a>
             )}
-            {/* [1] Server-side PDF button */}
             <button
               data-testid="download-pdf-btn"
               aria-label={pdfLoading ? 'Generating PDF...' : 'Download certificate as PDF'}

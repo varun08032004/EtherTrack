@@ -34,6 +34,10 @@ const ID_TYPES = [
   { value: 'voter',    label: 'Voter ID',          hint: 'ABC1234567',     validate: v => v.trim().length >= 6 },
 ];
 
+const GSTIN_REGEX = /^\d{2}[A-Z]{5}\d{4}[A-Z]{1}\d[Z]{1}[A-Z\d]{1}$/;
+const BUSINESS_PAN_REGEX = /^[A-Z]{5}\d{4}[A-Z]{1}$/;
+const CIN_REGEX = /^[LUu]\d{5}[A-Za-z]{2}\d{4}[A-Za-z]{3}\d{6}$/;
+
 const POPULAR_COUNTRIES = ['IN','US','GB','SG','AE','AU','CA','DE','FR','JP'];
 const ALL_COUNTRIES = getCountries();
 const SORTED_COUNTRIES = [
@@ -95,11 +99,92 @@ const ERR_STYLES = {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Step 0: Identity
 // ═══════════════════════════════════════════════════════════════════════════════
-const IdentityStep = memo(({ fullName, setFullName, idType, setIdType, idNumber, setIdNumber, errors }) => {
+const IdentityStep = memo(({
+  kycType, setKycType,
+  fullName, setFullName, idType, setIdType, idNumber, setIdNumber, errors,
+  entityName, setEntityName, gstin, setGstin, businessPan, setBusinessPan,
+  cin, setCin, signatoryDesignation, setSignatoryDesignation,
+}) => {
   const idConf = ID_TYPES.find(t => t.value === idType);
+  const isBusiness = kycType === 'business';
   return (
     <div style={S.fields}>
-      <Field label="Full Legal Name" error={errors.fullName}>
+      <Field label="Account Type">
+        <div style={{ display:'flex', gap:8 }}>
+          {[{ v:'individual', l:'Individual' }, { v:'business', l:'Business' }].map(({ v, l }) => (
+            <button
+              key={v}
+              type="button"
+              onClick={() => setKycType(v)}
+              style={{
+                ...S.btnOutline, flex:1,
+                background: kycType === v ? '#0d2e1f' : 'transparent',
+                borderColor: kycType === v ? '#22c55e' : '#0f2a1a',
+                color: kycType === v ? '#22c55e' : '#4ade8077',
+              }}
+              aria-pressed={kycType === v}
+            >
+              {l}
+            </button>
+          ))}
+        </div>
+        <div style={S.hint}>Trading as a company or registered entity? Choose Business.</div>
+      </Field>
+
+      {isBusiness && (
+        <>
+          <Field label="Registered Business Name" error={errors.entityName}>
+            <input
+              style={{ ...S.input, ...(errors.entityName ? S.inputErr : {}) }}
+              placeholder="As shown on GST certificate"
+              value={entityName}
+              onChange={e => setEntityName(e.target.value)}
+              maxLength={255}
+            />
+          </Field>
+          <Field label="GSTIN" error={errors.gstin} hint="15-character GST number">
+            <input
+              style={{ ...S.input, ...(errors.gstin ? S.inputErr : {}) }}
+              placeholder="27ABCDE1234F1Z5"
+              value={gstin}
+              onChange={e => setGstin(e.target.value.toUpperCase())}
+              maxLength={15}
+            />
+          </Field>
+          <Field label="Business PAN" error={errors.businessPan} hint="Company PAN, not your personal PAN">
+            <input
+              style={{ ...S.input, ...(errors.businessPan ? S.inputErr : {}) }}
+              placeholder="ABCDE1234F"
+              value={businessPan}
+              onChange={e => setBusinessPan(e.target.value.toUpperCase())}
+              maxLength={10}
+            />
+          </Field>
+          <Field label="CIN / LLPIN (optional)" error={errors.cin} hint="Leave blank for proprietorships or partnerships">
+            <input
+              style={{ ...S.input, ...(errors.cin ? S.inputErr : {}) }}
+              placeholder="U12345MH2023PTC123456"
+              value={cin}
+              onChange={e => setCin(e.target.value.toUpperCase())}
+              maxLength={21}
+            />
+          </Field>
+          <Field label="Your Designation" error={errors.signatoryDesignation} hint="e.g. Director, Partner, Authorized Signatory">
+            <input
+              style={{ ...S.input, ...(errors.signatoryDesignation ? S.inputErr : {}) }}
+              placeholder="Director"
+              value={signatoryDesignation}
+              onChange={e => setSignatoryDesignation(e.target.value)}
+              maxLength={100}
+            />
+          </Field>
+          <div style={{ fontSize:9, color:'#60a5fa88', letterSpacing:'.1em', marginTop:4 }}>
+            SIGNATORY IDENTITY — the person authorized to act for this business
+          </div>
+        </>
+      )}
+
+      <Field label={isBusiness ? 'Signatory Full Name' : 'Full Legal Name'} error={errors.fullName}>
         <input
           style={{ ...S.input, ...(errors.fullName ? S.inputErr : {}) }}
           placeholder="As shown on your government ID"
@@ -154,65 +239,92 @@ const IdentityStep = memo(({ fullName, setFullName, idType, setIdType, idNumber,
 // Step 1: Document upload
 // FIX: removed borderColor spread — use full border property to avoid React warning
 // ═══════════════════════════════════════════════════════════════════════════════
-const DocumentStep = memo(({ docFile, docPreview, uploadProgress, onFileSelect, errors }) => {
+const UploadBox = memo(({ label, hint, file, preview, uploadProgress, onFileSelect, error, inputId }) => {
   const inputRef = useRef(null);
   return (
-    <div style={S.fields}>
-      <Field label="Upload Identity Document" error={errors.doc}>
-        <div
-          style={{
-            ...S.uploadBox,
-            border: errors.doc
-              ? '1px dashed #dc2626'
-              : docFile
-              ? '1px dashed #22c55e33'
-              : '1px dashed #0f2a1a',
-          }}
-          onClick={() => inputRef.current?.click()}
-          onKeyDown={e => (e.key==='Enter'||e.key===' ') && inputRef.current?.click()}
-          role="button"
-          tabIndex={0}
-          aria-label="Upload identity document — click or press Enter to select file"
-          aria-describedby="doc-constraints"
-        >
-          {docPreview ? (
-            <img src={docPreview} alt="Document preview" style={{ maxHeight:150, borderRadius:6, objectFit:'contain', maxWidth:'100%' }} />
-          ) : (
-            <>
-              <div style={{ fontSize:36, marginBottom:8, color:'#22c55e44' }} aria-hidden="true">◈</div>
-              <div style={{ fontSize:11, color:'#4ade8066', marginBottom:4 }}>
-                {docFile ? docFile.name : 'Click or drag to upload'}
-              </div>
-            </>
-          )}
-          <input
-            ref={inputRef}
-            type="file"
-            accept="image/jpeg,image/png,image/webp,application/pdf"
-            onChange={onFileSelect}
-            style={{ display:'none' }}
-            aria-hidden="true"
-          />
-        </div>
-        <div id="doc-constraints" style={S.hint}>JPG, PNG, WebP, PDF · Max 5MB · Stored encrypted on IPFS</div>
-
-        {docFile && (
-          <div style={{ fontSize:10, color:'#22c55e', marginTop:6, display:'flex', alignItems:'center', gap:6 }}>
-            <span aria-hidden="true">✓</span>
-            <span>{docFile.name} ({(docFile.size/1024).toFixed(1)} KB)</span>
-          </div>
-        )}
-
-        {uploadProgress > 0 && uploadProgress < 100 && (
-          <div role="progressbar" aria-valuenow={uploadProgress} aria-valuemin={0} aria-valuemax={100}
-               aria-label={`Uploading document: ${uploadProgress}%`} style={{ marginTop:8 }}>
-            <div style={S.progressBg}>
-              <div style={{ ...S.progressFill, width:`${uploadProgress}%` }} />
+    <Field label={label} error={error}>
+      <div
+        style={{
+          ...S.uploadBox,
+          border: error ? '1px dashed #dc2626' : file ? '1px dashed #22c55e33' : '1px dashed #0f2a1a',
+        }}
+        onClick={() => inputRef.current?.click()}
+        onKeyDown={e => (e.key==='Enter'||e.key===' ') && inputRef.current?.click()}
+        role="button"
+        tabIndex={0}
+        aria-label={`Upload ${label} — click or press Enter to select file`}
+        aria-describedby={`${inputId}-constraints`}
+      >
+        {preview ? (
+          <img src={preview} alt={`${label} preview`} style={{ maxHeight:150, borderRadius:6, objectFit:'contain', maxWidth:'100%' }} />
+        ) : (
+          <>
+            <div style={{ fontSize:36, marginBottom:8, color:'#22c55e44' }} aria-hidden="true">◈</div>
+            <div style={{ fontSize:11, color:'#4ade8066', marginBottom:4 }}>
+              {file ? file.name : 'Click or drag to upload'}
             </div>
-            <div style={{ fontSize:10, color:'#86efac44', marginTop:4 }}>Uploading… {uploadProgress}%</div>
-          </div>
+          </>
         )}
-      </Field>
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/jpeg,image/png,image/webp,application/pdf"
+          onChange={onFileSelect}
+          style={{ display:'none' }}
+          aria-hidden="true"
+        />
+      </div>
+      <div id={`${inputId}-constraints`} style={S.hint}>{hint || 'JPG, PNG, WebP, PDF · Max 5MB · Stored encrypted on IPFS'}</div>
+
+      {file && (
+        <div style={{ fontSize:10, color:'#22c55e', marginTop:6, display:'flex', alignItems:'center', gap:6 }}>
+          <span aria-hidden="true">✓</span>
+          <span>{file.name} ({(file.size/1024).toFixed(1)} KB)</span>
+        </div>
+      )}
+
+      {uploadProgress > 0 && uploadProgress < 100 && (
+        <div role="progressbar" aria-valuenow={uploadProgress} aria-valuemin={0} aria-valuemax={100}
+             aria-label={`Uploading: ${uploadProgress}%`} style={{ marginTop:8 }}>
+          <div style={S.progressBg}>
+            <div style={{ ...S.progressFill, width:`${uploadProgress}%` }} />
+          </div>
+          <div style={{ fontSize:10, color:'#86efac44', marginTop:4 }}>Uploading… {uploadProgress}%</div>
+        </div>
+      )}
+    </Field>
+  );
+});
+
+const DocumentStep = memo(({
+  kycType,
+  docFile, docPreview, uploadProgress, onFileSelect, errors,
+  businessDocFile, businessDocPreview, businessUploadProgress, onBusinessFileSelect,
+}) => {
+  const isBusiness = kycType === 'business';
+  return (
+    <div style={S.fields}>
+      {isBusiness && (
+        <UploadBox
+          inputId="business-doc"
+          label="Upload GST Certificate / Incorporation Doc"
+          hint="GST certificate, CoI, or LLP agreement · JPG, PNG, WebP, PDF · Max 5MB"
+          file={businessDocFile}
+          preview={businessDocPreview}
+          uploadProgress={businessUploadProgress}
+          onFileSelect={onBusinessFileSelect}
+          error={errors.businessDoc}
+        />
+      )}
+      <UploadBox
+        inputId="signatory-doc"
+        label={isBusiness ? 'Upload Signatory Identity Document' : 'Upload Identity Document'}
+        file={docFile}
+        preview={docPreview}
+        uploadProgress={uploadProgress}
+        onFileSelect={onFileSelect}
+        error={errors.doc}
+      />
     </div>
   );
 });
@@ -311,22 +423,39 @@ const PhoneStep = memo(({
 // Step 3: Review + DPDP Act 2023 Consent
 // ═══════════════════════════════════════════════════════════════════════════════
 const ReviewStep = memo(({
+  kycType, entityName, gstin, businessPan, cin, signatoryDesignation, businessDocFile,
   fullName, idType, idNumber, docFile, countryCode, phone,
   otpVerified, submitError, submitting, submitStep, uploadProgress,
   consentGiven, setConsentGiven,
 }) => {
   const callingCode = countryCode ? `+${getCountryCallingCode(countryCode)} ` : '';
+  const isBusiness = kycType === 'business';
+  const rows = isBusiness
+    ? [
+        { label: 'Account Type',     value: 'Business' },
+        { label: 'Business Name',    value: entityName },
+        { label: 'GSTIN',            value: gstin },
+        { label: 'Business PAN',     value: businessPan },
+        { label: 'CIN',              value: cin || '—' },
+        { label: 'Business Doc',     value: businessDocFile?.name || '—' },
+        { label: 'Signatory',        value: `${fullName} (${signatoryDesignation})` },
+        { label: 'Signatory ID',     value: `${idType.toUpperCase()} · ${maskId(idType, idNumber)}` },
+        { label: 'Signatory Doc',    value: docFile?.name || '—' },
+        { label: 'Phone',            value: `${callingCode}${phone}` },
+        { label: 'Phone Status',     value: otpVerified ? '✅ Verified' : '❌ Not verified' },
+      ]
+    : [
+        { label: 'Full Name',    value: fullName },
+        { label: 'ID Type',      value: idType.toUpperCase() },
+        { label: 'ID Number',    value: maskId(idType, idNumber) },
+        { label: 'Document',     value: docFile?.name || '—' },
+        { label: 'Phone',        value: `${callingCode}${phone}` },
+        { label: 'Phone Status', value: otpVerified ? '✅ Verified' : '❌ Not verified' },
+      ];
   return (
     <div style={S.fields}>
       <div style={S.reviewCard} role="list" aria-label="KYC submission details">
-        {[
-          { label: 'Full Name',    value: fullName },
-          { label: 'ID Type',      value: idType.toUpperCase() },
-          { label: 'ID Number',    value: maskId(idType, idNumber) },
-          { label: 'Document',     value: docFile?.name || '—' },
-          { label: 'Phone',        value: `${callingCode}${phone}` },
-          { label: 'Phone Status', value: otpVerified ? '✅ Verified' : '❌ Not verified' },
-        ].map(({ label, value }) => (
+        {rows.map(({ label, value }) => (
           <div key={label} style={S.reviewRow} role="listitem">
             <span style={S.reviewLabel}>{label}</span>
             <span style={S.reviewValue}>{value}</span>
@@ -438,6 +567,20 @@ const KYCFormInner = ({ onComplete }) => {
   const { addNotification, NOTIF_TYPES }    = useNotifications();
 
   const [step, setStep] = useState(0);
+
+  // Account type
+  const [kycType, setKycType] = useState('individual');
+
+  // Business entity fields
+  const [entityName,            setEntityName]            = useState('');
+  const [gstin,                 setGstin]                 = useState('');
+  const [businessPan,           setBusinessPan]           = useState('');
+  const [cin,                   setCin]                   = useState('');
+  const [signatoryDesignation,  setSignatoryDesignation]  = useState('');
+  const [businessDocFile,       setBusinessDocFile]       = useState(null);
+  const [businessDocPreview,    setBusinessDocPreview]    = useState('');
+  const [businessUploadProgress,setBusinessUploadProgress]= useState(0);
+  const [businessDocIpfsHash,   setBusinessDocIpfsHash]   = useState(null);
 
   // Identity
   const [fullName,  setFullName]  = useState(dbUser?.full_name || user?.displayName || '');
@@ -608,20 +751,54 @@ const KYCFormInner = ({ onComplete }) => {
     }
   }, []);
 
+  const handleBusinessDocSelect = useCallback((e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!ALLOWED_MIME.includes(file.type)) {
+      setErrors({ businessDoc: 'Only JPG, PNG, WebP and PDF accepted.' }); return;
+    }
+    if (file.size > MAX_FILE_BYTES) {
+      setErrors({ businessDoc: 'File too large — maximum 5MB.' }); return;
+    }
+    setBusinessDocFile(file);
+    setBusinessDocIpfsHash(null);
+    setErrors({});
+    if (file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = ev => setBusinessDocPreview(ev.target.result);
+      reader.readAsDataURL(file);
+    } else {
+      setBusinessDocPreview('');
+    }
+  }, []);
+
   const validateStep = useCallback(() => {
     const errs = {};
     if (step === 0) {
+      if (kycType === 'business') {
+        if (!entityName.trim())          errs.entityName = 'Business name is required.';
+        if (!GSTIN_REGEX.test(gstin))    errs.gstin = 'Enter a valid 15-character GSTIN.';
+        if (!BUSINESS_PAN_REGEX.test(businessPan)) errs.businessPan = 'Enter a valid 10-character company PAN.';
+        if (GSTIN_REGEX.test(gstin) && BUSINESS_PAN_REGEX.test(businessPan) && gstin.slice(2, 12) !== businessPan) {
+          errs.businessPan = 'Doesn\'t match the PAN embedded in the GSTIN — check both.';
+        }
+        if (cin.trim() && !CIN_REGEX.test(cin)) errs.cin = 'Enter a valid CIN/LLPIN, or leave blank.';
+        if (!signatoryDesignation.trim()) errs.signatoryDesignation = 'Your designation is required.';
+      }
       if (!fullName.trim())     errs.fullName = 'Full name is required.';
       if (!idType)              errs.idType   = 'Please select an ID type.';
       if (!idNumber.trim())     errs.idNumber = 'ID number is required.';
       const conf = ID_TYPES.find(t => t.value === idType);
       if (conf && !conf.validate(idNumber)) errs.idNumber = `Invalid ${conf.label} format. Expected: ${conf.hint}`;
     }
-    if (step === 1) { if (!docFile) errs.doc = 'Please upload your ID document.'; }
+    if (step === 1) {
+      if (!docFile) errs.doc = 'Please upload your ID document.';
+      if (kycType === 'business' && !businessDocFile) errs.businessDoc = 'Please upload your GST certificate or incorporation document.';
+    }
     if (step === 2) { if (!otpVerified) errs.otp = 'Please verify your phone number.'; }
     setErrors(errs);
     return Object.keys(errs).length === 0;
-  }, [step, fullName, idType, idNumber, docFile, otpVerified]);
+  }, [step, kycType, entityName, gstin, businessPan, cin, signatoryDesignation, fullName, idType, idNumber, docFile, businessDocFile, otpVerified]);
 
   const nextStep = useCallback(() => {
     if (validateStep()) {
@@ -636,14 +813,14 @@ const KYCFormInner = ({ onComplete }) => {
     setTimeout(() => stepRefs.current[step - 1]?.focus(), 100);
   }, [step]);
 
-  const uploadDocToIPFS = useCallback(async (file) => {
+  const uploadFileToIPFS = useCallback(async (file, onProgress) => {
     const formData = new FormData();
     formData.append('file', file);
     const { promise } = apiFetchMultipartWithProgress(
       '/api/ipfs/pin-kyc-doc',
       formData,
       {},
-      (pct) => setUploadProgress(pct),
+      onProgress,
     );
     const data = await promise;
     if (!data?.ipfsHash) throw new Error('Invalid IPFS response');
@@ -660,12 +837,22 @@ const KYCFormInner = ({ onComplete }) => {
     setSubmitting(true);
     setSubmitError('');
     setUploadProgress(0);
+    setBusinessUploadProgress(0);
 
     try {
+      let bizHash = businessDocIpfsHash;
+      if (kycType === 'business' && !bizHash) {
+        setSubmitStep('Uploading business document securely…');
+        bizHash = await uploadFileToIPFS(businessDocFile, setBusinessUploadProgress);
+        setBusinessDocIpfsHash(bizHash);
+        setBusinessDocPreview('');
+        setBusinessDocFile(null);
+      }
+
       let hash = docIpfsHash;
       if (!hash) {
         setSubmitStep('Uploading document securely…');
-        hash = await uploadDocToIPFS(docFile);
+        hash = await uploadFileToIPFS(docFile, setUploadProgress);
         setDocIpfsHash(hash);
         setDocPreview('');
         setDocFile(null);
@@ -678,6 +865,7 @@ const KYCFormInner = ({ onComplete }) => {
         method: 'POST',
         headers: { 'Idempotency-Key': idempotencyKey },
         body: JSON.stringify({
+          kycType,
           fullName:     fullName.trim(),
           idType,
           idNumber:     idNumber.trim(),
@@ -685,6 +873,14 @@ const KYCFormInner = ({ onComplete }) => {
           docIpfsHash:  hash,
           consentGiven: true,
           consentAt:    new Date().toISOString(),
+          ...(kycType === 'business' ? {
+            entityName:            entityName.trim(),
+            gstin,
+            businessPan,
+            cin:                   cin.trim() || undefined,
+            signatoryDesignation:  signatoryDesignation.trim(),
+            businessDocIpfsHash:   bizHash,
+          } : {}),
         }),
       });
 
@@ -706,17 +902,24 @@ const KYCFormInner = ({ onComplete }) => {
       const STATUS_MESSAGES = {
         401: 'Session expired. Please refresh and log in again.',
         403: 'Security token mismatch. Please refresh the page.',
-        409: 'These credentials are already verified with another account. Contact support.',
+        409: err?.code === 'DUPLICATE_GSTIN'
+          ? 'This GSTIN is already verified with another account. Contact support.'
+          : 'These credentials are already verified with another account. Contact support.',
         429: 'Please wait at least 1 hour between KYC submissions.',
         422: 'Invalid data submitted. Please check your details and try again.',
       };
       setSubmitError(STATUS_MESSAGES[err.status] || err.message || 'Submission failed. Please try again.');
       setUploadProgress(0);
+      setBusinessUploadProgress(0);
     } finally {
       setSubmitting(false);
       setSubmitStep('');
     }
-  }, [consentGiven, docFile, docIpfsHash, fullName, idType, idNumber, fullPhone, uploadDocToIPFS, addNotification, NOTIF_TYPES, user?.uid]);
+  }, [
+    consentGiven, kycType, docFile, docIpfsHash, businessDocFile, businessDocIpfsHash,
+    entityName, gstin, businessPan, cin, signatoryDesignation,
+    fullName, idType, idNumber, fullPhone, uploadFileToIPFS, addNotification, NOTIF_TYPES, user?.uid,
+  ]);
 
   const progress = ((step + 1) / STEPS.length) * 100;
 
@@ -785,8 +988,17 @@ const KYCFormInner = ({ onComplete }) => {
           ))}
         </nav>
 
-        {step === 0 && <IdentityStep {...{ fullName, setFullName, idType, setIdType, idNumber, setIdNumber, errors }} />}
-        {step === 1 && <DocumentStep {...{ docFile, docPreview, uploadProgress, onFileSelect: handleDocSelect, errors }} />}
+        {step === 0 && <IdentityStep {...{
+          kycType, setKycType,
+          fullName, setFullName, idType, setIdType, idNumber, setIdNumber, errors,
+          entityName, setEntityName, gstin, setGstin, businessPan, setBusinessPan,
+          cin, setCin, signatoryDesignation, setSignatoryDesignation,
+        }} />}
+        {step === 1 && <DocumentStep {...{
+          kycType,
+          docFile, docPreview, uploadProgress, onFileSelect: handleDocSelect, errors,
+          businessDocFile, businessDocPreview, businessUploadProgress, onBusinessFileSelect: handleBusinessDocSelect,
+        }} />}
         {step === 2 && <PhoneStep {...{
           countryCode, setCountryCode, phone, setPhone,
           otp, setOtp, otpSent, otpVerified,
@@ -794,6 +1006,7 @@ const KYCFormInner = ({ onComplete }) => {
           onSendOtp: handleSendOtp, onVerifyOtp: handleVerifyOtp, onResendOtp: handleResendOtp,
         }} />}
         {step === 3 && <ReviewStep {...{
+          kycType, entityName, gstin, businessPan, cin, signatoryDesignation, businessDocFile,
           fullName, idType, idNumber, docFile, countryCode, phone,
           otpVerified, submitError, submitting, submitStep, uploadProgress,
           consentGiven, setConsentGiven,

@@ -30,6 +30,58 @@ const api = async (path, opts = {}) => {
   }
 };
 
+// ── RegistryVerifyPanel ─────────────────────────────────────────────────────
+// Fetches GET /api/admin/credits/:id/verify-registry on mount and shows the
+// voluntary-registry adapter's result inline in the approve modal — so the
+// admin sees format validity + verification tier BEFORE clicking approve,
+// instead of having to open a separate tab. Compliance-type (BEE/CCC)
+// batches are skipped server-side; this panel just displays whatever the
+// backend returns, it makes no policy decisions itself.
+function RegistryVerifyPanel({ creditId }) {
+  const [state, setState] = useState({ loading: true, data: null, error: null });
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ loading: true, data: null, error: null });
+    api(`/api/admin/credits/${creditId}/verify-registry`)
+      .then(data => { if (!cancelled) setState({ loading: false, data, error: null }); })
+      .catch(err => { if (!cancelled) setState({ loading: false, data: null, error: err.message || 'Check failed' }); });
+    return () => { cancelled = true; };
+  }, [creditId]);
+
+  const box = { marginBottom: 12, padding: '10px 12px', borderRadius: 6, fontSize: 10, lineHeight: 1.6 };
+
+  if (state.loading) {
+    return <div style={{ ...box, border: '1px solid #f59e0b1a', color: '#f59e0b88' }}>⟳ Checking registry adapter…</div>;
+  }
+  if (state.error) {
+    return <div style={{ ...box, border: '1px solid #f8717133', background: '#1a0707', color: '#f8717188' }}>
+      ⚠ Registry check failed: {state.error} — proceed with manual verification only.
+    </div>;
+  }
+  if (state.data?.skipped) {
+    return <div style={{ ...box, border: '1px solid #60a5fa22', background: '#060e18', color: '#60a5fa88' }}>
+      ℹ {state.data.reason}
+    </div>;
+  }
+
+  const r = state.data?.result;
+  if (!r) return null;
+
+  const confColor = r.confidence === 'VERIFIED_API' ? '#22c55e'
+    : r.confidence === 'VERIFIED_MANUAL' ? '#60a5fa' : '#f59e0b';
+
+  return (
+    <div style={{ ...box, border: `1px solid ${confColor}33`, background: '#0a0f0c' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+        <span style={{ color: '#f59e0bcc', letterSpacing: '.08em' }}>REGISTRY CHECK — {(r.source || '').toUpperCase()}</span>
+        <span style={{ color: confColor, fontWeight: 700 }}>{r.confidence}</span>
+      </div>
+      <div style={{ color: '#f0fdf4dd' }}>{r.notes}</div>
+    </div>
+  );
+}
+
 // ── Navigation groups ─────────────────────────────────────────────────────────
 // Each group has an id, label, icon, and list of tab definitions.
 // Badge keys reference stats fields or derived counts for group-level rollup.
@@ -1676,7 +1728,7 @@ export default function AdminDashboard() {
         </div>
       </Dlg>}
 
-      {modal?.type === 'credit_approve' && <Dlg title="Approve Credit" onClose={() => { setModal(null); setReason(''); }}><div style={M.ct}>Approve <strong style={{ color: '#f0fdf4' }}>{modal.data.project_name}</strong>?</div><textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="Optional notes..." /><button style={M.aPrimary} onClick={() => creditAction(modal.data.id, 'approve')}>CONFIRM APPROVE</button></Dlg>}
+      {modal?.type === 'credit_approve' && <Dlg title="Approve Credit" onClose={() => { setModal(null); setReason(''); }}><div style={M.ct}>Approve <strong style={{ color: '#f0fdf4' }}>{modal.data.project_name}</strong>?</div><RegistryVerifyPanel creditId={modal.data.id} /><textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="Optional notes..." /><button style={M.aPrimary} onClick={() => creditAction(modal.data.id, 'approve')}>CONFIRM APPROVE</button></Dlg>}
       {modal?.type === 'credit_reject' && <Dlg title="Reject Credit" onClose={() => { setModal(null); setReason(''); }}><textarea style={M.ta} value={reason} onChange={e => setReason(e.target.value)} placeholder="Rejection reason..." /><button style={M.rPrimary} onClick={() => creditAction(modal.data.id, 'reject')} disabled={!reason.trim()}>CONFIRM REJECT</button></Dlg>}
 
       {modal?.type === 'manual_sync' && <Dlg title="✎ Set Token ID Manually" onClose={() => { setModal(null); setManualTokenId(''); }}>

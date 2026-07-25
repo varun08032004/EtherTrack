@@ -186,10 +186,29 @@ router.post('/retire-credit-ledger', authenticate, requireKYC, async (req, res) 
     await auditLog(req.user.id, 'CREDIT_RETIRED_LEDGER', req.user.id,
       `tokenId=${tokenId} amount=${amount} TX: ${result.txHash}`);
 
+    // [CERT-RETIREMENT] Issue Certificate of Retirement for this ledger-based
+    // (wallet-free) retirement — mirrors the wallet-based retirement flow's
+    // cert_id generation in routes/retirementApproval.js.
+    let certId = null;
+    try {
+      const { issueRetirementCertificate } = require('../services/certificates');
+      certId = await issueRetirementCertificate({
+        userId: req.user.id,
+        tokenId,
+        quantity: amount,
+        txHash: result.txHash,
+        blockNumber: result.blockNumber,
+        custodyModel: 'pooled',
+      });
+    } catch (certErr) {
+      console.error('[retire-credit-ledger] certificate issuance failed (retirement unaffected):', certErr.message);
+    }
+
     return res.json({
       message: 'Credit retired successfully',
       txHash: result.txHash,
       blockNumber: result.blockNumber,
+      certId,
     });
   } catch (e) {
     console.error('[retire-credit-ledger]', e.message);
@@ -454,6 +473,7 @@ router.post('/ledger-checkout-verify', authenticate, requireKYC, async (req, res
 
     // The actual on-chain settlement — both sides are ledger users, so this
     // is a ledger-to-ledger transfer (SELL + BUY), not a token movement.
+    let ownershipCertId = null;
     try {
       const { transferLedgerOwnership } = require('../services/creditLedger');
       const result = await transferLedgerOwnership({
@@ -471,6 +491,24 @@ router.post('/ledger-checkout-verify', authenticate, requireKYC, async (req, res
         [result.buyerResult.txHash, result.buyerResult.blockNumber, tradeId]
       );
       console.log(`[ledger-checkout-verify] Trade ${tradeId} settled — seller TX: ${result.sellerResult.txHash}, buyer TX: ${result.buyerResult.txHash}`);
+
+      // [CERT-OWNERSHIP] Issue Certificate of Ownership for the buyer —
+      // "upon transfer of credits" certificate generation. Uses the buyer's
+      // own log entry (result.buyerResult) as the proof-of-receipt.
+      try {
+        const { issueOwnershipCertificate } = require('../services/certificates');
+        ownershipCertId = await issueOwnershipCertificate({
+          userId: req.user.id,
+          tokenId: listing.token_id,
+          quantity,
+          tradeId,
+          txHash: result.buyerResult.txHash,
+          blockNumber: result.buyerResult.blockNumber,
+          custodyModel: 'pooled',
+        });
+      } catch (certErr) {
+        console.error('[ledger-checkout-verify] certificate issuance failed (trade unaffected):', certErr.message);
+      }
     } catch (chainErr) {
       await query(`UPDATE trades SET chain_status = 'failed' WHERE id = $1`, [tradeId]).catch(() => {});
       await auditLog(req.user.id, 'LEDGER_TRADE_ONCHAIN_SETTLEMENT_FAILED', req.user.id,
@@ -478,7 +516,7 @@ router.post('/ledger-checkout-verify', authenticate, requireKYC, async (req, res
       console.error(`[ledger-checkout-verify] ⚠️ Settlement FAILED for trade ${tradeId} — payment already captured:`, chainErr.message);
     }
 
-    return res.json({ message: 'Purchase completed', tradeId });
+    return res.json({ message: 'Purchase completed', tradeId, ownershipCertId });
   } catch (e) {
     console.error('[ledger-checkout-verify]', e.message);
     return res.status(500).json({ error: 'Purchase verification failed. Please contact support.' });
@@ -559,9 +597,16 @@ router.get('/my-ledger-credits', authenticate, async (req, res) => {
       `SELECT clb.token_id, clb.balance, clb.total_retired,
               cb.project_name, cb.standard, cb.project_type, cb.developer,
               cb.vintage_year, cb.country, cb.project_location, cb.registry_serial,
-              cb.credit_type, cb.cbam_eligible, cb.expiry_date
+              cb.credit_type, cb.cbam_eligible, cb.expiry_date,
+              (SELECT c.cert_id FROM certificates c
+                WHERE c.user_id = clb.user_id AND c.token_id = clb.token_id
+                  AND c.cert_type = 'OWNERSHIP'
+                ORDER BY c.created_at DESC LIMIT 1) AS cert_id,
+              ll.id AS ledger_listing_id, ll.amount_remaining AS listed_amount
        FROM credit_ledger_balances clb
        LEFT JOIN carbon_batches cb ON cb.token_id = clb.token_id
+       LEFT JOIN ledger_listings ll ON ll.seller_id = clb.user_id
+              AND ll.token_id = clb.token_id AND ll.active = TRUE
        WHERE clb.user_id = $1 AND clb.balance > 0`,
       [req.user.id]
     );
@@ -582,8 +627,11 @@ router.get('/my-ledger-credits', authenticate, async (req, res) => {
       expiryDate: r.expiry_date,
       heldCredits: Number(r.balance),
       credits: Number(r.balance),
-      listedCredits: 0, // populated separately from ledger_listings if needed
+      listedCredits: Number(r.listed_amount || 0),
+      ledgerListingId: r.ledger_listing_id || null,
       totalRetired: Number(r.total_retired),
+      certId: r.cert_id || null,
+      custodyModel: 'pooled',
       status: 'HELD',
       isLedger: true,       // [NEW] distinguishes from wallet-based credits in the UI
       isOnChain: true,      // still genuinely on-chain — just via CreditLedger, not personal balanceOf()

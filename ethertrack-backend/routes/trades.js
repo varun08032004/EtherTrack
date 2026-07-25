@@ -2,52 +2,10 @@
 /**
  * routes/trades.js — EtherTrack Production Settlement Engine v4 (MERGED)
  * ─────────────────────────────────────────────────────────────────────────────
- * This is the merge of:
- *   - v3's [TRADE-BILL] feature (ETH trades now get a non-GST payment bill,
- *     not just a GST invoice for INR/Razorpay trades)
- *   - the three bug fixes from the earlier pass:
- *
- * [FIX-1] wallet_transactions method constraint — 'platform_fee' and
- *         'razorpay_fee' were not in the allowed list. Changed to:
- *           - COMPANY platform fee in /record      → method 'system'
- *           - COMPANY platform fee in /checkout-verify → method 'inr'
- *
- * [TRADE-INVOICE]  GST invoice generated after every completed INR/Razorpay
- *                  trade. Non-blocking — never fails the trade if invoice errors.
- *
- * [TRADE-BILL]     ETH-mode trades get a non-GST "Payment Bill" instead of a
- *                  tax invoice (see services/invoice.js generateTradeBill) —
- *                  GST treatment of a crypto-denominated fee is legally
- *                  murkier than INR, so ETH trades get a plain bill with no
- *                  CGST/SGST/IGST claimed at all. The on-chain tx hash is
- *                  already known immediately for ETH trades (client submits
- *                  it), so no async confirmation-patch step is needed here,
- *                  unlike the INR/chainLogger path.
- *
- * [FIX-LISTED-QTY] /record and /checkout-verify now decrement
- *                  carbon_batches.listed_quantity alongside available_credits
- *                  whenever a trade fills against a listing. Without this,
- *                  the delist modal and market "available" figure never
- *                  reflected partial fills (they'd still show the ORIGINAL
- *                  listed amount / the seller's full wallet balance).
- *
- * [FIX-TRADE-TYPE] GET /history now computes Buy/Sell relative to the
- *                  requesting user instead of returning raw trade rows with
- *                  no directional label. Previously the frontend rendered
- *                  every row as "Buy" for both buyer and seller because
- *                  there was no per-user `type` field at all.
- *
- * [INVOICE-ROUTE]  GET /api/trades/:id/invoice — authenticated buyer can
- *                  download their trade GST invoice (or ETH bill) as PDF.
- *
- * [GST-SPLIT]      platform_fees now persists the CGST/SGST-vs-IGST
- *                  determination (gst_type, cgst_inr, sgst_inr, igst_inr) at
- *                  insert time instead of only computing it at PDF-render
- *                  time — needed for bulk GST return filing exports.
- *
- * [SELLER-EMAIL]   Sellers now get an email when their listing sells, not
- *                  just an in-app notification — previously only the buyer
- *                  ever received anything by email (their invoice/bill).
+ * [CERT-OWNERSHIP] [NEW] Every completed purchase now issues a Certificate
+ *                  of Ownership (see services/certificates.js), not just
+ *                  retirements. Covers wallet-based (real transfer) and
+ *                  ledger-based (wallet-free, pooled custody) buyers alike.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -61,20 +19,18 @@ const { createNotification }                = require('./notifications');
 const chainLogger                           = require('../services/chainLogger');
 const { generateTradeInvoice, generateTradeBill, serveTradeInvoice, getGSTType } = require('../services/invoice');
 const { sendCreditsSoldEmail } = require('../services/email');
+const { issueOwnershipCertificate } = require('../services/certificates');
 
-// ── Razorpay client ──────────────────────────────────────────────────────────
 const razorpay = new Razorpay({
   key_id:     process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-// ── Constants ────────────────────────────────────────────────────────────────
 const PLATFORM_FEE_BPS  = 100;
 const GST_RATE          = 0.18;
 const COMPANY_USER_ID   = process.env.COMPANY_USER_ID;
 const MAX_SLIPPAGE      = 0.01;
 
-// ── Rate limiters ────────────────────────────────────────────────────────────
 const tradeLimiter = rateLimit({
   windowMs: 60_000, max: 10, standardHeaders: true, legacyHeaders: false,
   keyGenerator: req => req.user?.id ?? ipKeyGenerator(req),
@@ -86,7 +42,6 @@ const readLimiter = rateLimit({
   keyGenerator: req => req.user?.id ?? ipKeyGenerator(req),
 });
 
-// ── ETH/INR rate cache ───────────────────────────────────────────────────────
 let _cachedRate    = 280000;
 let _lastFetchedAt = 0;
 const RATE_TTL_MS  = 60_000;
@@ -113,7 +68,6 @@ const getLiveETHRate = async () => {
   return _cachedRate;
 };
 
-// ── Fee calculator ────────────────────────────────────────────────────────────
 function calcFees(subtotalINR) {
   const buyerFeeINR    = parseFloat((subtotalINR * PLATFORM_FEE_BPS / 2 / 10000).toFixed(2));
   const sellerFeeINR   = parseFloat((subtotalINR * PLATFORM_FEE_BPS / 2 / 10000).toFixed(2));
@@ -125,7 +79,6 @@ function calcFees(subtotalINR) {
   return { buyerFeeINR, sellerFeeINR, totalFeeINR, gstINR, buyerPaysINR, sellerGetsINR, platformNetINR };
 }
 
-// ── Idempotency check ─────────────────────────────────────────────────────────
 async function checkIdempotency(userId, key) {
   if (!key) return null;
   const { rows } = await query(
@@ -136,7 +89,6 @@ async function checkIdempotency(userId, key) {
   return rows[0] || null;
 }
 
-// ── [TRADE-INVOICE] Fire-and-forget trade invoice (INR / Razorpay — GST) ─────
 async function fireTradeInvoice({ tradeId, buyerId, projectName, standard, registrySerial, qty, subtotalINR, fees, paymentMode }) {
   try {
     const { rows: userRows } = await query(
@@ -162,7 +114,6 @@ async function fireTradeInvoice({ tradeId, buyerId, projectName, standard, regis
   }
 }
 
-// ── [TRADE-BILL] Fire-and-forget trade bill (ETH — non-GST) ─────────────────
 async function fireTradeBill({ tradeId, buyerId, projectName, standard, registrySerial, qty, subtotalINR, fees, txHash, ethRate, totalETH }) {
   try {
     const { rows: userRows } = await query(
@@ -189,9 +140,6 @@ async function fireTradeBill({ tradeId, buyerId, projectName, standard, registry
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /api/trades/eth-rate
-// ─────────────────────────────────────────────────────────────────────────────
 router.get('/eth-rate', readLimiter, async (req, res) => {
   try {
     const rate = await getLiveETHRate();
@@ -201,9 +149,6 @@ router.get('/eth-rate', readLimiter, async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /api/trades/record  — INR wallet + ETH settlement
-// ─────────────────────────────────────────────────────────────────────────────
 router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) => {
   const {
     listingId, batchId, quantity, paymentMode, txHash,
@@ -303,7 +248,6 @@ router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) 
           `UPDATE users SET inr_balance = inr_balance - $1, updated_at = NOW() WHERE id = $2`,
           [fees.buyerPaysINR, req.user.id]
         );
-        // [FIX-1] method was 'inr' — correct, stays 'inr'
         await client.query(
           `INSERT INTO wallet_transactions (user_id, type, method, amount, status, notes, trade_type)
            VALUES ($1, 'debit', 'inr', $2, 'success', $3, 'buy_credit')`,
@@ -327,7 +271,6 @@ router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) 
             `UPDATE users SET inr_balance = inr_balance + $1, updated_at = NOW() WHERE id = $2`,
             [fees.totalFeeINR, COMPANY_USER_ID]
           );
-          // [FIX-1] was 'platform_fee' — not in allowed list. Changed to 'system'
           await client.query(
             `INSERT INTO wallet_transactions (user_id, type, method, amount, status, notes, trade_type)
              VALUES ($1, 'credit', 'system', $2, 'success', $3, 'platform_fee')`,
@@ -370,11 +313,6 @@ router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) 
       );
       tradeId = tradeRows[0].id;
 
-      // [GST-SPLIT] Persist the CGST/SGST-vs-IGST determination now instead
-      // of only computing it later at PDF-render time — needed for bulk
-      // GST return filing exports. buyerStateCode is not collected at
-      // checkout, so this resolves via GSTIN prefix when provided, or the
-      // same-state assumption otherwise (same default as the PDF logic).
       const gstType = getGSTType(buyerGstin, undefined);
       const isIgst  = gstType === 'igst';
       const cgstInr = isIgst ? 0 : fees.gstINR / 2;
@@ -401,9 +339,6 @@ router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) 
         ).catch(() => {});
       }
 
-      // [FIX-LISTED-QTY] decrement listed_quantity alongside available_credits
-      // so the delist modal / market "amount" reflect the true remaining
-      // portion of THIS listing, not the seller's whole wallet balance.
       await client.query(
         `UPDATE carbon_batches
          SET available_credits = GREATEST(0, available_credits - $1),
@@ -441,6 +376,21 @@ router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) 
       ).catch(() => {});
     });
 
+    // [CERT-OWNERSHIP] Issue a Certificate of Ownership for this purchase.
+    let ownershipCertId = null;
+    try {
+      ownershipCertId = await issueOwnershipCertificate({
+        userId: req.user.id,
+        tokenId: batches[0].token_id,
+        quantity: qty,
+        tradeId,
+        txHash: txHash || null,
+        custodyModel: 'wallet',
+      });
+    } catch (certErr) {
+      console.error('[trades/record] certificate issuance failed (trade unaffected):', certErr.message);
+    }
+
     if (paymentMode === 'inr') {
       chainLogger.logTrade({
         dbTradeId:         tradeId,
@@ -465,9 +415,6 @@ router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) 
         paymentMode: 'inr',
       });
     } else if (paymentMode === 'eth') {
-      // [TRADE-BILL] ETH trades settle on-chain directly (buyCredit()), so the
-      // tx hash is already known here — no async chain-confirmation wait
-      // needed, unlike the INR/chainLogger path. Non-GST bill, not a tax invoice.
       fireTradeBill({
         tradeId,
         buyerId:     req.user.id,
@@ -493,8 +440,6 @@ router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) 
         '/wallet', { tradeId, quantity: qty }).catch(() => {}),
     ]);
 
-    // [SELLER-EMAIL] Seller only ever got the in-app notification above —
-    // never an email, despite money landing in their account.
     if (batch.seller_email) {
       sendCreditsSoldEmail(batch.seller_email, {
         name: batch.seller_name, projectName: batch.project_name, quantity: qty,
@@ -512,7 +457,8 @@ router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) 
       buyerBalance:  updatedBuyer[0]?.inr_balance?.toString(),
       sellerBalance: updatedSeller[0]?.inr_balance?.toString(),
       chainLogging:  paymentMode === 'inr' ? 'queued' : 'on_chain',
-      invoiceQueued: true, // both paths now generate a document — invoice (INR) or bill (ETH)
+      invoiceQueued: true,
+      ownershipCertId,
       message: `Trade completed — ${qty} credits purchased`,
     });
 
@@ -532,31 +478,17 @@ router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) 
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /api/trades/checkout-order
-// ─────────────────────────────────────────────────────────────────────────────
 router.post('/checkout-order', authenticate, requireKYC, tradeLimiter, async (req, res) => {
   const { batchId, listingId, quantity, pricePerCreditINR } = req.body;
 
   if (!batchId || !quantity || !pricePerCreditINR)
     return res.status(400).json({ error: 'batchId, quantity, pricePerCreditINR required' });
 
-  // [FIX-INR-SETTLEMENT] listingId used to be optional here, which allowed
-  // a trade to be created with nothing to actually settle against on-chain
-  // later — this was the root cause of trades being marked 'completed' in
-  // the DB while never actually transferring the underlying token (the bug
-  // this whole INR flow needed fixing). A real on-chain listing (escrowed
-  // via listCredit/listCreditFor) is now required before a purchase can be
-  // initiated at all.
   if (listingId == null) {
     return res.status(400).json({
       error: 'This batch is not yet listed on-chain. Ask the seller to list it before it can be purchased.',
     });
   }
-  // [FIX-LEDGER] Wallet is no longer required here — a buyer with no linked
-  // wallet is delivered credits via CreditLedger (pooled custody + on-chain
-  // audit log, see services/creditLedger.js) instead of a direct token
-  // transfer. See checkout-verify below for the actual branch.
 
   const qty          = parseInt(quantity);
   const pricePerCredit = parseFloat(pricePerCreditINR);
@@ -627,9 +559,6 @@ router.post('/checkout-order', authenticate, requireKYC, tradeLimiter, async (re
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /api/trades/checkout-verify
-// ─────────────────────────────────────────────────────────────────────────────
 router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (req, res) => {
   const { razorpay_order_id, razorpay_payment_id, razorpay_signature, idempotencyKey } = req.body;
 
@@ -723,7 +652,6 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
           `UPDATE users SET inr_balance = inr_balance + $1, updated_at = NOW() WHERE id = $2`,
           [fees.totalFeeINR, COMPANY_USER_ID]
         );
-        // [FIX-1] was 'razorpay_fee' — not in allowed list. Changed to 'inr'
         await client.query(
           `INSERT INTO wallet_transactions (user_id, type, method, amount, status, notes, trade_id, trade_type)
            VALUES ($1,'credit','inr',$2,'success',$3,$4,'platform_fee')`,
@@ -731,8 +659,6 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
         );
       }
 
-      // [GST-SPLIT] No GSTIN is ever captured on this checkout path — always
-      // resolves to the same-state assumption, same as the existing PDF logic.
       const cgstInr2 = fees.gstINR / 2;
       const sgstInr2 = fees.gstINR / 2;
 
@@ -748,7 +674,6 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
          cgstInr2, sgstInr2]
       ).catch(() => {});
 
-      // [FIX-LISTED-QTY] decrement listed_quantity alongside available_credits
       await client.query(
         `UPDATE carbon_batches
          SET available_credits = GREATEST(0, available_credits - $1),
@@ -775,19 +700,7 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
       );
     });
 
-    // [FIX-INR-SETTLEMENT / FIX-LEDGER] This used to call chainLogger.logTrade(),
-    // which only writes an audit-log entry and NEVER actually transfers or
-    // records the underlying credit — that's why 11 historical trades were
-    // marked 'completed'/'confirmed' in the DB while the buyer's real balance
-    // stayed at zero. Now branches on whether the buyer has a linked wallet:
-    //   - Has a wallet  → settleINRTradeOnChain: real ERC-1155 transfer from
-    //                      Marketplace's escrow into the buyer's own wallet.
-    //   - No wallet     → logOwnershipChangeOnChain: credit stays in pooled
-    //                      custody, ownership recorded via CreditLedger's
-    //                      tamper-evident on-chain log instead. No wallet,
-    //                      no MetaMask, ever — but still fully on-chain and
-    //                      independently verifiable.
-    // Either way, 'confirmed' now means a real on-chain action happened.
+    let chainTxHash = null, chainBlockNumber = null, custodyModel = 'wallet';
     try {
       if (req.user.wallet_address) {
         const { settleINRTradeOnChain } = require('../services/minter');
@@ -805,6 +718,7 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
           `UPDATE trades SET chain_status = 'confirmed', chain_tx_hash = $1, chain_block = $2 WHERE id = $3`,
           [result.txHash, result.blockNumber, tradeId]
         );
+        chainTxHash = result.txHash; chainBlockNumber = result.blockNumber; custodyModel = 'wallet';
         console.log(`[checkout-verify] Trade ${tradeId} settled on-chain (wallet) — TX: ${result.txHash}`);
       } else {
         const { logOwnershipChangeOnChain } = require('../services/creditLedger');
@@ -822,13 +736,10 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
           `UPDATE trades SET chain_status = 'confirmed', chain_tx_hash = $1, chain_block = $2 WHERE id = $3`,
           [result.txHash, result.blockNumber, tradeId]
         );
+        chainTxHash = result.txHash; chainBlockNumber = result.blockNumber; custodyModel = 'pooled';
         console.log(`[checkout-verify] Trade ${tradeId} logged on-chain (ledger, no wallet) — TX: ${result.txHash}`);
       }
     } catch (chainErr) {
-      // Payment already succeeded (Razorpay captured real money) — we must
-      // NOT fail the HTTP response at this point, but we MUST make the
-      // failure visible and actionable rather than silently marking
-      // 'confirmed' like the old code path did.
       await query(
         `UPDATE trades SET chain_status = 'failed' WHERE id = $1`,
         [tradeId]
@@ -840,6 +751,23 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
          `Trade ${tradeId} — payment captured but on-chain settlement failed: ${chainErr.message}`]
       ).catch(() => {});
       console.error(`[checkout-verify] ⚠️ On-chain settlement FAILED for trade ${tradeId} — payment already captured. Needs manual remediation:`, chainErr.message);
+    }
+
+    // [CERT-OWNERSHIP] Issue Certificate of Ownership regardless of which
+    // branch above ran — covers both real wallet transfer and ledger log.
+    let ownershipCertId = null;
+    try {
+      ownershipCertId = await issueOwnershipCertificate({
+        userId: req.user.id,
+        tokenId: batch.token_id,
+        quantity: qty,
+        tradeId,
+        txHash: chainTxHash,
+        blockNumber: chainBlockNumber,
+        custodyModel,
+      });
+    } catch (certErr) {
+      console.error('[checkout-verify] certificate issuance failed (trade unaffected):', certErr.message);
     }
 
     fireTradeInvoice({
@@ -863,8 +791,6 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
         '/wallet', { tradeId, quantity: qty }).catch(() => {}),
     ]);
 
-    // [SELLER-EMAIL] Seller only ever got the in-app notification above —
-    // never an email, despite money landing in their account.
     if (batch.seller_email) {
       sendCreditsSoldEmail(batch.seller_email, {
         name: batch.seller_name, projectName: batch.project_name, quantity: qty,
@@ -880,6 +806,7 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
       razorpayPaymentId: razorpay_payment_id,
       chainLogging:      'queued',
       invoiceQueued:     true,
+      ownershipCertId,
       message: `Trade completed — ${qty} credits purchased via Razorpay`,
     });
 
@@ -889,9 +816,6 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /api/trades/:id/verify
-// ─────────────────────────────────────────────────────────────────────────────
 router.get('/:id/verify', readLimiter, async (req, res) => {
   try {
     const { rows } = await query(
@@ -931,20 +855,10 @@ router.get('/:id/verify', readLimiter, async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /api/trades/:id/invoice
-// ─────────────────────────────────────────────────────────────────────────────
 router.get('/:id/invoice', authenticate, readLimiter, async (req, res) => {
   await serveTradeInvoice(req, res);
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /api/trades/history
-// [FIX-TRADE-TYPE] Added CASE expression to compute Buy/Sell relative to the
-// requesting user. Previously the query returned t.* with no directional
-// label at all, so the frontend had nothing correct to render and every row
-// showed the same value regardless of which side of the trade you were on.
-// ─────────────────────────────────────────────────────────────────────────────
 router.get('/history', authenticate, readLimiter, async (req, res) => {
   try {
     const { rows } = await query(
@@ -967,9 +881,6 @@ router.get('/history', authenticate, readLimiter, async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /api/trades/stats
-// ─────────────────────────────────────────────────────────────────────────────
 router.get('/stats', readLimiter, async (req, res) => {
   try {
     const [volume, count, avgPrice, fees, chainStats] = await Promise.all([
@@ -994,9 +905,6 @@ router.get('/stats', readLimiter, async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /api/trades/my-fees
-// ─────────────────────────────────────────────────────────────────────────────
 router.get('/my-fees', authenticate, readLimiter, async (req, res) => {
   try {
     const { rows } = await query(
@@ -1017,9 +925,6 @@ router.get('/my-fees', authenticate, readLimiter, async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// creditSellerFromChain — called by blockchain listener for ETH trades
-// ─────────────────────────────────────────────────────────────────────────────
 const creditSellerFromChain = async ({ txHash, sellerId, sellerGetsINR, tradeId }) => {
   try {
     await withTransaction(async (client) => {

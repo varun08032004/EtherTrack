@@ -643,12 +643,26 @@ const TEMPLATES = {
     }),
   }),
 
-  'kyc-admin-new': ({ userEmail, fullName, idType, submissionId, submittedAt, adminUrl }) => ({
-    subject: `[EtherTrack Admin] New KYC — ${fullName}`,
+  'kyc-admin-new': ({ userEmail, fullName, idType, submissionId, submittedAt, adminUrl, kycType, entityName, gstin }) => ({
+    subject: kycType === 'business'
+      ? `[EtherTrack Admin] New Business KYC — ${entityName || fullName}`
+      : `[EtherTrack Admin] New KYC — ${fullName}`,
     html: layout({
-      eyebrow: 'ADMIN ALERT', title: 'New KYC Submission', ...AMBER,
+      eyebrow: 'ADMIN ALERT', title: kycType === 'business' ? 'New Business KYC Submission' : 'New KYC Submission', ...AMBER,
       bodyHtml: `
-        ${kv([['User email', userEmail], ['Full name', fullName], ['ID type', idType], ['Submission ID', submissionId], ['Submitted at', submittedAt]])}
+        ${kv([
+          ...(kycType === 'business' ? [
+            ['Account type', 'Business'],
+            ['Business name', entityName],
+            ['GSTIN', gstin],
+          ] : [['Account type', 'Individual']]),
+          ['User email', userEmail],
+          [kycType === 'business' ? 'Signatory name' : 'Full name', fullName],
+          ['ID type', idType],
+          ['Submission ID', submissionId],
+          ['Submitted at', submittedAt],
+        ])}
+        ${kycType === 'business' ? `<p style="font-size:12px;color:#fbbf2499">⚠ Cross-check GSTIN against the GST portal before approving — GSTIN format is validated automatically but not verified against the live registry.</p>` : ''}
         ${button(adminUrl, 'Review in Admin Panel →')}`,
       footer: 'EtherTrack · Internal admin notification',
     }),

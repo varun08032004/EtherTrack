@@ -13,6 +13,14 @@
 // [FIX-DEMAND-BADGE] Credit cards and the metadata modal now show a live
 //   🔥 HIGH DEMAND / 📉 OVERSUPPLIED / ● BALANCED badge from the same
 //   marketBuckets snapshot used for pricing.
+// [FIX-LEDGER] [NEW] Wallet-free (pooled custody) credits — myLedgerCredits
+//   from usePortfolio() — now render alongside wallet-based credits in the
+//   same grid. LIST/DELIST/RETIRE branch automatically to the ledger-backed
+//   backend calls (listCreditLedger/delistCreditLedger/retireCreditLedger)
+//   for any card with `isLedger: true`, with zero MetaMask involved. Every
+//   card with a `certId` now shows a CERTIFICATE button — not just RETIRED
+//   ones — since Certificates of Ownership are now issued at purchase/
+//   transfer time too, not just at retirement.
 'use strict';
 
 import React, {
@@ -35,6 +43,7 @@ import {
   LineChart, Line, Legend,
 } from 'recharts';
 import SellerApprovalBanner from '../components/SellerApprovalBanner';
+import { RetirementCertificate } from '../components/RetirementCertificate';
 
 // ── RBAC ─────────────────────────────────────────────────────────
 const PERMISSIONS = {
@@ -81,11 +90,6 @@ const PLAN_LIMITS = {
   growth     : { credits:Infinity, exports:['csv','pdf'],            label:'GROWTH',     color:'#22c55e'   },
   corporate  : { credits:Infinity, exports:['csv','pdf','verifier'], label:'CORPORATE',  color:'#f59e0b'   },
 };
-
-// [FIX-SHARED-PRICING] REFERENCE_PRICES / STANDARD_PREMIUM / INDIA_CCTS_FLOOR /
-// INDIA_CCTS_CEILING removed from here — now imported from
-// utils/creditPricing.js so this page and PortfolioContext's `stats` always
-// use identical pricing constants.
 
 const CHART_COLORS      = ['#22c55e','#60a5fa','#facc15','#a78bfa','#f97316','#f87171','#34d399'];
 const VERIFY_BASE_URL   = 'https://ethertrackapp.vercel.app/verify';
@@ -145,13 +149,6 @@ const emptyForm = {
 };
 
 // ── Pure helpers ──────────────────────────────────────────────────
-// [FIX-SHARED-PRICING] getReferencePrice(projectType, standard, vintageYear)
-// removed from here — now imported from utils/creditPricing.js as
-// getReferencePrice(projectType, standard, vintageYear, creditType,
-// marketBuckets), which additionally factors in live supply/demand and
-// recent trade prices instead of a pure static lookup. Every call site
-// below has been updated to pass the extra two args.
-
 const getDaysUntilExpiry = (expiryDate) => {
   if (!expiryDate) return null;
   return Math.ceil((new Date(expiryDate).getTime() - Date.now()) / 86400000);
@@ -796,223 +793,6 @@ function RetireModal({ credit, onConfirm, onClose, loading }) {
   );
 }
 
-function QRCodeImg({ value, size = 120 }) {
-  const [failed, setFailed] = useState(false);
-  const url = `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(value)}&bgcolor=0a0f0c&color=22c55e&margin=2`;
-  if (failed) return (
-    <div style={{ width:size, height:size, display:'flex', alignItems:'center',
-      justifyContent:'center', fontSize:9, color:'#86efac22' }}>QR unavailable</div>
-  );
-  return (
-    <div style={{ textAlign:'center' }}>
-      <img src={url} alt={`QR code to verify: ${value}`} width={size} height={size}
-        style={{ borderRadius:8, border:'1px solid #22c55e22', background:'#0a0f0c' }}
-        onError={() => setFailed(true)}/>
-      <div style={{ fontSize:9, color:'#86efac66', marginTop:4, letterSpacing:'.08em' }}>
-        SCAN TO VERIFY
-      </div>
-    </div>
-  );
-}
-
-function RetirementCertificate({ credit, txHash, onClose }) {
-  const [pdfLoading, setPdfLoading] = useState(false);
-  const date         = new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'long',year:'numeric'});
-  const tokenDisplay = credit.tokenHex || (credit.tokenId != null
-    ? `0x${Number(credit.tokenId).toString(16).padStart(8,'0').toUpperCase()}` : '—');
-  const certId    = credit.certId || credit.certificate_id;
-  const verifyUrl = certId ? `${VERIFY_BASE_URL}/${certId}` : null;
-  const reg       = REGISTRIES[credit.standard] || REGISTRIES.VCS;
-  const caLabel   = CA_OPTIONS.find(o => o.value === credit.correspondingAdjustment)?.label || 'None';
-  const sdgList   = (credit.sdgTags || credit.sdg_tags || []).join(', ') || '—';
-
-  const handleDownloadPDF = async () => {
-    setPdfLoading(true);
-    try {
-      const { jsPDF } = await import('jspdf');
-      const doc = new jsPDF({ orientation:'portrait', unit:'mm', format:'a4' });
-      const W = 210, ml = 20, tw = W - 40;
-      let y = 20;
-
-      doc.setFillColor(4,7,6); doc.rect(0,0,W,297,'F');
-      doc.setFillColor(13,46,31); doc.rect(0,0,W,40,'F');
-      doc.setTextColor(34,197,94); doc.setFontSize(8); doc.setFont('helvetica','normal');
-      doc.text('ETHERTRACK CARBON EXCHANGE — RETIREMENT CERTIFICATE', W/2, y, { align:'center' });
-      y += 7;
-      doc.setFontSize(16); doc.setFont('helvetica','bold'); doc.setTextColor(240,253,244);
-      doc.text('Carbon Retirement Certificate', W/2, y, { align:'center' });
-      y += 6;
-      doc.setFontSize(7); doc.setFont('helvetica','normal'); doc.setTextColor(134,239,172);
-      doc.text('ISO 14064-3 · GHG PROTOCOL · BRSR · CDP · TCFD · ETHEREUM SEPOLIA', W/2, y, { align:'center' });
-      y += 12;
-
-      const fields = [
-        ['CERTIFICATE ID',   certId || 'PENDING'                                  ],
-        ['TOKEN ID',         tokenDisplay                                          ],
-        ['PROJECT NAME',     sanitise(credit.projectName || '—')                  ],
-        ['SERIAL NO.',       sanitise(credit.serialNumber || '—')                 ],
-        ['REGISTRY',         reg.label                                            ],
-        ['STANDARD',         credit.standard || '—'                              ],
-        ['CREDITS RETIRED',  `${Number(credit.retiredQty||credit.credits).toLocaleString()} tCO₂e`],
-        ['VINTAGE YEAR',     String(credit.vintageYear || '—')                   ],
-        ['OFFSET SCOPE',     credit.retireScope ? `Scope ${credit.retireScope}` : 'Scope 1/2/3'],
-        ['ARTICLE 6 / CA',   caLabel                                              ],
-        ['SDG CO-BENEFITS',  sdgList                                              ],
-        ['BENEFICIARY',      sanitise(credit.beneficiaryName || '—')             ],
-        ['COMPANY',          sanitise(credit.beneficiaryEntity || '—')           ],
-        ['GSTIN',            sanitise(credit.beneficiaryGstin || '—')            ],
-        ['REPORTING STD',    credit.reportingStandard || 'GHG Protocol'          ],
-        ['PURPOSE',          credit.purpose || 'Voluntary Offset'                ],
-        ['CBAM ELIGIBLE',    credit.cbamEligible ? 'YES — EU CBAM Article 7' : 'NO'],
-        ['RETIREMENT DATE',  date                                                 ],
-      ];
-
-      const colW = (tw - 6) / 2;
-      fields.forEach(([label, value], i) => {
-        const col = i % 2;
-        const x   = ml + col * (colW + 6);
-        if (col === 0 && i > 0) y += 16;
-        doc.setFillColor(10,15,12); doc.roundedRect(x,y,colW,14,1.5,1.5,'F');
-        doc.setDrawColor(15,42,26); doc.roundedRect(x,y,colW,14,1.5,1.5,'S');
-        doc.setFontSize(6.5); doc.setFont('helvetica','normal'); doc.setTextColor(134,239,172);
-        doc.text(label, x+3, y+4.5);
-        doc.setFontSize(8); doc.setFont('helvetica','bold'); doc.setTextColor(240,253,244);
-        doc.text(doc.splitTextToSize(String(value || '—'), colW - 6)[0], x+3, y+10);
-      });
-      y += 20;
-
-      if (txHash) {
-        doc.setFillColor(10,22,40); doc.roundedRect(ml,y,tw,14,2,2,'F');
-        doc.setFontSize(6.5); doc.setTextColor(134,239,172);
-        doc.text('BLOCKCHAIN TX HASH', ml+3, y+4.5);
-        doc.setFontSize(7); doc.setTextColor(96,165,250);
-        doc.text(doc.splitTextToSize(txHash, tw-6)[0], ml+3, y+10);
-        y += 18;
-      }
-
-      if (verifyUrl) {
-        doc.setFillColor(6,10,7); doc.roundedRect(ml,y,tw,14,2,2,'F');
-        doc.setFontSize(6.5); doc.setTextColor(134,239,172);
-        doc.text('PUBLIC VERIFICATION URL', ml+3, y+4.5);
-        doc.setFontSize(7.5); doc.setTextColor(34,197,94);
-        doc.text(verifyUrl, ml+3, y+10);
-        y += 18;
-      }
-
-      doc.setFontSize(7); doc.setTextColor(134,239,172);
-      doc.text(
-        "ETHERTRACK · INDIA'S CARBON EXCHANGE · ISO 14064-3 · PARIS AGREEMENT ART.6",
-        W/2, y, { align:'center' }
-      );
-
-      doc.save(`${certId || 'certificate'}.pdf`);
-    } catch (err) {
-      console.error('[PDF generation]', err);
-      const content = `EtherTrack Retirement Certificate\nCert: ${certId}\nCredits: ${credit.retiredQty||credit.credits} tCO2e\nVerify: ${verifyUrl||'N/A'}`;
-      const blob = new Blob([content], { type:'text/plain' });
-      const url  = URL.createObjectURL(blob);
-      const a    = document.createElement('a');
-      a.href = url; a.download = `${certId||'cert'}.txt`; a.click();
-      URL.revokeObjectURL(url);
-    } finally {
-      setPdfLoading(false);
-    }
-  };
-
-  return (
-    <div style={{ background:'linear-gradient(135deg,#060a07,#0a1209,#060a07)',
-      border:'1px solid #22c55e44', borderRadius:16, padding:28 }}>
-      <div style={{ textAlign:'center', marginBottom:20 }}>
-        <div style={{ fontSize:9, color:'#22c55e88', letterSpacing:'.2em', marginBottom:6 }}>
-          ETHERTRACK CARBON EXCHANGE
-        </div>
-        <div style={{ fontSize:20, fontWeight:700, color:'#f0fdf4', fontFamily:'Syne,sans-serif' }}>
-          Carbon Retirement Certificate
-        </div>
-        <div style={{ fontSize:9, color:'#86efac44', marginTop:4 }}>
-          ISO 14064-3 · GHG PROTOCOL · BRSR · CDP · TCFD
-        </div>
-      </div>
-
-      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginBottom:16 }}>
-        {[
-          { l:'CERTIFICATE ID',  v:certId||'PENDING',                                            c:'#22c55e' },
-          { l:'TOKEN ID',        v:tokenDisplay,                                                 c:'#60a5fa' },
-          { l:'PROJECT',         v:sanitise(credit.projectName||'—'),                            c:'#f0fdf4' },
-          { l:'CREDITS RETIRED', v:`${Number(credit.retiredQty||credit.credits).toLocaleString()} tCO₂e`, c:'#22c55e' },
-          { l:'OFFSET SCOPE',    v:credit.retireScope?`Scope ${credit.retireScope}`:'—',         c:'#a78bfa' },
-          { l:'ARTICLE 6',       v:caLabel,                                                      c:'#22c55e' },
-          { l:'REGISTRY',        v:reg.label,                                                    c:reg.color },
-          { l:'DATE',            v:date,                                                         c:'#f0fdf4' },
-          { l:'BENEFICIARY',     v:sanitise(credit.beneficiaryName||'—'),                        c:'#f0fdf4' },
-          { l:'ENTITY',          v:sanitise(credit.beneficiaryEntity||'—'),                      c:'#f0fdf4' },
-        ].map(({l,v,c}) => (
-          <div key={l} style={{ background:'#0a0f0c88', borderRadius:7, padding:'9px 12px',
-            border:'1px solid #0f2a1a' }}>
-            <div style={{ fontSize:8, color:'#86efac44', letterSpacing:'.1em', marginBottom:3 }}>{l}</div>
-            <div style={{ fontSize:11, color:c, fontWeight:600, wordBreak:'break-all' }}>{v}</div>
-          </div>
-        ))}
-      </div>
-
-      {txHash && (
-        <div style={{ background:'#0a0f0c88', borderRadius:7, padding:'9px 12px',
-          border:'1px solid #0f2a1a', marginBottom:12 }}>
-          <div style={{ fontSize:8, color:'#86efac44', letterSpacing:'.1em', marginBottom:3 }}>
-            BLOCKCHAIN TX HASH
-          </div>
-          <a href={`https://sepolia.etherscan.io/tx/${txHash}`}
-            target="_blank" rel="noreferrer noopener"
-            style={{ fontSize:10, color:'#60a5fa', fontFamily:'monospace',
-              wordBreak:'break-all', textDecoration:'none' }}>
-            {txHash}
-          </a>
-        </div>
-      )}
-
-      {verifyUrl && (
-        <div style={{ background:'#060a07', border:'1px solid #22c55e22', borderRadius:8,
-          padding:14, marginBottom:14, display:'flex', alignItems:'center',
-          gap:16, flexWrap:'wrap' }}>
-          <QRCodeImg value={verifyUrl} size={90}/>
-          <div style={{ flex:1 }}>
-            <div style={{ fontSize:9, color:'#22c55e88', letterSpacing:'.1em', marginBottom:5 }}>
-              VERIFICATION URL
-            </div>
-            <div style={{ fontSize:10, color:'#22c55e66', wordBreak:'break-all', fontFamily:'monospace' }}>
-              {verifyUrl}
-            </div>
-          </div>
-        </div>
-      )}
-
-      <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
-        {verifyUrl && (
-          <a href={verifyUrl} target="_blank" rel="noreferrer noopener"
-            style={{ flex:1, padding:'9px', borderRadius:6, border:'1px solid #60a5fa33',
-              background:'#060e18', color:'#60a5fa88', fontFamily:'DM Mono,monospace',
-              fontSize:10, textDecoration:'none', textAlign:'center' }}>
-            🔗 VERIFY
-          </a>
-        )}
-        <button onClick={handleDownloadPDF} disabled={pdfLoading}
-          style={{ flex:1, padding:'9px', borderRadius:6, border:'1px solid #22c55e44',
-            background:'#051409', color:pdfLoading?'#86efac33':'#22c55e88',
-            cursor:pdfLoading?'not-allowed':'pointer',
-            fontFamily:'DM Mono,monospace', fontSize:10 }}>
-          {pdfLoading ? '⟳ GENERATING PDF…' : '↓ DOWNLOAD PDF'}
-        </button>
-        <button onClick={onClose}
-          style={{ flex:1, padding:'9px', borderRadius:6, border:'1px solid #22c55e44',
-            background:'#0d2e1f', color:'#22c55e', cursor:'pointer',
-            fontFamily:'DM Mono,monospace', fontSize:10 }}>
-          CLOSE ✕
-        </button>
-      </div>
-    </div>
-  );
-}
-
 // ─────────────────────────────────────────────────────────────────
 // Main Component
 // ─────────────────────────────────────────────────────────────────
@@ -1020,10 +800,11 @@ export default function PortfolioV3() {
   const navigate = useNavigate();
   const { user, dbUser } = useContext(AuthContext);
   const {
-    myCredits, myBoughtCredits, myRetirements, stats, loading,
+    myCredits, myBoughtCredits, myLedgerCredits, myRetirements, stats, loading,
     walletAddress, isKYCVerified,
     listCredit, delistCredit, retireCredit,
-    loadMyCredits, refreshKYC, refreshRetirements, refreshBoughtCredits,
+    listCreditLedger, delistCreditLedger, retireCreditLedger,
+    loadMyCredits, refreshKYC, refreshRetirements, refreshBoughtCredits, refreshLedgerCredits,
     // [FIX-SHARED-PRICING] same market snapshot PortfolioContext's `stats`
     // uses to compute totalValue — pricing/badges here are guaranteed to
     // reconcile with the Dashboard because both read this exact object.
@@ -1107,10 +888,11 @@ useEffect(() => {
   loadEmissionsData();
   fetchEthPrice();
   refreshBoughtCredits && refreshBoughtCredits();
+  refreshLedgerCredits && refreshLedgerCredits();
   const ethInterval = setInterval(fetchEthPrice, 5 * 60 * 1000);
   return () => clearInterval(ethInterval);
 // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [refreshBoughtCredits]);
+}, [refreshBoughtCredits, refreshLedgerCredits]);
 
 useEffect(() => {
   if (!user) return;
@@ -1214,20 +996,38 @@ useEffect(() => {
     })),
   [myBoughtCredits]);
 
+  // [FIX-LEDGER] Wallet-free (pooled custody) credits — normalised to the
+  // same shape as everything else, tagged isLedger:true so LIST/DELIST/
+  // RETIRE actions know to call the ledger-backed functions instead of the
+  // wallet-based ones. certId (populated by the backend for any credit that
+  // came from a BUY/transfer) drives the CERTIFICATE button below.
+  const normalisedLedger = useMemo(() =>
+    (myLedgerCredits || []).map(l => ({
+      ...l,
+      status        : 'HELD',
+      isLedger      : true,
+      isBought      : false,
+      isOnChain     : true,
+      admin_status  : 'approved',
+      listedCredits : safeNum(l.listedCredits, 0),
+      pricePerCredit: safeNum(l.pricePerCredit, 850),
+    })),
+  [myLedgerCredits]);
+
   const allCredits = useMemo(
-    () => [...ownedCredits, ...normalisedBought],
-    [ownedCredits, normalisedBought]
+    () => [...ownedCredits, ...normalisedBought, ...normalisedLedger],
+    [ownedCredits, normalisedBought, normalisedLedger]
   );
 
   const tabCounts = useMemo(() => ({
     ALL     : allCredits.length,
-    HELD    : ownedCredits.filter(c => c.status==='HELD'||c.status==='PARTIAL').reduce((s,c)=>s+safeNum(c.heldCredits??c.credits),0) + normalisedBought.reduce((s,c)=>s+safeNum(c.heldCredits??c.credits),0),
-    LISTED  : ownedCredits.filter(c => c.status==='LISTED'||c.status==='PARTIAL').reduce((s,c)=>s+safeNum(c.listedCredits),0),
+    HELD    : ownedCredits.filter(c => c.status==='HELD'||c.status==='PARTIAL').reduce((s,c)=>s+safeNum(c.heldCredits??c.credits),0) + normalisedBought.reduce((s,c)=>s+safeNum(c.heldCredits??c.credits),0) + normalisedLedger.reduce((s,c)=>s+safeNum(c.heldCredits??c.credits),0),
+    LISTED  : ownedCredits.filter(c => c.status==='LISTED'||c.status==='PARTIAL').reduce((s,c)=>s+safeNum(c.listedCredits),0) + normalisedLedger.reduce((s,c)=>s+safeNum(c.listedCredits),0),
     BOUGHT  : normalisedBought.length,
     RETIRED : myRetirements.length,
     PENDING : ownedCredits.filter(c => c.isPending && !c.isRejected).length,
     REJECTED: ownedCredits.filter(c => c.isRejected).length,
-  }), [allCredits, ownedCredits, normalisedBought, myRetirements]);
+  }), [allCredits, ownedCredits, normalisedBought, normalisedLedger, myRetirements]);
 
   // [FIX-SHARED-PRICING] getReferencePrice calls include (creditType,
   // marketBuckets) so this reconciles with PortfolioContext's
@@ -1527,7 +1327,7 @@ useEffect(() => {
 
  const handleListForSale = async (credit) => {
   if (!can('portfolio:list')) { showToast('No permission to list credits', 'error'); return; }
-  if (!credit.tokenId && credit.tokenId !== 0) { showToast('Credit not yet minted on-chain', 'error'); return; }
+  if (!credit.isLedger && !credit.tokenId && credit.tokenId !== 0) { showToast('Credit not yet minted on-chain', 'error'); return; }
   const price = safeNum(listPrice);
   if (!price || price <= 0) { showToast('Enter a valid price', 'error'); return; }
   const qty = parseInt(listQty, 10) || credit.credits;
@@ -1535,6 +1335,28 @@ useEffect(() => {
     showToast(`Quantity must be between 1 and ${credit.credits}`, 'error');
     return;
   }
+
+  // [FIX-LEDGER] Wallet-free sellers — no on-chain escrow, no ETH price
+  // needed. Just a DB-visible listing against their ledger balance.
+  if (credit.isLedger) {
+    try {
+      setTxPending(`Listing "${sanitise(credit.projectName)}"…`);
+      await listCreditLedger(credit.tokenId, credit.batchId || null, qty, price, 30);
+      setShowList(null);
+      setListPrice('');
+      setListQty('');
+      setListPriceWarn('');
+      setActiveTab('LISTED');
+      showToast('Listed on marketplace!');
+      await refreshLedgerCredits();
+    } catch (e) {
+      showToast(e.message || 'Listing failed', 'error');
+    } finally {
+      if (mountedRef.current) setTxPending('');
+    }
+    return;
+  }
+
   try {
     setTxPending(`Listing "${sanitise(credit.projectName)}"…`);
     const rate     = ethPriceInr || 210000;
@@ -1577,6 +1399,25 @@ useEffect(() => {
 
 const handleDelist = async (credit, qty) => {
   if (!can('portfolio:list')) { showToast('No permission', 'error'); return; }
+
+  // [FIX-LEDGER] Wallet-free sellers — nothing was ever escrowed out of
+  // pooled custody, so delisting is just deactivating the DB listing row.
+  if (credit.isLedger) {
+    try {
+      setTxPending('Cancelling listing…');
+      await delistCreditLedger(credit.ledgerListingId);
+      showToast('Listing removed from marketplace.');
+      await refreshLedgerCredits();
+    } catch (e) {
+      showToast(e.message || 'Delisting failed', 'error');
+    } finally {
+      if (mountedRef.current) setTxPending('');
+      setShowDelist(null);
+      setDelistQty('');
+    }
+    return;
+  }
+
   try {
     setTxPending('Cancelling listing…');
     const onchainListingId = credit.listingIdOnchain ?? credit.listingId;
@@ -1652,7 +1493,11 @@ const handleBulkList = async () => {
   for (let i = 0; i < selectedCredits.length; i++) {
     const credit = selectedCredits[i];
     try {
-      await listCredit(credit.tokenId, credit.heldCredits ?? credit.credits, priceEth, price);
+      if (credit.isLedger) {
+        await listCreditLedger(credit.tokenId, credit.batchId || null, credit.heldCredits ?? credit.credits, price, 30);
+      } else {
+        await listCredit(credit.tokenId, credit.heldCredits ?? credit.credits, priceEth, price);
+      }
       setBulkProgress(p => ({ ...p, done: p.done + 1 }));
     } catch (e) {
       setBulkProgress(p => ({ ...p, failed: p.failed + 1 }));
@@ -1662,6 +1507,7 @@ const handleBulkList = async () => {
 
   setBulkProgress(p => ({ ...p, status: 'done' }));
   await loadMyCredits();
+  await refreshLedgerCredits();
   showToast(`Bulk listed ${selectedCredits.length} credits!`);
   clearBulkMode();
 };
@@ -1680,7 +1526,11 @@ const handleBulkRetire = async () => {
   for (let i = 0; i < selectedCredits.length; i++) {
     const credit = selectedCredits[i];
     try {
-      await retireCredit(credit.tokenId, credit.heldCredits ?? credit.credits, '1', {});
+      if (credit.isLedger) {
+        await retireCreditLedger(credit.tokenId, credit.heldCredits ?? credit.credits);
+      } else {
+        await retireCredit(credit.tokenId, credit.heldCredits ?? credit.credits, '1', {});
+      }
       setBulkProgress(p => ({ ...p, done: p.done + 1 }));
     } catch (e) {
       setBulkProgress(p => ({ ...p, failed: p.failed + 1 }));
@@ -1690,6 +1540,7 @@ const handleBulkRetire = async () => {
 
   setBulkProgress(p => ({ ...p, status: 'done' }));
   await loadMyCredits();
+  await refreshLedgerCredits();
   showToast(`Bulk retired ${selectedCredits.length} credits!`);
   clearBulkMode();
 };
@@ -1779,6 +1630,7 @@ const result = await retireCredit(credit.tokenId, qty);
         loadPendingCredits(),
         loadEmissionsData(),
         refreshBoughtCredits && refreshBoughtCredits(),
+        refreshLedgerCredits && refreshLedgerCredits(),
       ]);
       showToast('Portfolio refreshed');
     } catch {
@@ -2634,14 +2486,9 @@ const result = await retireCredit(credit.tokenId, qty);
                 ) : filtered.map((credit, cardIdx) => {
                   const reg          = REGISTRIES[credit.standard] || REGISTRIES.VCS;
                   const dep          = vintagePenalty(credit.vintageYear);
-                  // [FIX-SHARED-PRICING] bought-credit refPrice previously
-                  // showed purchase price. Always show live market price
-                  // here; purchase price shown separately as "BOUGHT AT".
                   const refPrice     = getReferencePrice(credit.projectType, credit.standard, credit.vintageYear, credit.creditType, marketBuckets);
-                  // [FIX-DEMAND-BADGE] Live demand/supply badge from the
-                  // same bucket data used for refPrice above.
                   const demandBadge  = getDemandSupplyBadge(credit.projectType, credit.standard, marketBuckets);
-                  const isMinted     = credit.isOnChain !== false && credit.tokenId != null;
+                  const isMinted     = credit.isOnChain !== false && (credit.tokenId != null);
                   const daysLeft     = getDaysUntilExpiry(credit.expiryDate);
                   const expiryUrgent = daysLeft !== null && daysLeft <= 90 && daysLeft > 0;
                   const expired      = daysLeft !== null && daysLeft <= 0;
@@ -2720,6 +2567,11 @@ const result = await retireCredit(credit.tokenId, qty);
         style={{ background:`${ctMeta.color}11`, color:ctMeta.color, border:`1px solid ${ctMeta.color}33` }}>
         {credit.creditType === 'compliance' ? 'CCC' : 'VCU'}
       </span>
+      {credit.isLedger && (
+        <span className="pt-badge" style={{ background:'#0a1628', color:'#60a5fa', border:'1px solid #60a5fa33' }}>
+          🔓 NO WALLET NEEDED
+        </span>
+      )}
       {credit.icvcm_ccp_eligible && (
         <span className="pt-badge" style={{ background:'#0e1a00', color:'#84cc16', border:'1px solid #84cc1633' }}>
           🏅 CCP
@@ -2887,8 +2739,8 @@ const result = await retireCredit(credit.tokenId, qty);
                       setListQty(String(credit.heldCredits ?? credit.credits));
                       setListPriceWarn('');
                     }}
-                    disabled={loading.tx || !isMinted}
-                    title={!isMinted ? 'Credit not yet minted on-chain' : undefined}>
+                    disabled={loading.tx || (!isMinted && !credit.isLedger)}
+                    title={!isMinted && !credit.isLedger ? 'Credit not yet minted on-chain' : undefined}>
                     LIST
                   </button>
                 : <LockedAction label="LIST" reason="Manager role required"/>
@@ -2897,15 +2749,47 @@ const result = await retireCredit(credit.tokenId, qty);
                 onClick={() => navigate('/carbon-credits')} disabled={loading.tx}>
                 MARKET
               </button>
-              {can('portfolio:retire')
-                ? <button className="pt-act-btn retire"
-                    onClick={() => setShowRetire(credit)}
-                    disabled={loading.tx || !isMinted}
-                    title={!isMinted ? 'Credit not yet minted on-chain' : undefined}>
-                    🔥 RETIRE
-                  </button>
-                : <LockedAction label="RETIRE" reason="Admin role required"/>
-              }
+              {credit.certId && (
+                <button className="pt-act-btn cert"
+                  onClick={() => setShowCert({ ...credit, retiredQty: credit.heldCredits ?? credit.credits })}
+                  disabled={loading.tx}>
+                  📜 CERT
+                </button>
+              )}
+              {credit.isLedger ? (
+                <button className="pt-act-btn retire"
+                  onClick={async () => {
+                    try {
+                      setTxPending('Retiring credit (no wallet needed)…');
+                      const result = await retireCreditLedger(credit.tokenId, credit.heldCredits ?? credit.credits);
+                      showToast('Retired successfully!');
+                      setShowCert({
+                        ...credit,
+                        certId: result.certId,
+                        txHash: result.txHash,
+                        retiredQty: credit.heldCredits ?? credit.credits,
+                      });
+                      await refreshLedgerCredits();
+                      await (refreshRetirements && refreshRetirements());
+                    } catch (e) {
+                      showToast(e.message || 'Retirement failed', 'error');
+                    } finally {
+                      if (mountedRef.current) setTxPending('');
+                    }
+                  }}
+                  disabled={loading.tx}>
+                  🔥 RETIRE
+                </button>
+              ) : can('portfolio:retire') ? (
+                <button className="pt-act-btn retire"
+                  onClick={() => setShowRetire(credit)}
+                  disabled={loading.tx || !isMinted}
+                  title={!isMinted ? 'Credit not yet minted on-chain' : undefined}>
+                  🔥 RETIRE
+                </button>
+              ) : (
+                <LockedAction label="RETIRE" reason="Admin role required"/>
+              )}
             </>
         }
       </>
@@ -3438,6 +3322,12 @@ const result = await retireCredit(credit.tokenId, qty);
                 style={{ background:'none', border:'none', color:'#86efac44', cursor:'pointer', fontSize:18 }}>✕</button>
             </div>
             <div style={{ padding:24 }}>
+              {showList.isLedger && (
+                <div style={{ padding:'8px 12px', background:'#0a1628', border:'1px solid #60a5fa22',
+                  borderRadius:6, marginBottom:14, fontSize:10, color:'#60a5fa88' }}>
+                  🔓 No wallet needed — this listing happens entirely off pooled custody, zero MetaMask.
+                </div>
+              )}
               <div style={{ background:'#060a07', borderRadius:8, padding:'12px 14px',
                 marginBottom:14, border:'1px solid #0d1f11' }}>
                 <div style={{ fontSize:12, color:'#f0fdf4', fontWeight:700, marginBottom:4 }}>
@@ -3492,7 +3382,7 @@ const result = await retireCredit(credit.tokenId, qty);
                 </div>
               )}
 
-              {listPrice && !isNaN(listPrice) && safeNum(listPrice) > 0 && (
+              {listPrice && !isNaN(listPrice) && safeNum(listPrice) > 0 && !showList.isLedger && (
                 <div style={{ background:'#040706', borderRadius:6, padding:'10px 12px',
                   fontSize:10, color:'#86efac66', border:'1px solid #0d1f11', marginTop:10 }}>
                   <div style={{ display:'flex', justifyContent:'space-between', marginBottom:4 }}>
@@ -3531,7 +3421,7 @@ const result = await retireCredit(credit.tokenId, qty);
       )}
 
       {showCert && (
-        <div role="dialog" aria-modal="true" aria-label="Retirement certificate"
+        <div role="dialog" aria-modal="true" aria-label="Certificate"
           style={{ position:'fixed', inset:0, background:'rgba(0,0,0,.88)',
             backdropFilter:'blur(6px)', zIndex:3000, display:'flex',
             alignItems:'center', justifyContent:'center', padding:24 }}
@@ -3540,7 +3430,9 @@ const result = await retireCredit(credit.tokenId, qty);
             width:'100%', maxWidth:680, maxHeight:'90vh', overflowY:'auto' }}>
             <div style={{ padding:'20px 24px', borderBottom:'1px solid #0d1f11',
               display:'flex', alignItems:'center', justifyContent:'space-between' }}>
-              <span style={{ fontSize:14, fontWeight:700, color:'#f0fdf4' }}>📜 RETIREMENT CERTIFICATE</span>
+              <span style={{ fontSize:14, fontWeight:700, color:'#f0fdf4' }}>
+                📜 {showCert.status === 'RETIRED' || showCert.retireScope ? 'RETIREMENT CERTIFICATE' : 'CERTIFICATE OF OWNERSHIP'}
+              </span>
               <button aria-label="Close" onClick={() => setShowCert(null)}
                 style={{ background:'none', border:'none', color:'#86efac44', cursor:'pointer', fontSize:18 }}>✕</button>
             </div>
@@ -3548,6 +3440,7 @@ const result = await retireCredit(credit.tokenId, qty);
               <RetirementCertificate
                 credit={showCert}
                 txHash={showCert.txHash}
+                certificateType={showCert.status === 'RETIRED' || showCert.retireScope ? 'RETIREMENT' : 'OWNERSHIP'}
                 onClose={() => setShowCert(null)}
               />
             </div>
@@ -3643,11 +3536,7 @@ const result = await retireCredit(credit.tokenId, qty);
   const c         = selectedCard;
   const reg       = REGISTRIES[c.standard] || REGISTRIES.VCS;
   const dep       = vintagePenalty(c.vintageYear);
-  // [FIX-SHARED-PRICING] Always compute refPrice from current market data
-  // via the shared getMarketPrice. Purchase price (c.pricePerCredit) is
-  // shown separately in the "BOUGHT AT" field of the P&L box below.
   const refPrice  = getReferencePrice(c.projectType, c.standard, c.vintageYear, c.creditType, marketBuckets);
-  // [FIX-DEMAND-BADGE] Live demand/supply signal shown as MARKET SIGNAL row
   const demandBadge = getDemandSupplyBadge(c.projectType, c.standard, marketBuckets);
   const ctMeta    = CREDIT_TYPES.find(t => t.value === (c.creditType||'voluntary')) || CREDIT_TYPES[0];
   const daysLeft  = getDaysUntilExpiry(c.expiryDate);
@@ -3707,8 +3596,8 @@ const result = await retireCredit(credit.tokenId, qty);
                 color: expired?'#f87171':expiryUrgent?'#f59e0b':'#86efac88'
               },
               { label:'ON-CHAIN',
-                value: isMinted ? '✓ Minted' : '⏳ Pending',
-                color: isMinted?'#22c55e':'#60a5fa88'
+                value: c.isLedger ? '✓ Ledger (No Wallet)' : isMinted ? '✓ Minted' : '⏳ Pending',
+                color: c.isLedger ? '#60a5fa' : isMinted?'#22c55e':'#60a5fa88'
               },
               { label:'DEVELOPER',     value: c.developer    || '—',   color:'#86efac88'  },
               { label:'PROJECT TYPE',  value: c.projectType  || '—',   color:'#86efac88'  },

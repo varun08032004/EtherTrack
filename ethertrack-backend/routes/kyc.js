@@ -17,6 +17,10 @@ const UUID_REGEX  = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 const HASH_REGEX  = /^0x[0-9a-f]{64}$/i;
 const PHONE_REGEX = /^\+[1-9]\d{6,14}$/;  // E.164 — any country
 const VALID_ID_TYPES = new Set(['aadhaar','pan','passport','driving','voter']);
+const VALID_KYC_TYPES = new Set(['individual','business']);
+const GSTIN_REGEX = /^\d{2}[A-Z]{5}\d{4}[A-Z]{1}\d[Z]{1}[A-Z\d]{1}$/;
+const BUSINESS_PAN_REGEX = /^[A-Z]{5}\d{4}[A-Z]{1}$/;
+const CIN_REGEX = /^[LUu]\d{5}[A-Za-z]{2}\d{4}[A-Za-z]{3}\d{6}$/;
 
 // KYC tier progression
 const TIER_RANK = { none: 0, phone: 1, basic: 2, full: 3 };
@@ -72,6 +76,11 @@ const normalizeId = (idType, idNumber) => {
   return String(idNumber).trim();
 };
 
+/** Normalize + hash GSTIN server-side (same pattern as aadhaar/pan hashing) */
+const normalizeGstin = (gstin) => String(gstin).toUpperCase().trim();
+const computeGstinHash = (gstin) =>
+  ethers.keccak256(ethers.toUtf8Bytes(`gstin:${normalizeGstin(gstin)}`));
+
 /** Insert a kyc_events row (fire-and-forget inside a transaction) */
 const logKycEvent = (client, { submissionId, actorId, action, fromStatus, toStatus, meta, ip, ua }) =>
   client.query(
@@ -102,12 +111,21 @@ router.post('/submit', authenticate, async (req, res) => {
   const {
     fullName, idType, phone, idNumber,
     aadhaarHash, panHash, docIpfsHash,
+    kycType = 'individual',
+    entityName, gstin, businessPan, cin,
+    signatoryDesignation, businessDocIpfsHash,
   } = req.body;
 
   const idempotencyKey = req.headers['idempotency-key'];
 
   // ── Input validation ──────────────────────────────────────────────────────
   const errs = [];
+  if (!VALID_KYC_TYPES.has(kycType))
+    errs.push(`kycType must be one of: ${[...VALID_KYC_TYPES].join(', ')}`);
+
+  // fullName/idType/idNumber/docIpfsHash represent the *signatory* on a
+  // business submission, and the individual applicant otherwise — same
+  // fields, same validation either way.
   if (!fullName || typeof fullName !== 'string' || fullName.trim().length < 1 || fullName.length > 200)
     errs.push('fullName must be 1–200 characters');
   if (!idType || !VALID_ID_TYPES.has(idType))
@@ -122,6 +140,30 @@ router.post('/submit', authenticate, async (req, res) => {
     errs.push('aadhaarHash must be a 0x-prefixed keccak256 hex string');
   if (panHash && !HASH_REGEX.test(panHash))
     errs.push('panHash must be a 0x-prefixed keccak256 hex string');
+
+  // ── Business-only fields ────────────────────────────────────────────────
+  if (kycType === 'business') {
+    if (!entityName || typeof entityName !== 'string' || entityName.trim().length < 1 || entityName.length > 255)
+      errs.push('entityName must be 1–255 characters');
+    if (!gstin || !GSTIN_REGEX.test(normalizeGstin(gstin || '')))
+      errs.push('gstin must be a valid 15-character GSTIN');
+    if (!businessPan || !BUSINESS_PAN_REGEX.test(String(businessPan).toUpperCase().trim()))
+      errs.push('businessPan must be a valid 10-character company PAN');
+    if (cin && !CIN_REGEX.test(String(cin).toUpperCase().trim()))
+      errs.push('cin must be a valid 21-character CIN/LLPIN (omit if proprietorship/partnership)');
+    if (!signatoryDesignation || typeof signatoryDesignation !== 'string' || signatoryDesignation.trim().length < 1)
+      errs.push('signatoryDesignation is required for business KYC (e.g. Director, Partner)');
+    if (!businessDocIpfsHash || !CID_REGEX.test(businessDocIpfsHash))
+      errs.push('businessDocIpfsHash must be a valid IPFS CIDv0/CIDv1 (GST certificate / incorporation doc)');
+
+    // Cross-check: GSTIN characters 3–12 are the PAN it was issued against.
+    // Catches typos/mismatched entries before they ever reach an admin.
+    if (gstin && businessPan && GSTIN_REGEX.test(normalizeGstin(gstin)) && BUSINESS_PAN_REGEX.test(String(businessPan).toUpperCase().trim())) {
+      const panInGstin = normalizeGstin(gstin).slice(2, 12);
+      if (panInGstin !== String(businessPan).toUpperCase().trim())
+        errs.push('businessPan does not match the PAN embedded in the GSTIN — check both fields');
+    }
+  }
 
   if (errs.length) {
     return res.status(400).json({ error: 'Validation failed', details: errs });
@@ -154,6 +196,12 @@ router.post('/submit', authenticate, async (req, res) => {
   // Compute canonical hashes server-side — client values used only for aadhaar/pan type routing
   const canonicalAadhaarHash = idType === 'aadhaar' ? serverIdHash : null;
   const canonicalPanHash     = idType === 'pan'     ? serverIdHash : null;
+
+  // Business fields — server is authoritative for gstin_hash too
+  const normalizedGstin       = kycType === 'business' ? normalizeGstin(gstin) : null;
+  const canonicalGstinHash    = kycType === 'business' ? computeGstinHash(gstin) : null;
+  const normalizedBusinessPan = kycType === 'business' ? String(businessPan).toUpperCase().trim() : null;
+  const normalizedCin         = kycType === 'business' && cin ? String(cin).toUpperCase().trim() : null;
 
   // ── Transaction with advisory lock ───────────────────────────────────────
   const client = await pool.connect();
@@ -207,15 +255,21 @@ router.post('/submit', authenticate, async (req, res) => {
     const { rows: [sub] } = await client.query(
   `INSERT INTO kyc_submissions
      (user_id, full_name, id_type, phone, kyc_data_hash,
-      aadhaar_hash, pan_hash, doc_ipfs_hash, status, kyc_tier, 
-      idempotency_key, consent_given, consent_at)
-   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending','phone',$9,$10,$11)
+      aadhaar_hash, pan_hash, doc_ipfs_hash, status, kyc_tier,
+      idempotency_key, consent_given, consent_at,
+      kyc_type, entity_name, gstin, gstin_hash, business_pan, cin,
+      signatory_designation, business_doc_ipfs_hash)
+   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending','phone',$9,$10,$11,
+           $12,$13,$14,$15,$16,$17,$18,$19)
    RETURNING id, submitted_at`,
   [req.user.id, fullName.trim(), idType, phone || null, serverHash,
    canonicalAadhaarHash, canonicalPanHash, docIpfsHash,
    idempotencyKey || null,
    req.body.consentGiven === true,
    req.body.consentAt ? new Date(req.body.consentAt) : new Date(),
+   kycType, entityName ? entityName.trim() : null, normalizedGstin, canonicalGstinHash,
+   normalizedBusinessPan, normalizedCin, signatoryDesignation ? signatoryDesignation.trim() : null,
+   businessDocIpfsHash || null,
   ]
 );
     
@@ -224,9 +278,10 @@ router.post('/submit', authenticate, async (req, res) => {
     await client.query(
       `UPDATE users SET
          kyc_status='submitted', full_name=$1,
-         kyc_submission_id=$2, kyc_submitted_at=NOW(), updated_at=NOW()
+         kyc_submission_id=$2, kyc_submitted_at=NOW(), updated_at=NOW(),
+         kyc_type=$4
        WHERE id=$3`,
-      [fullName.trim(), sub.id, req.user.id]
+      [fullName.trim(), sub.id, req.user.id, kycType]
     );
 
     // Audit log
@@ -236,7 +291,7 @@ router.post('/submit', authenticate, async (req, res) => {
       action:       'submitted',
       fromStatus:   null,
       toStatus:     'pending',
-      meta:         { idType, hasPhone: !!phone },
+      meta:         { idType, hasPhone: !!phone, kycType, entityName: entityName || null },
       ip:           req.ip,
       ua:           req.headers['user-agent'],
     });
@@ -273,12 +328,17 @@ router.post('/submit', authenticate, async (req, res) => {
     if (process.env.ADMIN_EMAIL) {
       enqueueEmail({
         to:       process.env.ADMIN_EMAIL,
-        subject:  `[EtherTrack Admin] New KYC — ${escHtml(fullName.trim())}`,
+        subject:  kycType === 'business'
+          ? `[EtherTrack Admin] New Business KYC — ${escHtml(entityName ? entityName.trim() : fullName.trim())}`
+          : `[EtherTrack Admin] New KYC — ${escHtml(fullName.trim())}`,
         template: 'kyc-admin-new',
         data: {
           userEmail:    escHtml(req.user.email),
           fullName:     escHtml(fullName.trim()),
           idType:       escHtml(idType.toUpperCase()),
+          kycType,
+          entityName:   entityName ? escHtml(entityName.trim()) : null,
+          gstin:        kycType === 'business' ? escHtml(normalizedGstin) : null,
           submissionId: sub.id,
           submittedAt:  new Date().toISOString(),
           adminUrl:     `${process.env.FRONTEND_URL}/admin/kyc`,
@@ -296,11 +356,14 @@ router.post('/submit', authenticate, async (req, res) => {
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
     if (e.code === '23505') {
-      // Unique constraint on aadhaar/pan hash
+      // Unique constraint on aadhaar/pan hash, or gstin_hash for business KYC
+      const isGstinConflict = String(e.constraint || '').includes('gstin');
       return res.status(409).json({
         error:   'duplicate_kyc',
-        message: 'These KYC credentials are already verified with another account.',
-        code:    'DUPLICATE_CREDENTIALS',
+        message: isGstinConflict
+          ? 'This GSTIN is already verified with another account.'
+          : 'These KYC credentials are already verified with another account.',
+        code:    isGstinConflict ? 'DUPLICATE_GSTIN' : 'DUPLICATE_CREDENTIALS',
       });
     }
     req.log.error({ err: { code: e.code, msg: e.message }, durationMs: Date.now() - t0 }, 'kyc.submit.error');
@@ -330,7 +393,8 @@ router.get('/status', authenticate, async (req, res) => {
     const { rows } = await query(
       `SELECT
          s.id, s.status, s.kyc_tier, s.submitted_at, s.reviewed_at,
-         s.rejection_reason, u.kyc_status, u.kyc_verified, u.kyc_tier as user_tier
+         s.rejection_reason, s.kyc_type, s.entity_name,
+         u.kyc_status, u.kyc_verified, u.kyc_tier as user_tier, u.kyc_type as user_kyc_type
        FROM kyc_submissions s
        JOIN users u ON u.id = s.user_id
        WHERE s.user_id = $1 AND s.deleted_at IS NULL
@@ -342,10 +406,13 @@ router.get('/status', authenticate, async (req, res) => {
       kycStatus:   rows[0]?.kyc_status  ?? req.user.kyc_status ?? 'none',
       kycVerified: rows[0]?.kyc_verified ?? false,
       kycTier:     rows[0]?.user_tier   ?? 'none',
+      kycType:     rows[0]?.user_kyc_type ?? 'individual',
       submission:  rows[0] ? {
         id:              rows[0].id,
         status:          rows[0].status,
         tier:            rows[0].kyc_tier,
+        kycType:         rows[0].kyc_type,
+        entityName:      rows[0].entity_name,
         submittedAt:     rows[0].submitted_at,
         reviewedAt:      rows[0].reviewed_at,
         rejectionReason: rows[0].rejection_reason,
@@ -414,6 +481,8 @@ router.get('/pending', authenticate, requireRole('admin'), async (req, res) => {
       `SELECT
          s.id, s.full_name, s.id_type, s.phone, s.status, s.kyc_tier,
          s.submitted_at, s.doc_ipfs_hash,
+         s.kyc_type, s.entity_name, s.gstin, s.business_pan, s.cin,
+         s.signatory_designation, s.business_doc_ipfs_hash,
          u.email, u.wallet_address,
          (SELECT COUNT(*) FROM kyc_submissions WHERE user_id=s.user_id) as prior_submissions
        FROM kyc_submissions s
@@ -453,6 +522,8 @@ router.get('/:id', authenticate, requireRole('admin'), async (req, res) => {
       `SELECT
          s.id, s.full_name, s.id_type, s.phone, s.status, s.kyc_tier,
          s.kyc_data_hash, s.aadhaar_hash, s.pan_hash, s.doc_ipfs_hash,
+         s.kyc_type, s.entity_name, s.gstin, s.gstin_hash, s.business_pan,
+         s.cin, s.signatory_designation, s.business_doc_ipfs_hash,
          s.submitted_at, s.reviewed_at, s.rejection_reason, s.reviewed_by,
          u.email, u.wallet_address, u.kyc_status
        FROM kyc_submissions s

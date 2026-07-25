@@ -30,6 +30,7 @@ const {
 } = require('../services/email');
 const { mintApprovedCredit, verifyKYCOnChain } = require('../services/minter');
 const { createNotification } = require('./notifications');
+const { getAdapter } = require('../services/registryAdapters');
 
 const isAdmin = [authenticate, requireRole('admin')];
 
@@ -267,6 +268,45 @@ router.get('/credits', isAdmin, async (req, res) => {
   }
 });
 
+// [NEW] Surface the voluntary-registry adapter's verification output next
+// to a pending submission, BEFORE the admin decides to approve/reject.
+// Not a gate — admin still makes the final call — but shrinks what they
+// have to check by hand (format validity always checked automatically;
+// full verification depends on the adapter's capability tier, see
+// services/registryAdapters/baseAdapter.js). BEE/compliance batches skip
+// this entirely — they're not routed through voluntary registry adapters.
+router.get('/credits/:id/verify-registry', isAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid id' });
+  try {
+    const { rows } = await query(
+      `SELECT standard, credit_type, registry_serial FROM carbon_batches WHERE id=$1`, [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const batch = rows[0];
+
+    if (batch.credit_type === 'compliance') {
+      return res.json({
+        skipped: true,
+        reason: 'Compliance-type (CCC) credits are not routed through voluntary registry adapters.',
+      });
+    }
+
+    let adapter;
+    try {
+      adapter = getAdapter(batch.standard);
+    } catch (e) {
+      return res.json({ skipped: true, reason: e.message });
+    }
+
+    const result = await adapter.verifyCredit(batch.registry_serial);
+    res.json({ skipped: false, result });
+  } catch (e) {
+    console.error('[admin/verify-registry]', e.message);
+    res.status(500).json({ error: 'Verification check failed' });
+  }
+});
+
 router.post('/credits/:id/approve', isAdmin, async (req, res) => {
   const { id } = req.params;
   const { notes } = req.body;
@@ -277,6 +317,28 @@ router.post('/credits/:id/approve', isAdmin, async (req, res) => {
     );
     if (!batch.length) return res.status(404).json({ error: 'Not found' });
     if (batch[0].admin_status !== 'pending') return res.status(400).json({ error: 'Already reviewed' });
+
+    // ── [COMPLIANCE-GATE] India CCTS Carbon Credit Certificates never go
+    // through the mint/list/trade path — see services/minter.js for the
+    // regulatory reasoning (CERC 2026 Regulations restrict CCC dealing to
+    // registered Power Exchanges). Approving a compliance batch marks it
+    // 'approved_tracked': visible to the user for BRSR/CCTS reporting
+    // purposes, but with no token_id and no route to LIST/RETIRE on-chain.
+    if (batch[0].credit_type === 'compliance') {
+      await query(
+        `UPDATE carbon_batches SET admin_status='approved', status='approved_tracked', admin_notes=$1,
+         reviewed_at=NOW(), reviewed_by=$2 WHERE id=$3`,
+        [notes || null, req.user.id, id]
+      );
+      await auditLog(req.user.id, 'CREDIT_APPROVED_TRACKED', batch[0].user_id,
+        `Batch ${id} — compliance credit (CCC), tracked-only — Serial: ${batch[0].registry_serial || 'N/A'}`);
+      await createNotification(batch[0].user_id, 'CREDIT', '✅ Compliance Credit Approved (Tracked)',
+        `"${batch[0].project_name}" is approved and now tracked in your portfolio for CCTS/BRSR reporting. ` +
+        `Trading of Carbon Credit Certificates is only permitted through CERC-registered Power Exchanges — ` +
+        `EtherTrack does not mint or list this credit type on its own marketplace.`,
+        '/portfolio', { creditId: id });
+      return res.json({ message: 'Compliance credit approved (tracked, not tokenised)', batchId: id });
+    }
 
     await query(
       `UPDATE carbon_batches SET admin_status='approved', status='approved', admin_notes=$1,
@@ -337,6 +399,10 @@ router.post('/credits/:id/retry-mint', isAdmin, async (req, res) => {
     if (batch.admin_status !== 'approved') return res.status(400).json({ error: 'Batch must be approved first' });
     if (batch.token_id != null) return res.status(400).json({ error: `Already minted — Token #${batch.token_id}` });
     if (!batch.wallet_address) return res.status(400).json({ error: 'User has no wallet — use assign-wallet-and-mint' });
+    // [COMPLIANCE-GATE] see services/minter.js — CCCs cannot be minted here.
+    if (batch.credit_type === 'compliance') {
+      return res.status(400).json({ error: 'Compliance-type credits (CCC) cannot be minted on EtherTrack — trading is restricted to CERC-registered Power Exchanges.' });
+    }
 
     const result = await mintApprovedCredit(id);
     if (result.tokenId != null) {
@@ -442,6 +508,10 @@ router.post('/credits/:id/assign-wallet-and-mint', isAdmin, async (req, res) => 
     if (!rows.length) return res.status(404).json({ error: 'Batch not found' });
     if (rows[0].admin_status !== 'approved') return res.status(400).json({ error: 'Batch must be approved first' });
     if (rows[0].token_id != null) return res.status(400).json({ error: `Already minted — Token #${rows[0].token_id}` });
+    // [COMPLIANCE-GATE] see services/minter.js — CCCs cannot be minted here.
+    if (rows[0].credit_type === 'compliance') {
+      return res.status(400).json({ error: 'Compliance-type credits (CCC) cannot be minted on EtherTrack — trading is restricted to CERC-registered Power Exchanges.' });
+    }
 
     await query(`UPDATE users SET wallet_address=$1, updated_at=NOW() WHERE id=$2`, [walletAddress.toLowerCase(), rows[0].user_id]);
     await invalidateUserCache(rows[0].user_id);
