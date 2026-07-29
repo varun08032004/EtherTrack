@@ -469,6 +469,33 @@ const TEMPLATES = {
     }),
   }),
 
+  'subscription-admin-alert': ({ userEmail, userName, plan, isCorporate, daysLeft, renewalDate, status, adminUrl }) => {
+    const isDowngraded = status === 'downgraded';
+    const isExpired    = status === 'expired' || isDowngraded;
+    const title = isDowngraded
+      ? `${isCorporate ? 'Corporate' : plan} Account Downgraded to Free`
+      : isExpired
+        ? `${isCorporate ? 'Corporate' : plan} Subscription Expired`
+        : `${isCorporate ? 'Corporate' : plan} Subscription Expiring Soon`;
+    return {
+      subject: `${isCorporate ? '🏢' : '💳'} ${title} — ${userEmail}`,
+      html: layout({
+        eyebrow: 'ADMIN ALERT', title, ...(isExpired ? RED : AMBER),
+        bodyHtml: `
+          ${kv([
+            ['User', userName ? `${userName} (${userEmail})` : userEmail],
+            ['Plan', plan],
+            ...(renewalDate ? [['Renewal date', renewalDate]] : []),
+            ...(daysLeft > 0 ? [['Days left', String(daysLeft)]] : []),
+            ['Status', isDowngraded ? 'Downgraded to Free — platform access is now restricted' : (isExpired ? 'Expired' : 'Expiring soon')],
+          ])}
+          ${isCorporate ? `<p style="margin:16px 0 0;color:#f0fdf4">Corporate plans are sales-managed and are <strong>not</strong> auto-renewed — this account now has Free-tier access only until your team reactivates it manually.</p>` : ''}
+          ${adminUrl ? button(adminUrl, 'Open Admin Panel →') : ''}`,
+        footer: 'EtherTrack · Internal admin notification',
+      }),
+    };
+  },
+
   'payment-failed': ({ name, plan, amount, currency = 'INR', retryUrl }) => ({
     subject: `EtherTrack — Payment failed for ${plan} plan`,
     html: layout({

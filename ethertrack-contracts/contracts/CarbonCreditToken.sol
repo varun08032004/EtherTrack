@@ -29,6 +29,7 @@ contract CarbonCreditToken is ERC1155, ERC1155Supply, ERC1155Burnable, Ownable, 
     address public operator;
 
     event OperatorUpdated(address indexed oldOperator, address indexed newOperator);
+    event KYCRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
 
     modifier onlyOperator() {
         require(
@@ -286,6 +287,15 @@ contract CarbonCreditToken is ERC1155, ERC1155Supply, ERC1155Burnable, Ownable, 
     // ── Admin ─────────────────────────────────────────────
     function pause()   external onlyOwner { _pause();   }
     function unpause() external onlyOwner { _unpause(); }
+
+    /// @notice Repoint this contract at a different KYCRegistry deployment
+    ///         without redeploying CarbonCreditToken. Existing balances,
+    ///         mints, and burns are untouched.
+    function setKYCRegistry(address newRegistry) external onlyOwner {
+        require(newRegistry != address(0), "Invalid registry address");
+        emit KYCRegistryUpdated(address(kycRegistry), newRegistry);
+        kycRegistry = KYCRegistry(newRegistry);
+    }
 
     // [NEW] Set the backend operator wallet authorized to call
     // retireCreditFor() on behalf of beneficiaries.

@@ -227,7 +227,13 @@ const Header = () => {
   const bellRef   = useRef(null);
   const walletRef = useRef(null);
 
-  const userPlan = dbUser?.subscription_plan || 'free';
+  // [EXPIRY-FIX] An expired renewal date means free-tier access regardless
+  // of what subscription_plan still says — mirrors App.js PlanGate and
+  // middleware/planGate.js on the backend.
+  const isPlanExpired = dbUser?.subscription_renewal_date
+    ? new Date(dbUser.subscription_renewal_date).getTime() < Date.now()
+    : false;
+  const userPlan = isPlanExpired ? 'free' : (dbUser?.subscription_plan || 'free');
 
   // Check if user has access to a given required plan
   const hasAccess = useCallback((requiredPlan) => {

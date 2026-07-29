@@ -99,6 +99,8 @@ module.exports = {
   // billing gap-fillers (not wired to a cron yet)
   sendSubscriptionExpiringSoonEmail: (to, { name, plan, expiryDate, daysLeft, renewUrl }) => send('subscription-expiring-soon', to, { name, plan, expiryDate, daysLeft, renewUrl }),
   sendSubscriptionExpiredEmail: (to, { name, plan, downgradeTo, renewUrl }) => send('subscription-expired', to, { name, plan, downgradeTo, renewUrl }),
+  sendSubscriptionAdminAlertEmail: (to, { userEmail, userName, plan, isCorporate, daysLeft, renewalDate, status, adminUrl }) =>
+    send('subscription-admin-alert', to, { userEmail, userName, plan, isCorporate, daysLeft, renewalDate, status, adminUrl }),
   sendPaymentFailedEmail: (to, { name, plan, amount, currency, retryUrl }) => send('payment-failed', to, { name, plan, amount, currency, retryUrl }),
 
   // ── Sales (sales@) ────────────────────────────────────────────────────────

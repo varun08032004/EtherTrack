@@ -24,7 +24,7 @@
 
 const cron = require('node-cron');
 const { safeQuery: query, withTransaction } = require('../db/pool');
-const { mintApprovedCredit, verifyKYCOnChain } = require('../services/minter');
+const { mintApprovedCredit, verifyKYCOnChain, linkWalletOnChain } = require('../services/minter');
 const { createNotification } = require('../routes/notifications');
 const { sendMintSuccessEmail, sendKycExpiredEmail, sendKycExpiringSoonEmail, sendListingExpiredEmail } = require('../services/email');
 
@@ -417,18 +417,16 @@ cron.schedule('0 3 * * *', async () => {
 // CRON #5 — On-chain KYC sync self-heal
 // Runs every 30 minutes
 //
-// WHY: routes/admin.js's `/kyc/:id/approve` only registers a wallet on the
-// on-chain KYCRegistry if that user already had a wallet_address bound at
-// the moment of approval. If KYC gets approved BEFORE the wallet is bound,
-// the on-chain call is silently skipped — DB says kyc_verified=TRUE, but
-// KYCRegistry.isKYCVerified() returns false, and every trade/mint/retire
-// call reverts with "Wallet not KYC verified" with no obvious cause.
-//
-// routes/wallet.js's /bind route was patched to catch this at bind-time,
-// but this cron exists as a backstop for any other way the DB and on-chain
-// registry can drift apart (failed tx, RPC hiccup during approval, manual
-// DB edits, etc.) — it finds anyone kyc_verified=TRUE with a wallet but no
-// successful on-chain registration audit entry, and retries them.
+// WHY: KYCRegistry now keys records by a server-issued userIdHash, not by
+// wallet address (see KYCRegistry.sol) — so on-chain KYC registration no
+// longer depends on the user having a wallet at all, and the historical
+// "silently skipped because wallet_address was NULL" bug is structurally
+// gone. This cron is now a pure backstop for transient failures (RPC
+// hiccup, minter out of gas, tx reverted) rather than the primary fix —
+// two independent checks, since registration and wallet-linking are now
+// two separate, independent on-chain writes:
+//   1. kyc_verified=TRUE with no successful on-chain registration yet
+//   2. kyc_verified=TRUE + has a wallet, but that wallet was never linked
 // ══════════════════════════════════════════════════════════════════
 cron.schedule('*/30 * * * *', async () => {
   const LOCK_KEY = 'cron:kyc-onchain-sync:lock';
@@ -442,73 +440,97 @@ cron.schedule('*/30 * * * *', async () => {
 
   console.log('⛓ [CRON] Running on-chain KYC sync self-heal...');
   try {
-    const { rows: driftedUsers } = await query(`
-      SELECT u.id, u.email, u.wallet_address, u.kyc_data_hash
+    // ── Pass 1: identity registration (wallet-independent) ────────────
+    const { rows: unregistered } = await query(`
+      SELECT u.id, u.email, u.kyc_data_hash
+      FROM users u
+      WHERE u.kyc_verified = TRUE
+        AND NOT EXISTS (
+          SELECT 1 FROM admin_audit_log a
+          WHERE a.target_user_id = u.id
+            AND a.action IN (
+              'KYC_ONCHAIN_REGISTERED', 'KYC_ONCHAIN_REGISTERED_MANUAL',
+              'KYC_ONCHAIN_REGISTERED_ON_BIND', 'KYC_ONCHAIN_REGISTERED_CRON',
+              'KYC_ONCHAIN_REGISTERED_BACKFILLED_LOG'
+            )
+        )
+      LIMIT 20
+    `).catch(() => ({ rows: [] }));
+
+    let regFixed = 0, regFailed = 0, regAlreadyOk = 0;
+
+    for (const user of unregistered) {
+      try {
+        const r = await verifyKYCOnChain(user.id, user.kyc_data_hash);
+        await query(
+          `INSERT INTO admin_audit_log (admin_id, action, target_user_id, details)
+           VALUES ($1,$2,$3,$4)`,
+          [user.id, r.skipped ? 'KYC_ONCHAIN_REGISTERED_BACKFILLED_LOG' : 'KYC_ONCHAIN_REGISTERED_CRON',
+           user.id, r.skipped ? 'Already verified on-chain — backfilling missing audit entry' : `TX: ${r.txHash}`]
+        ).catch(() => {});
+        if (r.skipped) { regAlreadyOk++; } else {
+          console.log(`✅ [CRON] ${user.email} — registered on-chain, TX: ${r.txHash}`);
+          regFixed++;
+        }
+      } catch (e) {
+        console.error(`❌ [CRON] ${user.email} — on-chain KYC registration failed:`, e.message);
+        await query(
+          `INSERT INTO admin_audit_log (admin_id, action, target_user_id, details)
+           VALUES ($1,$2,$3,$4)`,
+          [user.id, 'KYC_ONCHAIN_FAILED_CRON', user.id, e.message]
+        ).catch(() => {});
+        regFailed++;
+      }
+    }
+
+    // ── Pass 2: wallet linking (only for users who have a wallet) ─────
+    const { rows: unlinked } = await query(`
+      SELECT u.id, u.email, u.wallet_address
       FROM users u
       WHERE u.kyc_verified = TRUE
         AND u.wallet_address IS NOT NULL
         AND NOT EXISTS (
           SELECT 1 FROM admin_audit_log a
           WHERE a.target_user_id = u.id
-            AND a.action IN (
-              'KYC_ONCHAIN_REGISTERED',
-              'KYC_ONCHAIN_REGISTERED_MANUAL',
-              'KYC_ONCHAIN_REGISTERED_ON_BIND'
-            )
+            AND a.action IN ('KYC_WALLET_LINKED', 'KYC_WALLET_LINKED_ON_BIND')
         )
       LIMIT 20
     `).catch(() => ({ rows: [] }));
 
-    if (!driftedUsers.length) {
-      console.log('⛓ [CRON] No on-chain KYC drift found — all synced');
-      return;
-    }
+    let linkFixed = 0, linkFailed = 0, linkAlreadyOk = 0;
 
-    console.log(`⛓ [CRON] Found ${driftedUsers.length} user(s) verified in DB but unconfirmed on-chain`);
-    let fixed = 0, failed = 0, alreadyOk = 0;
-
-    for (const user of driftedUsers) {
+    for (const user of unlinked) {
       try {
-        const r = await verifyKYCOnChain(user.wallet_address, user.kyc_data_hash);
-        if (r.skipped) {
-          // Already verified on-chain — just a missing audit entry (e.g. from
-          // before this logging existed). Log it now so future runs skip it.
-          await query(
-            `INSERT INTO admin_audit_log (admin_id, action, target_user_id, details)
-             VALUES ($1,$2,$3,$4)`,
-            [user.id, 'KYC_ONCHAIN_REGISTERED_BACKFILLED_LOG', user.id,
-             'Already verified on-chain — backfilling missing audit entry']
-          ).catch(() => {});
-          console.log(`ℹ️  [CRON] ${user.email} — already verified on-chain, logged retroactively`);
-          alreadyOk++;
-        } else {
-          await query(
-            `INSERT INTO admin_audit_log (admin_id, action, target_user_id, details)
-             VALUES ($1,$2,$3,$4)`,
-            [user.id, 'KYC_ONCHAIN_REGISTERED_CRON', user.id, `TX: ${r.txHash}`]
-          ).catch(() => {});
-
-          await createNotification(user.id, 'KYC', '✅ Trading Access Confirmed',
-            'Your KYC verification is now fully active on-chain. You can trade, list, and retire credits.',
-            '/portfolio', {});
-
-          console.log(`✅ [CRON] ${user.email} — registered on-chain, TX: ${r.txHash}`);
-          fixed++;
-        }
-      } catch (e) {
-        console.error(`❌ [CRON] ${user.email} — on-chain KYC sync failed:`, e.message);
+        const r = await linkWalletOnChain(user.id, user.wallet_address);
         await query(
           `INSERT INTO admin_audit_log (admin_id, action, target_user_id, details)
            VALUES ($1,$2,$3,$4)`,
-          [user.id, 'KYC_ONCHAIN_FAILED_CRON', user.id, e.message]
+          [user.id, 'KYC_WALLET_LINKED', user.id, r.skipped ? 'Already linked — backfilling audit entry' : `TX: ${r.txHash}`]
         ).catch(() => {});
-        failed++;
+        if (r.skipped) { linkAlreadyOk++; } else {
+          await createNotification(user.id, 'KYC', '✅ Trading Access Confirmed',
+            'Your KYC verification is now fully active on-chain. You can trade, list, and retire credits.',
+            '/portfolio', {});
+          console.log(`✅ [CRON] ${user.email} — wallet linked on-chain, TX: ${r.txHash}`);
+          linkFixed++;
+        }
+      } catch (e) {
+        console.error(`❌ [CRON] ${user.email} — wallet link failed:`, e.message);
+        await query(
+          `INSERT INTO admin_audit_log (admin_id, action, target_user_id, details)
+           VALUES ($1,$2,$3,$4)`,
+          [user.id, 'KYC_WALLET_LINK_FAILED_CRON', user.id, e.message]
+        ).catch(() => {});
+        linkFailed++;
       }
     }
 
-    console.log(`⛓ [CRON] KYC on-chain sync complete — ✅ ${fixed} fixed · ℹ️ ${alreadyOk} already ok · ❌ ${failed} failed`);
-    if (failed > 0) {
-      console.warn(`⚠️  [CRON] ${failed} wallet(s) could not be synced — check admin_audit_log for 'KYC_ONCHAIN_FAILED_CRON' entries. Common cause: minter wallet is not registered as a KYC operator, or is out of gas.`);
+    console.log(
+      `⛓ [CRON] KYC on-chain sync complete — registration: ✅ ${regFixed} fixed · ℹ️ ${regAlreadyOk} already ok · ❌ ${regFailed} failed` +
+      ` | wallet-link: ✅ ${linkFixed} fixed · ℹ️ ${linkAlreadyOk} already ok · ❌ ${linkFailed} failed`
+    );
+    if (regFailed > 0 || linkFailed > 0) {
+      console.warn(`⚠️  [CRON] Some on-chain writes failed — check admin_audit_log for '*_FAILED_CRON' entries. Common cause: minter wallet is not registered as a KYC operator, or is out of gas.`);
     }
   } catch (e) {
     console.error('❌ [CRON] KYC on-chain sync cron error:', e.message);

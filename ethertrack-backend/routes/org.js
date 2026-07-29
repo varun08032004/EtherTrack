@@ -24,7 +24,7 @@ const crypto     = require('crypto');
 const { safeQuery: query, getClient } = require('../db/pool');
 const { authenticate }     = require('../middleware/auth');
 const { requireRole, getPermissions } = require('../middleware/rbac');
-const { sendOrgInviteEmail, sendSubscriptionExpiringSoonEmail, sendSubscriptionExpiredEmail, sendOrgRetirementRequestedEmail, sendOrgRetirementRejectedEmail, sendRetirementEmail } = require('../services/email');
+const { sendOrgInviteEmail, sendSubscriptionExpiringSoonEmail, sendSubscriptionExpiredEmail, sendSubscriptionAdminAlertEmail, sendOrgRetirementRequestedEmail, sendOrgRetirementRejectedEmail, sendRetirementEmail } = require('../services/email');
 const { createNotification } = require('./notifications');
 const { generateGSTInvoice, serveInvoice } = require('../services/invoice');
 
@@ -892,11 +892,27 @@ router.get('/plan/history', authenticate, async (req, res) => {
 router.get('/invoice/:paymentId', authenticate, serveInvoice);
 
 // ── Subscription expiry cron ──────────────────────────────────────
+//
+// [EXPIRY-FIX] Corporate accounts used to be permanently excluded from the
+// downgrade step (Step 2) and were only ever logged for manual sales
+// follow-up (old Step 3) — the account stayed on 'corporate' in the DB
+// forever, so they kept full platform access indefinitely past renewal.
+// Combined with middleware/planGate.js previously trusting subscription_plan
+// with no date check, this meant NO plan (corporate especially) ever
+// actually lost access on expiry. Both are now fixed:
+//   - planGate.js checks subscription_renewal_date in real time.
+//   - This cron now downgrades corporate to free on expiry exactly like
+//     every other paid plan, and separately emails the admin inbox so
+//     sales still gets a heads-up to chase renewal/reactivation.
 async function checkSubscriptionExpiries() {
   try {
- 
-    // ── Step 1: Send renewal reminders (non-corporate) ────────────
-    // Corporate accounts get a separate, dedicated notification below.
+
+    // ── Step 1: Renewal reminders — everyone, incl. corporate ──────
+    // In-app notification + email at 30/7/1/0 days out, for every paid
+    // plan. Corporate keeps its own wording (contact account manager)
+    // but now also gets the same email cadence as self-serve plans,
+    // and the admin inbox is copied at 7/1/0 days so the sales team
+    // doesn't have to rely on customers reaching out first.
     const { rows: expiring } = await query(`
       SELECT id, email, full_name, subscription_plan, subscription_renewal_date,
              EXTRACT(DAY FROM (subscription_renewal_date - NOW())) AS days_left,
@@ -907,33 +923,45 @@ async function checkSubscriptionExpiries() {
         AND subscription_renewal_date IS NOT NULL
         AND EXTRACT(DAY FROM (subscription_renewal_date - NOW())) IN (30, 7, 1, 0)
     `);
- 
+
     for (const user of expiring) {
       const days      = Math.round(parseFloat(user.days_left));
       const cfg       = PLAN_CONFIG[user.subscription_plan] || PLAN_CONFIG.free;
       const planLabel = cfg.label;
       const dateStr   = new Date(user.subscription_renewal_date)
         .toLocaleDateString('en-IN');
- 
+
       if (user.corporate_managed) {
-        // [CORP-2] Corporate-specific notification — no auto-downgrade warning,
-        // just a professional heads-up so they can contact their account manager.
+        // Corporate-specific in-app wording — points them to their account
+        // manager rather than a self-serve "Renew Now" button.
         let title, message;
         if (days <= 0) {
           title   = '🏢 Corporate Plan — Renewal Due';
-          message = `Your Corporate plan has reached its renewal date. Please contact your EtherTrack account manager at support@ethertrack.in to renew.`;
+          message = `Your Corporate plan has reached its renewal date. Please contact your EtherTrack account manager at support@ethertrack.in to renew. Access will be limited to the Free plan until renewed.`;
         } else if (days <= 7) {
           title   = `🏢 Corporate Plan — Renewal in ${days} day${days !== 1 ? 's' : ''}`;
-          message = `Your Corporate plan renews on ${dateStr}. Contact support@ethertrack.in to arrange renewal.`;
-        } else if (days <= 30) {
+          message = `Your Corporate plan renews on ${dateStr}. Contact support@ethertrack.in to arrange renewal and avoid losing access.`;
+        } else {
           title   = '🏢 Corporate Plan — Upcoming Renewal';
           message = `Your Corporate plan renews on ${dateStr}. Your account manager will be in touch.`;
-        } else {
-          continue; // No notification needed yet for corporate
         }
         await createNotification(user.id, 'SYSTEM', title, message,
           '/billing', { plan: user.subscription_plan }).catch(() => {});
- 
+
+        // [EXPIRY-FIX] Corporate now also gets the same email cadence as
+        // everyone else — previously only an in-app badge, easy to miss.
+        if (days <= 0) {
+          await sendSubscriptionExpiredEmail(user.email, {
+            name: user.full_name, plan: planLabel, downgradeTo: 'Free',
+            renewUrl: `${process.env.FRONTEND_URL}/billing`,
+          }).catch(e => console.warn('[checkSubscriptionExpiries] corp expired email failed:', e.message));
+        } else if (days === 1 || days === 7) {
+          await sendSubscriptionExpiringSoonEmail(user.email, {
+            name: user.full_name, plan: planLabel, expiryDate: dateStr, daysLeft: days,
+            renewUrl: `${process.env.FRONTEND_URL}/billing`,
+          }).catch(e => console.warn('[checkSubscriptionExpiries] corp expiring email failed:', e.message));
+        }
+
       } else {
         // Standard plans — original notification logic + email (email was
         // missing entirely before; users only ever saw an in-app badge)
@@ -960,21 +988,38 @@ async function checkSubscriptionExpiries() {
           // no email at 30 days — 7/1/0 day emails are enough, avoid over-mailing
         }
       }
+
+      // Admin inbox — copied at 7/1/0 days for every plan so the sales/
+      // billing team has advance visibility, not just after the fact.
+      // Corporate gets first billing since it needs a manual renewal.
+      if (process.env.ADMIN_EMAIL && (days === 7 || days === 1 || days <= 0)) {
+        await sendSubscriptionAdminAlertEmail(process.env.ADMIN_EMAIL, {
+          userEmail:   user.email,
+          userName:    user.full_name,
+          plan:        planLabel,
+          isCorporate: !!user.corporate_managed,
+          daysLeft:    days,
+          renewalDate: dateStr,
+          status:      days <= 0 ? 'expired' : 'expiring',
+          adminUrl:    `${process.env.FRONTEND_URL}/admin`,
+        }).catch(e => console.warn('[checkSubscriptionExpiries] admin alert email failed:', e.message));
+      }
     }
- 
-    // ── Step 2: Downgrade expired NON-corporate users to free ─────
-    // [CORP-1] corporate_managed = TRUE are explicitly excluded.
-    // Self-serve (Starter / Growth) users who haven't renewed get downgraded.
+
+    // ── Step 2: Downgrade ALL expired paid plans to free ───────────
+    // [EXPIRY-FIX] Corporate is no longer excluded — an expired
+    // subscription of any tier (Starter / Growth / Corporate) is
+    // downgraded to Free, matching the "no access past renewal date
+    // except Free-tier basics" behaviour the platform requires.
     const { rows: expired } = await query(`
-      SELECT id, subscription_plan, subscription_cycle
+      SELECT id, email, full_name, subscription_plan, subscription_cycle, corporate_managed
       FROM users
       WHERE subscription_plan != 'free'
         AND plan_selected = TRUE
         AND subscription_renewal_date IS NOT NULL
         AND subscription_renewal_date < NOW()
-        AND (corporate_managed IS NOT TRUE OR subscription_plan != 'corporate')
     `);
- 
+
     for (const user of expired) {
       try {
         await query(
@@ -985,7 +1030,7 @@ async function checkSubscriptionExpiries() {
            WHERE id = $1`,
           [user.id]
         );
- 
+
         await query(
           `INSERT INTO subscription_history
              (user_id, event_type, from_plan, to_plan, from_cycle, to_cycle,
@@ -993,44 +1038,39 @@ async function checkSubscriptionExpiries() {
            VALUES ($1,'expired',$2,'free',$3,'monthly',0,0,'cron')`,
           [user.id, user.subscription_plan, user.subscription_cycle]
         );
- 
+
         console.log(
           `[org/cron] Downgraded expired user ${user.id} ` +
-          `from ${user.subscription_plan} → free`
+          `from ${user.subscription_plan} → free` +
+          (user.corporate_managed ? ' (corporate)' : '')
         );
+
+        // Corporate accounts still need a human to reactivate (sales-managed,
+        // not self-serve checkout), so give the admin/sales inbox an explicit
+        // "this one just lost access" alert distinct from the reminder above.
+        if (user.corporate_managed && process.env.ADMIN_EMAIL) {
+          await sendSubscriptionAdminAlertEmail(process.env.ADMIN_EMAIL, {
+            userEmail:   user.email,
+            userName:    user.full_name,
+            plan:        'Corporate',
+            isCorporate: true,
+            daysLeft:    0,
+            renewalDate: null,
+            status:      'downgraded',
+            adminUrl:    `${process.env.FRONTEND_URL}/admin`,
+          }).catch(e => console.warn('[checkSubscriptionExpiries] corp downgrade admin alert failed:', e.message));
+        }
       } catch (e) {
         console.warn('[checkSubscriptionExpiries] downgrade failed:', e.message);
       }
     }
- 
-    // ── Step 3: Log corporate accounts that are past renewal ─────
-    // [CORP-3] These are NOT downgraded. We just log so the sales
-    // team can follow up. The account stays on Corporate.
-    const { rows: corpExpired } = await query(`
-      SELECT id, email, full_name, subscription_plan, subscription_renewal_date
-      FROM users
-      WHERE subscription_plan = 'corporate'
-        AND corporate_managed = TRUE
-        AND subscription_renewal_date IS NOT NULL
-        AND subscription_renewal_date < NOW()
-    `);
- 
-    if (corpExpired.length > 0) {
-      console.warn(
-        `[org/cron] ⚠️  ${corpExpired.length} corporate account(s) past renewal date — ` +
-        `NOT auto-downgraded. Sales team follow-up required:\n` +
-        corpExpired.map(u => `  · ${u.email} (expired ${new Date(u.subscription_renewal_date).toLocaleDateString('en-IN')})`).join('\n')
-      );
-      // Optionally: fire an alert to your internal Slack/webhook here.
-    }
- 
+
     console.log(
       `[org/cron] Expiry check — ` +
       `${expiring.length} notified, ` +
-      `${expired.length} downgraded, ` +
-      `${corpExpired.length} corporate past-renewal (manual follow-up needed)`
+      `${expired.length} downgraded to free`
     );
- 
+
   } catch (e) {
     console.error('[org/checkSubscriptionExpiries]', e.message);
   }

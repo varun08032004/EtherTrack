@@ -28,7 +28,7 @@ const {
   sendAdminMessageToUserEmail, sendWalletUpdatedEmail, sendCorporatePlanActivatedEmail,
   sendPlatformAnnouncementEmail,
 } = require('../services/email');
-const { mintApprovedCredit, verifyKYCOnChain } = require('../services/minter');
+const { mintApprovedCredit, verifyKYCOnChain, linkWalletOnChain } = require('../services/minter');
 const { createNotification } = require('./notifications');
 const { getAdapter } = require('../services/registryAdapters');
 
@@ -146,16 +146,23 @@ router.post('/kyc/:id/approve', isAdmin, async (req, res) => {
       'Your KYC has been approved. You now have full access to trading, portfolio, and emission tracking.',
       '/profile', {});
 
-    if (usr[0]?.wallet_address) {
-      setImmediate(async () => {
-        try {
-          const r = await verifyKYCOnChain(usr[0].wallet_address, sub[0].kyc_data_hash);
-          if (!r.skipped) await auditLog(req.user.id, 'KYC_ONCHAIN_REGISTERED', sub[0].user_id, `TX: ${r.txHash}`);
-        } catch (e) {
-          await auditLog(req.user.id, 'KYC_ONCHAIN_FAILED', sub[0].user_id, e.message).catch(() => {});
+    // Identity-keyed on-chain registration — fires unconditionally,
+    // regardless of whether this user has a wallet bound yet. Fixes the
+    // historical bug where this silently no-op'd if wallet_address was
+    // NULL at approval time, leaving DB verified but chain unregistered.
+    setImmediate(async () => {
+      try {
+        const r = await verifyKYCOnChain(sub[0].user_id, sub[0].kyc_data_hash);
+        if (!r.skipped) await auditLog(req.user.id, 'KYC_ONCHAIN_REGISTERED', sub[0].user_id, `TX: ${r.txHash}`);
+
+        if (usr[0]?.wallet_address) {
+          const l = await linkWalletOnChain(sub[0].user_id, usr[0].wallet_address);
+          if (!l.skipped) await auditLog(req.user.id, 'KYC_WALLET_LINKED', sub[0].user_id, `TX: ${l.txHash}`);
         }
-      });
-    }
+      } catch (e) {
+        await auditLog(req.user.id, 'KYC_ONCHAIN_FAILED', sub[0].user_id, e.message).catch(() => {});
+      }
+    });
 
     try {
       await sendKycApprovedEmail(usr[0].email, {
@@ -216,6 +223,7 @@ router.post('/kyc/bulk-approve', isAdmin, async (req, res) => {
     return res.status(400).json({ error: 'Max 200 IDs per bulk operation' });
 
   let approved = 0, failed = 0, errors = [];
+  const onChainQueue = []; // { userId, kycDataHash, walletAddress }
   for (const id of ids) {
     try {
       const { rows: sub } = await query(
@@ -236,8 +244,33 @@ router.post('/kyc/bulk-approve', isAdmin, async (req, res) => {
       await createNotification(sub[0].user_id, 'KYC', '✅ KYC Verified', 'Your KYC has been approved.', '/portfolio', {});
       await auditLog(req.user.id, 'KYC_BULK_APPROVED', sub[0].user_id, `Bulk approve — submission ${id}`);
       approved++;
+
+      const { rows: usr } = await query('SELECT wallet_address FROM users WHERE id=$1', [sub[0].user_id]);
+      onChainQueue.push({ userId: sub[0].user_id, kycDataHash: sub[0].kyc_data_hash, walletAddress: usr[0]?.wallet_address });
     } catch (e) { failed++; errors.push(`${id}: ${e.message}`); }
   }
+
+  // On-chain writes go through the SAME minter wallet as every other
+  // operator call — must run sequentially (not Promise.all) or concurrent
+  // txs will race on nonce and fail. Fire-and-forget so the bulk-approve
+  // response isn't blocked on N on-chain confirmations.
+  if (onChainQueue.length) {
+    setImmediate(async () => {
+      for (const { userId, kycDataHash, walletAddress } of onChainQueue) {
+        try {
+          const r = await verifyKYCOnChain(userId, kycDataHash);
+          if (!r.skipped) await auditLog(req.user.id, 'KYC_ONCHAIN_REGISTERED', userId, `Bulk — TX: ${r.txHash}`);
+          if (walletAddress) {
+            const l = await linkWalletOnChain(userId, walletAddress);
+            if (!l.skipped) await auditLog(req.user.id, 'KYC_WALLET_LINKED', userId, `Bulk — TX: ${l.txHash}`);
+          }
+        } catch (e) {
+          await auditLog(req.user.id, 'KYC_ONCHAIN_FAILED', userId, `Bulk — ${e.message}`).catch(() => {});
+        }
+      }
+    });
+  }
+
   res.json({ success: true, approved, failed, errors });
 });
 

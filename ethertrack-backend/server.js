@@ -1,7 +1,33 @@
 // server.js — EtherTrack API
-// PRODUCTION HARDENED — v16
+// PRODUCTION HARDENED — v17
 // ─────────────────────────────────────────────────────────────────────────────
-// CHANGES vs v15:
+// CHANGES vs v16:
+//
+// [CORP-WRITE]  Mounted /api/ops-integration-corporate → routes/opsIntegrationCorporate.js
+//               — the write-capable counterpart to the existing read-only
+//               /api/ops-integration (routes/opsIntegration.js), used by the
+//               internal ops ERP (etpl_ops) to activate/renew Corporate
+//               subscriptions once a deal closes in its Sales pipeline.
+//               Deliberately a SEPARATE file/route/token from opsIntegration.js
+//               — that file's own header comment says it should never grow
+//               write endpoints, so a leaked read-only sync token can never
+//               reach billing state. See routes/opsIntegrationCorporate.js
+//               for the full reasoning.
+//               Added to CSRF_SKIP_PREFIX: server-to-server calls carry no
+//               CSRF cookie, same as /api/erp's OAuth callbacks and
+//               /api/wallet/webhook's signed webhooks — requireServiceToken
+//               (checked against OPS_SYNC_CORPORATE_WRITE_TOKEN, a
+//               token distinct from the read-only PLATFORM_SYNC_SERVICE_TOKEN)
+//               is the real auth here, not the CSRF cookie.
+//               Added a dedicated rate limiter (10/min — tighter than the
+//               read-only sync's 20/min, since this is low-volume/high-
+//               consequence, not a polling endpoint).
+//               OPS_SYNC_CORPORATE_WRITE_TOKEN added to OPTIONAL_ENV
+//               (not REQUIRED_ENV, so a missing token doesn't block the
+//               whole platform from starting — it just means Corporate
+//               activation calls from the ERP fail until it's set).
+//
+// CHANGES vs v15 (retained from v16):
 //
 // [FIX-INVOICE-VERIFY]  Mounted /api/invoices → routes/invoiceVerify.js —
 //                       public, unauthenticated lookup backing the QR code
@@ -84,6 +110,10 @@ const OPTIONAL_ENV = [
   'POLYGON_NETWORK',            // 'sepolia' or 'polygon'
   'COMPANY_USER_ID',            // DB id of platform@ethertrack.in
   'COMPANY_FUND_ACCOUNT_ID',    // Razorpay fund account for fee sweep
+  // [CORP-WRITE v17] Service token for routes/opsIntegrationCorporate.js —
+  // generate a value distinct from PLATFORM_SYNC_SERVICE_TOKEN and set the
+  // same value in the ERP's .env as OPS_SYNC_CORPORATE_WRITE_TOKEN.
+  'OPS_SYNC_CORPORATE_WRITE_TOKEN',
 ];
 OPTIONAL_ENV.forEach(k => {
   if (!process.env[k]) console.warn(`⚠️  Optional env var not set: ${k}`);
@@ -130,6 +160,11 @@ const verifyRoutes      = require('./routes/verify');
 // for something else) to avoid overwriting existing behavior.
 const invoiceVerifyRoutes = require('./routes/invoiceVerify');
 const opsIntegrationRoutes = require('./routes/opsIntegration'); // read-only revenue feed for the internal ops ERP (etpl_ops)
+// [CORP-WRITE v17] Separate, write-scoped counterpart — its own token
+// (OPS_SYNC_CORPORATE_WRITE_TOKEN), its own file, on purpose. See the
+// header comment in routes/opsIntegrationCorporate.js for why this isn't
+// just added to opsIntegration.js.
+const opsIntegrationCorporateRoutes = require('./routes/opsIntegrationCorporate');
 const tradeRoutes       = require('./routes/trades');
 const marketRoutes      = require('./routes/market');
 const ipfsRoutes        = require('./routes/ipfsRoute');
@@ -220,6 +255,13 @@ const CSRF_SKIP_PREFIX = [
   // [FIX-ERP-ROUTE v15] OAuth callbacks arrive as GET redirects from providers
   // (no CSRF cookie). Mutating endpoints all require JWT `requireAuth`.
   '/api/erp',
+  // [CORP-WRITE v17] Service-token-authenticated, not session-cookie-based —
+  // same reasoning as '/api/erp' above and '/api/wallet/webhook' below: no
+  // CSRF cookie exists for a server-to-server caller, and requireServiceToken
+  // (checked against OPS_SYNC_CORPORATE_WRITE_TOKEN) is the real auth
+  // here. Unlike '/api/ops-integration' (GET-only, doesn't need this list at
+  // all), this router has real POST/PATCH routes that would otherwise 403.
+  '/api/ops-integration-corporate',
   '/health',
 ];
 
@@ -356,6 +398,11 @@ app.use('/api/erp/:erpId/test',     limiter(60 * 60 * 1000,  10,  'Too many ERP 
 app.use('/api/erp/:erpId/pull',     limiter(60 * 60 * 1000,   5,  'Too many ERP data pulls. Try again later.'));
 app.use('/api/erp',                 limiter(15 * 60 * 1000,  60,  'Too many ERP requests. Try again later.'));
 app.use('/api/ops-integration',     limiter(60 * 1000,        20,  'Too many sync requests. Try again later.'));
+// [CORP-WRITE v17] Tighter than the read-only sync limiter above — this is a
+// low-volume, high-consequence action (a handful of corporate deals close
+// per week, not per minute), so a tight limit costs nothing legitimate and
+// makes abuse loud.
+app.use('/api/ops-integration-corporate', limiter(60 * 1000, 10,  'Too many requests. Try again later.'));
 // [FIX-INVOICE-VERIFY v16] Public QR-scan endpoint — modest per-IP ceiling on
 // top of the route's own internal limiter (30/min), since this is reachable
 // by anyone who scans a printed invoice, not just logged-in users.
@@ -408,6 +455,9 @@ app.use('/api/verify',        verifyRoutes);
 // [FIX-INVOICE-VERIFY v16] Public invoice/bill verification (QR code target)
 app.use('/api/invoices',      invoiceVerifyRoutes);
 app.use('/api/ops-integration', opsIntegrationRoutes); // scoped, read-only — see SRS §18.8
+// [CORP-WRITE v17] scoped, write — separate token from opsIntegration.js above,
+// see routes/opsIntegrationCorporate.js for why.
+app.use('/api/ops-integration-corporate', opsIntegrationCorporateRoutes);
 app.use('/api/news',          newsRoutes);
 app.use('/api/auth',          authRoutes);
 app.use('/api/wallet',        walletRoutes);

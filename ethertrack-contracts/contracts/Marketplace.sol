@@ -21,12 +21,15 @@ import "./Treasury.sol";
  * [NEW] INRTradeLogged event — emitted for every off-chain settled trade
  * [NEW] signerWallet        — backend hot wallet authorized to call log functions
  * [NEW] inrTradeHashes      — mapping to prevent duplicate logs
+ * [NEW] setKYCRegistry()    — repoint at a new KYCRegistry deployment without
+ *                             redeploying Marketplace itself (existing
+ *                             listings/trades untouched)
  *
  * WHAT DIDN'T CHANGE:
  *   All ETH trade logic (buyCredit, placeBuyOrder, cancelBuyOrder, matching)
  *   Fee structure (BUYER_FEE_BPS=50, SELLER_FEE_BPS=50 → 1% total to Treasury)
  *   All view functions, structs, events
- *   Treasury, KYCRegistry, CarbonCreditToken integrations
+ *   Treasury, CarbonCreditToken integrations
  *
  * HOW IT WORKS:
  *   ETH trades  → buyCredit() fires CreditTraded event (already on-chain)
@@ -160,6 +163,7 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
     );
     event ListingCancelled(uint256 indexed listingId, address indexed seller);
     event ListingUpdated(uint256 indexed listingId, uint256 newPrice, uint256 newPriceINR);
+    event KYCRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
 
     event BuyOrderPlaced(
         uint256 indexed orderId,
@@ -534,6 +538,15 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
         require(_signer != address(0), "Marketplace: zero address");
         emit SignerWalletUpdated(signerWallet, _signer);
         signerWallet = _signer;
+    }
+
+    /// @notice Repoint this contract at a different KYCRegistry deployment
+    ///         without redeploying Marketplace itself. Existing listings,
+    ///         balances, and trade history are untouched.
+    function setKYCRegistry(address newRegistry) external onlyOwner {
+        require(newRegistry != address(0), "Invalid registry address");
+        emit KYCRegistryUpdated(address(kycRegistry), newRegistry);
+        kycRegistry = KYCRegistry(newRegistry);
     }
 
     // ═════════════════════════════════════════════════════════════════════════

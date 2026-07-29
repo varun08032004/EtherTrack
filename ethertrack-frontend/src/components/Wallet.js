@@ -1329,7 +1329,7 @@ function WalletInner() {
                     <button
                       className="wlt-dl-btn"
                       style={{ flex: 1 }}
-                      onClick={() => { window.open('https://mail.google.com/mail/?view=cm&to=hello@ethertrack.in', '_blank'); }}
+                      onClick={() => { window.open('https://mail.google.com/mail/?view=cm&to=support@ethertrack.in', '_blank'); }}
                     >
                       CONTACT SUPPORT
                     </button>

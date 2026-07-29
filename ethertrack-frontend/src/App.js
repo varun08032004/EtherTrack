@@ -287,7 +287,14 @@ function PlanGate({ requiredPlan, children }) {
   const [showModal, setShowModal] = useState(false);
   const navigate                  = useNavigate();
 
-  const userPlan  = dbUser?.subscription_plan || 'free';
+  // [EXPIRY-FIX] Mirrors middleware/planGate.js: a subscription past its
+  // renewal_date is treated as 'free' client-side too, regardless of what
+  // subscription_plan still says, so the UI doesn't show unlocked features
+  // (corporate included) that the backend will now 403 on anyway.
+  const isExpired = dbUser?.subscription_renewal_date
+    ? new Date(dbUser.subscription_renewal_date).getTime() < Date.now()
+    : false;
+  const userPlan  = isExpired ? 'free' : (dbUser?.subscription_plan || 'free');
   const hasAccess = tierRank(userPlan) >= tierRank(requiredPlan);
 
   useEffect(() => {

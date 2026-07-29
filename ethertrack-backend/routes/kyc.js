@@ -10,6 +10,7 @@ const { enqueueEmail }         = require('../services/email');
 const { getRedis }             = require('../services/redis');
 const logger                   = require('../services/logger');   // pino instance
 const Sentry                   = require('@sentry/node');
+const { verifyKYCOnChain, linkWalletOnChain } = require('../services/minter');
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const CID_REGEX   = /^(Qm[1-9A-HJ-NP-Za-km-z]{44}|b[a-z2-7]{58,})$/;
@@ -582,10 +583,10 @@ router.post('/:id/approve', authenticate, requireRole('admin'), async (req, res)
            kyc_data_hash=sub_upd.kyc_data_hash,
            updated_at=NOW()
          FROM sub_upd WHERE users.id=sub_upd.user_id
-         RETURNING users.id, users.email, users.full_name
+         RETURNING users.id, users.email, users.full_name, users.wallet_address
        )
        SELECT sub_upd.id as submission_id, sub_upd.user_id,
-              usr_upd.email, usr_upd.full_name
+              usr_upd.email, usr_upd.full_name, usr_upd.wallet_address, sub_upd.kyc_data_hash
        FROM sub_upd JOIN usr_upd ON TRUE`,
       [req.user.id, tier, id]
     );
@@ -595,7 +596,7 @@ router.post('/:id/approve', authenticate, requireRole('admin'), async (req, res)
       return res.status(404).json({ error: 'Submission not found or already reviewed' });
     }
 
-    const { submission_id, user_id, email, full_name } = rows[0];
+    const { submission_id, user_id, email, full_name, wallet_address, kyc_data_hash } = rows[0];
 
     await logKycEvent(client, {
       submissionId: submission_id,
@@ -619,6 +620,31 @@ router.post('/:id/approve', authenticate, requireRole('admin'), async (req, res)
       status: 'verified',
       tier,
       ts:     new Date().toISOString(),
+    });
+
+    // Identity-keyed on-chain registration — fires regardless of whether
+    // this user has a wallet bound. See KYCRegistry.sol for why.
+    setImmediate(async () => {
+      try {
+        const r = await verifyKYCOnChain(user_id, kyc_data_hash);
+        if (!r.skipped) {
+          await logKycEvent(pool, {
+            submissionId: submission_id, actorId: req.user.id, action: 'onchain_registered',
+            fromStatus: 'approved', toStatus: 'approved', meta: { txHash: r.txHash },
+          }).catch(() => {});
+        }
+        if (wallet_address) {
+          const l = await linkWalletOnChain(user_id, wallet_address);
+          if (!l.skipped) {
+            await logKycEvent(pool, {
+              submissionId: submission_id, actorId: req.user.id, action: 'onchain_wallet_linked',
+              fromStatus: 'approved', toStatus: 'approved', meta: { txHash: l.txHash, wallet: wallet_address },
+            }).catch(() => {});
+          }
+        }
+      } catch (e) {
+        req.log.warn({ err: e.message, userId: user_id }, 'kyc.onchain.failed');
+      }
     });
 
     enqueueEmail({

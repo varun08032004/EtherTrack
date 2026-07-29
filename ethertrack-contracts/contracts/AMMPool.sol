@@ -73,6 +73,7 @@ contract AMMPool is Ownable, ReentrancyGuard, IERC1155Receiver {
     event PoolCreated(uint256 indexed poolId, uint256 indexed tokenId, string name);
     event LiquidityAdded(uint256 indexed poolId, address indexed lp, uint256 credits, uint256 eth, uint256 shares);
     event LiquidityRemoved(uint256 indexed poolId, address indexed lp, uint256 credits, uint256 eth, uint256 shares);
+    event KYCRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
     event Swapped(
         uint256 indexed poolId,
         address indexed trader,
@@ -389,6 +390,15 @@ contract AMMPool is Ownable, ReentrancyGuard, IERC1155Receiver {
 
     function supportsInterface(bytes4 interfaceId) public view override returns (bool) {
         return interfaceId == type(IERC1155Receiver).interfaceId;
+    }
+
+    /// @notice Repoint this contract at a different KYCRegistry deployment
+    ///         without redeploying AMMPool. Existing pools, liquidity, and
+    ///         balances are untouched.
+    function setKYCRegistry(address newRegistry) external onlyOwner {
+        require(newRegistry != address(0), "Invalid registry address");
+        emit KYCRegistryUpdated(address(kycRegistry), newRegistry);
+        kycRegistry = KYCRegistry(newRegistry);
     }
 
     receive() external payable {}

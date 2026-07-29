@@ -1,12 +1,21 @@
 // services/minter.js — EtherTrack backend auto-mint service
 const { ethers } = require('ethers');
 const { safeQuery: query } = require('../db/pool');
+// [NEW] Reused for identity-keyed KYC (matches CreditLedger's exact hash
+// convention) and for logging pooled-custody mints/ownership.
+const { getOrCreateUserIdHash, logOwnershipChangeOnChain } = require('./creditLedger');
 
 const RPC_URL         = process.env.ALCHEMY_RPC;
 const MINTER_KEY      = process.env.MINTER_PRIVATE_KEY;
 const TOKEN_ADDRESS   = process.env.CARBON_CREDIT_TOKEN_ADDRESS;
 const KYC_REG_ADDRESS = process.env.KYC_REGISTRY_ADDRESS;
 const MARKETPLACE_ADDRESS = process.env.MARKETPLACE_ADDRESS;
+// [NEW] Pooled-custody wallet for users with no MetaMask wallet bound.
+// Defaults to the minter wallet's own address (it already holds elevated
+// trust as operator/signer everywhere else in the system) — set
+// CUSTODY_WALLET_ADDRESS explicitly in .env if you want a separate,
+// dedicated custody address instead (e.g. a cold/multisig wallet).
+let _custodyWalletAddress = process.env.CUSTODY_WALLET_ADDRESS || null;
 
 // [NEW] Operator-only functions added to CarbonCreditToken.sol / Marketplace.sol
 // so INR/Razorpay-paying users never need to open MetaMask for routine
@@ -38,7 +47,10 @@ const TOKEN_ABI = [
 
 const KYC_ABI = [
   'function isKYCVerified(address wallet) view returns (bool)',
-  'function verifyKYC(address wallet, bytes32 kycDataHash) external',
+  'function isKYCVerifiedById(bytes32 userIdHash) view returns (bool)',
+  'function verifyKYC(bytes32 userIdHash, bytes32 kycDataHash) external',
+  'function linkWallet(bytes32 userIdHash, address wallet) external',
+  'function userToWallet(bytes32) view returns (address)',
   'function kycOperators(address) view returns (bool)',
 ];
 
@@ -96,7 +108,11 @@ const getContracts = () => {
     ? new ethers.Contract(MARKETPLACE_ADDRESS, MARKETPLACE_ABI, minterWallet)
     : null;
 
-  return { provider, minterWallet, tokenContract, kycContract, marketContract };
+  // Lazily default to the minter wallet's own address if no dedicated
+  // custody wallet was configured.
+  if (!_custodyWalletAddress) _custodyWalletAddress = minterWallet.address;
+
+  return { provider, minterWallet, tokenContract, kycContract, marketContract, custodyWalletAddress: _custodyWalletAddress };
 };
 
 // ── Check on-chain KYC ────────────────────────────────────────────
@@ -106,16 +122,25 @@ const isWalletKYCVerified = async (kycContract, walletAddress) => {
   catch (e) { console.warn('KYC check failed:', e.message); return false; }
 };
 
-// ── Register KYC on-chain ─────────────────────────────────────────
-const verifyKYCOnChain = async (walletAddress, kycDataHash) => {
-  if (!walletAddress) throw new Error('No wallet address — user has not connected MetaMask');
+const isUserKYCVerified = async (userId) => {
+  const { kycContract } = getContracts();
+  if (!kycContract || !userId) return false;
+  try { return await kycContract.isKYCVerifiedById(await getOrCreateUserIdHash(userId)); }
+  catch (e) { console.warn('KYC check failed:', e.message); return false; }
+};
+
+// ── Register KYC on-chain — identity-keyed, works with or without a wallet ─
+const verifyKYCOnChain = async (userId, kycDataHash) => {
+  if (!userId) throw new Error('No userId provided');
 
   const { kycContract, minterWallet } = getContracts();
   if (!kycContract) throw new Error('KYC_REGISTRY_ADDRESS not set in .env');
 
-  const alreadyVerified = await isWalletKYCVerified(kycContract, walletAddress);
+  const idHash = await getOrCreateUserIdHash(userId);
+
+  const alreadyVerified = await kycContract.isKYCVerifiedById(idHash).catch(() => false);
   if (alreadyVerified) {
-    console.log(`ℹ️  Wallet ${walletAddress} already KYC verified on-chain — skipping`);
+    console.log(`ℹ️  User ${userId} already KYC verified on-chain — skipping`);
     return { skipped: true };
   }
 
@@ -139,11 +164,38 @@ const verifyKYCOnChain = async (walletAddress, kycDataHash) => {
       : ethers.keccak256(ethers.toUtf8Bytes(kycDataHash || 'kyc-approved'));
   } catch { hashBytes32 = ethers.ZeroHash; }
 
-  console.log(`⛓  Registering KYC on-chain for wallet ${walletAddress}...`);
-  const tx      = await kycContract.verifyKYC(walletAddress, hashBytes32);
+  console.log(`⛓  Registering KYC on-chain for user ${userId} (identity-keyed, no wallet required)...`);
+  const tx      = await kycContract.verifyKYC(idHash, hashBytes32);
   const receipt = await tx.wait(1);
   console.log(`   ✅ KYC registered on-chain in block ${receipt.blockNumber} (${tx.hash})`);
-  return { txHash: tx.hash, blockNumber: receipt.blockNumber };
+  return { skipped: false, txHash: tx.hash, blockNumber: receipt.blockNumber };
+};
+
+// ── Link a wallet to an already-verified identity — optional, only for
+// users who choose to connect a wallet for self-custody/on-chain trading.
+const linkWalletOnChain = async (userId, walletAddress) => {
+  if (!userId)        throw new Error('No userId provided');
+  if (!walletAddress) throw new Error('No walletAddress provided');
+
+  const { kycContract } = getContracts();
+  if (!kycContract) throw new Error('KYC_REGISTRY_ADDRESS not set in .env');
+
+  const idHash = await getOrCreateUserIdHash(userId);
+
+  const verified = await kycContract.isKYCVerifiedById(idHash).catch(() => false);
+  if (!verified) throw new Error(`User ${userId} is not KYC verified on-chain yet — cannot link wallet`);
+
+  const currentLink = await kycContract.userToWallet(idHash).catch(() => ethers.ZeroAddress);
+  if (currentLink?.toLowerCase() === walletAddress.toLowerCase()) {
+    console.log(`ℹ️  Wallet ${walletAddress} already linked to user ${userId} — skipping`);
+    return { skipped: true };
+  }
+
+  console.log(`⛓  Linking wallet ${walletAddress} to user ${userId}...`);
+  const tx      = await kycContract.linkWallet(idHash, walletAddress);
+  const receipt = await tx.wait(1);
+  console.log(`   ✅ Wallet linked on-chain in block ${receipt.blockNumber} (${tx.hash})`);
+  return { skipped: false, txHash: tx.hash, blockNumber: receipt.blockNumber };
 };
 
 // ── Core mint function ────────────────────────────────────────────
@@ -192,15 +244,24 @@ const mintApprovedCredit = async (batchId, { force = false } = {}) => {
     throw new Error(`Batch ${batchId} already fully tokenised (token_id: ${batch.token_id})`);
   }
 
-  if (!batch.wallet_address)
-    throw new Error(`User ${batch.user_id} has no wallet address bound`);
+  // [FIX-WALLETLESS-MINT] Previously this threw if the user had no wallet
+  // bound, meaning credits could not even be minted onto the platform
+  // without MetaMask — the single biggest forced dependency in the whole
+  // flow. Now: users WITH a wallet mint self-custody (to their own wallet,
+  // unchanged behavior). Users WITHOUT a wallet mint into pooled custody
+  // (the CUSTODY_WALLET_ADDRESS) and ownership is tracked via
+  // CreditLedger — the exact same walletless pattern already used for KYC
+  // and emissions tracking. No MetaMask required unless the user
+  // specifically chooses to connect one later.
+  const isPooledCustody = !batch.wallet_address;
 
   // ✅ Validate amount before sending to contract
   const creditAmount = parseInt(batch.quantity || batch.total_credits || batch.available_credits || 0);
   if (!creditAmount || creditAmount <= 0)
     throw new Error(`Batch ${batchId} has invalid credit amount: ${creditAmount}`);
 
-  const { tokenContract, kycContract } = getContracts();
+  const { tokenContract, kycContract, custodyWalletAddress } = getContracts();
+  const mintTargetWallet = isPooledCustody ? custodyWalletAddress : batch.wallet_address;
 
   // 3. Check serial not already on-chain
   let alreadyRegistered = false;
@@ -223,16 +284,23 @@ const mintApprovedCredit = async (batchId, { force = false } = {}) => {
     return { tokenId: null, txHash: null, alreadyExisted: true };
   }
 
-  // 4. Auto-register KYC if needed
-  const userKYCed = await isWalletKYCVerified(kycContract, batch.wallet_address);
+  // 4. Auto-register KYC if needed — identity-keyed, works with or
+  // without a wallet. If the user does have a wallet, also ensure it's
+  // linked so isKYCVerified(wallet) (used by Marketplace/EmissionRegistry/
+  // AMMPool) resolves correctly for their self-custody trading.
+  const userKYCed = await isUserKYCVerified(batch.user_id);
   if (!userKYCed) {
-    console.log(`⚠️  Auto-registering KYC for ${batch.wallet_address}...`);
+    console.log(`⚠️  Auto-registering KYC for user ${batch.user_id}...`);
     try {
-      await verifyKYCOnChain(batch.wallet_address, batch.kyc_data_hash);
+      await verifyKYCOnChain(batch.user_id, batch.kyc_data_hash);
       console.log(`   ✅ KYC auto-registered`);
     } catch (kycErr) {
       throw new Error(`KYC on-chain registration failed: ${kycErr.message}`);
     }
+  }
+  if (batch.wallet_address) {
+    try { await linkWalletOnChain(batch.user_id, batch.wallet_address); }
+    catch (linkErr) { console.warn(`Wallet link skipped/failed: ${linkErr.message}`); }
   }
 
   // 5. Build expiry timestamp
@@ -245,7 +313,7 @@ const mintApprovedCredit = async (batchId, { force = false } = {}) => {
 
   // 6. Build mint params
   const mintParams = {
-    to:           batch.wallet_address,
+    to:           mintTargetWallet,
     amount:       String(creditAmount),
     projectName:  batch.project_name,
     location:     batch.project_location || batch.country || 'India',
@@ -262,7 +330,7 @@ const mintApprovedCredit = async (batchId, { force = false } = {}) => {
         : '',
   };
 
-  console.log(`⛓  Minting batch ${batchId} for wallet ${batch.wallet_address}...`);
+  console.log(`⛓  Minting batch ${batchId} — ${isPooledCustody ? `pooled custody (${mintTargetWallet}), walletless` : `self-custody wallet ${mintTargetWallet}`}...`);
   console.log(`   Project: ${mintParams.projectName}`);
   console.log(`   Serial:  ${mintParams.serialNumber}`);
   console.log(`   Amount:  ${mintParams.amount} tCO₂`);
@@ -310,6 +378,25 @@ const mintApprovedCredit = async (batchId, { force = false } = {}) => {
     throw new Error('TX confirmed but could not parse tokenId — check CreditMinted event ABI');
 
   console.log(`   Token ID: ${tokenId}`);
+
+  // 9. Pooled-custody users: log the mint into CreditLedger so ownership
+  // is tracked without ever touching their (nonexistent) wallet — this is
+  // what makes them show up via /api/portfolio/my-ledger-credits with
+  // isLedger: true on the frontend.
+  if (isPooledCustody) {
+    try {
+      await logOwnershipChangeOnChain({
+        userId: batch.user_id, tokenId, amountDelta: creditAmount,
+        actionType: 'MINT', refTable: 'carbon_batches', refId: batchId,
+        note: batch.project_name || '',
+      });
+      console.log(`   ✅ Logged in CreditLedger — walletless ownership recorded`);
+    } catch (ledgerErr) {
+      // Don't fail the whole mint over this — the tokens are safely in
+      // custody either way. Surface loudly so it gets backfilled/retried.
+      console.error(`   ❌ CreditLedger logging failed (tokens ARE minted, ownership record missing): ${ledgerErr.message}`);
+    }
+  }
 
   const ethRate = await getLiveETHRate();
 
@@ -419,6 +506,6 @@ const settleINRTradeOnChain = async ({
 };
 
 module.exports = {
-  mintApprovedCredit, verifyKYCOnChain, getLiveETHRate,
+  mintApprovedCredit, verifyKYCOnChain, linkWalletOnChain, isUserKYCVerified, getLiveETHRate,
   retireCreditForOnChain, listCreditForOnChain, cancelListingForOnChain, settleINRTradeOnChain,
 };

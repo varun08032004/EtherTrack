@@ -78,7 +78,20 @@ const requirePlan = (minPlan) => (req, res, next) => {
   // Platform admins bypass all plan checks
   if (req.user?.role === 'admin') return next();
 
-  const userPlan    = req.user?.subscription_plan || 'free';
+  // [EXPIRY-FIX] A paid plan whose subscription_renewal_date has passed is
+  // treated as 'free' for gating purposes — REGARDLESS of what's still
+  // sitting in subscription_plan. Previously this middleware only looked at
+  // subscription_plan, so a user (corporate especially, since corporate was
+  // also excluded from the auto-downgrade cron) kept full access forever
+  // once expired, until/unless a separate cron happened to run and flip the
+  // DB column. Checking the date here makes enforcement immediate and
+  // correct even if the cron hasn't run yet, is delayed, or is disabled.
+  const renewalDate = req.user?.subscription_renewal_date
+    ? new Date(req.user.subscription_renewal_date)
+    : null;
+  const isExpired = renewalDate && renewalDate.getTime() < Date.now();
+
+  const userPlan    = isExpired ? 'free' : (req.user?.subscription_plan || 'free');
   const userRank    = getTierRank(userPlan);
   const requiredRank = TIER_RANK[minPlan] ?? 0;
 
@@ -88,10 +101,11 @@ const requirePlan = (minPlan) => (req, res, next) => {
   const isCorporate = minPlan === 'corporate';
 
   return res.status(403).json({
-    error:        `${info.name || minPlan} plan required`,
-    code:         'PLAN_REQUIRED',
+    error:        isExpired ? `Your ${info.name || minPlan} plan has expired` : `${info.name || minPlan} plan required`,
+    code:         isExpired ? 'PLAN_EXPIRED' : 'PLAN_REQUIRED',
     requiredPlan: minPlan,
     yourPlan:     userPlan,
+    expired:      !!isExpired,
     upgrade: isCorporate
       ? { action: 'contact_sales', email: 'sales@ethertrack.in' }
       : { action: 'upgrade', url: '/billing', price: info.price },
@@ -123,11 +137,15 @@ const requirePlanForReport = (reportType) => {
 };
 
 /**
- * checkPlan(userPlan, minPlan) — programmatic check (no middleware)
+ * checkPlan(userPlan, minPlan, renewalDate?) — programmatic check (no middleware)
  * Use in service functions where you need a boolean check.
+ * Pass renewalDate (optional) so an expired paid plan is treated as 'free',
+ * same [EXPIRY-FIX] logic as requirePlan above.
  */
-const checkPlan = (userPlan, minPlan) => {
-  return getTierRank(userPlan) >= (TIER_RANK[minPlan] ?? 0);
+const checkPlan = (userPlan, minPlan, renewalDate = null) => {
+  const isExpired = renewalDate && new Date(renewalDate).getTime() < Date.now();
+  const effectivePlan = isExpired ? 'free' : userPlan;
+  return getTierRank(effectivePlan) >= (TIER_RANK[minPlan] ?? 0);
 };
 
 module.exports = { requirePlan, requirePlanForReport, checkPlan, getTierRank };

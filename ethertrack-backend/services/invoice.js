@@ -127,7 +127,7 @@ if (LOGO_EXISTS) {
   );
 }
 
-// ── FILL THESE IN WHEN YOU GET GST REGISTRATION ──────────────────────────────
+// ── Company registration — filled in July 2026 on incorporation ─────────────
 const SELLER = {
   name:        'EtherTrack Technologies Pvt Ltd',
   addressLine1:'Flat 306, Truspace Prima Angulus',
@@ -136,9 +136,11 @@ const SELLER = {
   state:       'Maharashtra',
   stateCode:   '27',
   pincode:     '411045',
-  gstin:       'GSTIN_PENDING_REGISTRATION',
-  pan:         'PAN_PENDING',
-  cin:         '[FILL IN: CIN, optional]',
+  gstin:       '27AAJCE8329G1ZD',
+  pan:         'AAJCE8329G',
+  tan:         'PNEE11967E',
+  cin:         'U62090PN2026PTC257708',
+  incorporatedOn: '2026-07-13',
   sacCode:     '997331',   // SAC for software/marketplace services
   email:       'billing@ethertrack.in',
   supportEmail:'support@ethertrack.in',

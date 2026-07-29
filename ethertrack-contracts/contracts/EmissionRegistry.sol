@@ -76,6 +76,7 @@ contract EmissionRegistry is Ownable, Pausable {
         uint256 amount,
         uint256 co2Offset
     );
+    event KYCRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
 
     // ── Modifiers ─────────────────────────────────────────
     modifier onlyKYCVerified() {
@@ -209,4 +210,13 @@ contract EmissionRegistry is Ownable, Pausable {
     // ── Admin ─────────────────────────────────────────────
     function pause()   external onlyOwner { _pause(); }
     function unpause() external onlyOwner { _unpause(); }
+
+    /// @notice Repoint this contract at a different KYCRegistry deployment
+    ///         without redeploying EmissionRegistry. Existing emission
+    ///         logs and offset records are untouched.
+    function setKYCRegistry(address newRegistry) external onlyOwner {
+        require(newRegistry != address(0), "Invalid registry address");
+        emit KYCRegistryUpdated(address(kycRegistry), newRegistry);
+        kycRegistry = KYCRegistry(newRegistry);
+    }
 }

@@ -64,6 +64,7 @@ const TEMPLATE_CATEGORY = {
   // into routes/subscription.js Razorpay webhook (payment.failed event).
   'subscription-expiring-soon':   'billing',
   'subscription-expired':         'billing',
+  'subscription-admin-alert':     'admin',
   'payment-failed':               'billing',
 
   // ── Sales (sales@) — routes/admin.js ──────────────────────────────────────
