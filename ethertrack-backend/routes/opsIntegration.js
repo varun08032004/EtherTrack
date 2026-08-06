@@ -224,4 +224,151 @@ router.get('/customers', async (req, res) => {
   }
 });
 
+// GET /api/ops-integration/churn-events?since=ISO_TIMESTAMP
+//
+// Every paid→free downgrade recorded in subscription_history (event_type
+// 'expired', written by routes/org.js's checkSubscriptionExpiries cron), so
+// the ERP can alert Sales/CS same-day for win-back outreach instead of only
+// finding out whenever someone next re-pulls the customer roster.
+//
+// `event_id` is subscription_history.id (cast to text so this works whether
+// that column is a serial int or a UUID) — the ERP side's stable dedupe key,
+// same pattern as `ref_id` on /income above.
+router.get('/churn-events', async (req, res) => {
+  const since = req.query.since && !isNaN(Date.parse(req.query.since))
+    ? req.query.since
+    : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(); // default: last 30 days
+
+  try {
+    const { rows } = await query(
+      `SELECT sh.id::text AS event_id, sh.created_at AS downgraded_at,
+              sh.from_plan, sh.from_cycle, sh.renewal_date AS previous_renewal_date,
+              u.email, u.full_name, u.company_name, u.corporate_managed
+       FROM subscription_history sh
+       JOIN users u ON u.id = sh.user_id
+       WHERE sh.event_type = 'expired'
+         AND sh.to_plan = 'free'
+         AND sh.created_at >= $1
+       ORDER BY sh.created_at DESC
+       LIMIT 500`,
+      [since]
+    );
+    res.json({ events: rows });
+  } catch (e) {
+    console.error('[ops-integration/churn-events]', e.message);
+    res.status(500).json({ error: 'Failed to fetch churn events' });
+  }
+});
+
+// GET /api/ops-integration/refunds?since=ISO_TIMESTAMP
+//
+// Subscription payments Razorpay has refunded (status='refunded', set by the
+// existing 'refund.processed' webhook handler in routes/subscription.js —
+// this endpoint doesn't process refunds itself, just exposes ones that
+// already happened). `ref_id` matches exactly what platform_sync_log stores
+// for source='subscription' on the ERP side (subscription_payments.id), so
+// the ERP can tell whether that revenue was ever actually imported/posted
+// to its ledger, and if so, needs a reversing entry now that it's refunded.
+router.get('/refunds', async (req, res) => {
+  const since = req.query.since && !isNaN(Date.parse(req.query.since))
+    ? req.query.since
+    : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString(); // default: last 90 days
+
+  try {
+    const { rows } = await query(
+      `SELECT sp.id AS ref_id, sp.refunded_at, sp.refund_ref,
+              (sp.refund_amount_paise / 100.0) AS refund_amount_inr,
+              (sp.total_amount_paise / 100.0)  AS original_total_inr,
+              sp.plan, sp.cycle, sp.invoice_number,
+              u.email AS customer_email, u.full_name AS customer_name
+       FROM subscription_payments sp
+       LEFT JOIN users u ON u.id = sp.user_id
+       WHERE sp.status = 'refunded'
+         AND sp.refunded_at >= $1
+       ORDER BY sp.refunded_at DESC
+       LIMIT 500`,
+      [since]
+    );
+    res.json({ refunds: rows });
+  } catch (e) {
+    console.error('[ops-integration/refunds]', e.message);
+    res.status(500).json({ error: 'Failed to fetch refunds' });
+  }
+});
+
+// GET /api/ops-integration/coupon-redemptions?since=ISO_TIMESTAMP
+//
+// Every coupon redemption (EARLYBIRD50, or whatever else has been created
+// via routes/opsIntegrationCoupons.js), joined with the actual payment it
+// applied to — so the ERP's Marketing module can measure real ROI (revenue
+// actually collected after the discount) rather than just "N people used
+// this code," which is all the write-side /api/ops-integration-coupons
+// list endpoint currently shows.
+router.get('/coupon-redemptions', async (req, res) => {
+  const since = req.query.since && !isNaN(Date.parse(req.query.since))
+    ? req.query.since
+    : new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString(); // default: last 12 months
+
+  try {
+    const { rows } = await query(
+      `SELECT c.code AS coupon_code, c.discount_type, c.discount_value,
+              cr.redeemed_at, (cr.discount_paise / 100.0) AS discount_inr,
+              u.email AS customer_email, u.full_name AS customer_name,
+              sp.plan, sp.cycle,
+              (sp.amount_paise / 100.0)       AS net_paid_inr,
+              (sp.total_amount_paise / 100.0) AS total_paid_inr
+       FROM coupon_redemptions cr
+       JOIN coupons c ON c.id = cr.coupon_id
+       JOIN users u ON u.id = cr.user_id
+       LEFT JOIN subscription_payments sp ON sp.id = cr.subscription_payment_id
+       WHERE cr.redeemed_at >= $1
+       ORDER BY cr.redeemed_at DESC
+       LIMIT 1000`,
+      [since]
+    );
+    res.json({ redemptions: rows });
+  } catch (e) {
+    console.error('[ops-integration/coupon-redemptions]', e.message);
+    res.status(500).json({ error: 'Failed to fetch coupon redemptions' });
+  }
+});
+
+// GET /api/ops-integration/support-tickets?since=ISO_TIMESTAMP&status=open
+//
+// Platform support tickets, joined with subscription context where the
+// submitter is a logged-in user — so Sales/CS in the ERP can see "this
+// Corporate account has 2 open tickets" without a separate login into the
+// platform's own admin panel. Read-only; ticket handling itself still
+// happens on the platform (routes/support.js).
+router.get('/support-tickets', async (req, res) => {
+  const since = req.query.since && !isNaN(Date.parse(req.query.since))
+    ? req.query.since
+    : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString(); // default: last 90 days
+  const status = ['open', 'in_progress', 'resolved', 'closed'].includes(req.query.status)
+    ? req.query.status
+    : null;
+
+  try {
+    const params = [since];
+    let statusClause = '';
+    if (status) { params.push(status); statusClause = `AND st.status = $${params.length}`; }
+
+    const { rows } = await query(
+      `SELECT st.id, st.ticket_number, st.name, st.email, st.subject, st.status,
+              st.priority, st.source, st.created_at, st.resolved_at,
+              u.subscription_plan, u.corporate_managed, u.company_name
+       FROM support_tickets st
+       LEFT JOIN users u ON u.id = st.user_id
+       WHERE st.created_at >= $1 ${statusClause}
+       ORDER BY st.created_at DESC
+       LIMIT 500`,
+      params
+    );
+    res.json({ tickets: rows });
+  } catch (e) {
+    console.error('[ops-integration/support-tickets]', e.message);
+    res.status(500).json({ error: 'Failed to fetch support tickets' });
+  }
+});
+
 module.exports = router;

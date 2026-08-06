@@ -392,10 +392,16 @@ export const walletAPI = {
 export const subscriptionAPI = {
   getPrices  : () => apiFetch('/api/subscription/prices'),
   selectFree : () => apiFetch('/api/subscription/free', { method: 'POST' }),
-  createOrder: (planKey, cycle = 'monthly', idempotencyKey) =>
+  validateCoupon: (planKey, cycle, couponCode) =>
+    apiFetch('/api/subscription/coupon/validate', {
+      method: 'POST',
+      body:   JSON.stringify({ plan: planKey, cycle, coupon_code: couponCode }),
+    }),
+  createOrder: (planKey, cycle = 'monthly', idempotencyKey, couponCode) =>
     apiFetch('/api/subscription/order', {
       method: 'POST',
-      body:   JSON.stringify({ plan: planKey, cycle, idempotency_key: idempotencyKey }),
+      body:   JSON.stringify({ plan: planKey, cycle, idempotency_key: idempotencyKey,
+        coupon_code: couponCode || undefined }),
     }),
   verifyAndActivate: (planKey, cycle, razorpayResponse, gstDetails = {}) =>
     apiFetch('/api/subscription/verify', {
@@ -410,17 +416,19 @@ export const subscriptionAPI = {
         pan:                 gstDetails.pan   || undefined,
       }),
     }),
-  payWithWallet: (planKey, cycle, idempotencyKey, gstDetails = {}) =>
+  payWithWallet: (planKey, cycle, idempotencyKey, gstDetails = {}, couponCode) =>
     apiFetch('/api/subscription/wallet-pay', {
       method: 'POST',
       body:   JSON.stringify({ plan: planKey, cycle, idempotency_key: idempotencyKey,
-        gstin: gstDetails.gstin || undefined, pan: gstDetails.pan || undefined }),
+        gstin: gstDetails.gstin || undefined, pan: gstDetails.pan || undefined,
+        coupon_code: couponCode || undefined }),
     }),
-  payWithMetaMask: (planKey, cycle, walletAddress, signature, message, gstDetails = {}) =>
+  payWithMetaMask: (planKey, cycle, walletAddress, signature, message, gstDetails = {}, couponCode) =>
     apiFetch('/api/subscription/metamask-pay', {
       method: 'POST',
       body:   JSON.stringify({ plan: planKey, cycle, wallet_address: walletAddress,
-        signature, message, gstin: gstDetails.gstin || undefined, pan: gstDetails.pan || undefined }),
+        signature, message, gstin: gstDetails.gstin || undefined, pan: gstDetails.pan || undefined,
+        coupon_code: couponCode || undefined }),
     }),
   getHistory: ({ limit = 20, cursor } = {}) =>
     apiFetch(`/api/subscription/history?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`),

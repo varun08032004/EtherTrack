@@ -86,6 +86,20 @@ const adminActionLimiter = makeLimiter({
   message:  'Too many admin actions. Please slow down.',
 });
 
+// [FIX-RATE-GAP] Listing/delisting/retiring credits (routes/operator-trading.js,
+// mounted at /api/portfolio) previously had NO dedicated limiter — only the
+// generic global catch-all (500 req/15min per IP), far too loose for
+// actions that move or destroy real assets worth real money. 15/min per
+// user is generous for legitimate active portfolio management while
+// meaningfully blocking spam-listing/rapid-fire abuse or race-condition
+// probing against the escrow/custody logic.
+const assetActionLimiter = makeLimiter({
+  prefix:   'asset-action',
+  windowMs: 60 * 1000,
+  max:      15,
+  message:  'Too many listing/retirement actions. Please slow down.',
+});
+
 // IP-only OTP limiter (unauthenticated)
 const otpLimiter = makeLimiter({
   prefix:       'otp',
@@ -101,5 +115,6 @@ module.exports = {
   apiLimiter,
   kycSubmitLimiter,
   adminActionLimiter,
+  assetActionLimiter,
   otpLimiter,
 };

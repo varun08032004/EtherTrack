@@ -20,6 +20,8 @@ const { generateGSTInvoice, serveInvoice, getGSTType }  = require('../services/i
 const { createNotification }               = require('../routes/notifications');
 const { sendPaymentFailedEmail, sendPlanSelectedEmail, sendSubscriptionCancelledEmail } = require('../services/email');
 const { rateLimit, ipKeyGenerator }        = require('express-rate-limit');
+const { getEffectivePricePaise, getAllEffectivePrices } = require('../services/pricing');
+const { validateCoupon, computeDiscount, recordRedemption } = require('../services/coupons');
 
 const router = express.Router();
 
@@ -48,7 +50,12 @@ const priceLimiter = rateLimit({
   skip:         () => process.env.NODE_ENV === 'test',
 });
 
-// ── PLAN CONFIG — canonical prices in PAISE ───────────────────────
+// ── PLAN CONFIG — FALLBACK prices in PAISE ────────────────────────
+// [DYNAMIC-PRICING] These *_paise values are only the default used until
+// the ERP (etpl_ops) Product/Sales section pushes a real price via
+// PATCH /api/ops-integration-pricing/:plan/:cycle (services/pricing.js).
+// Once pushed, services/pricing.js's plan_prices table wins. Corporate is
+// exempt by design — always null/"Contact Sales", set per-deal instead.
 const PLAN_CONFIG = {
   free: {
     label:          'Free',
@@ -97,18 +104,23 @@ const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/;
 const PAN_RE   = /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/;
 
 // ── Helpers ────────────────────────────────────────────────────────
-const getPricePaise = (plan, cycle) => {
-  const cfg = PLAN_CONFIG[plan];
-  if (!cfg) return null;
-  return cycle === 'annual' ? cfg.annual_paise : cfg.monthly_paise;
-};
-
+// [DYNAMIC-PRICING] getPricePaise (static PLAN_CONFIG lookup) has been
+// replaced everywhere by services/pricing.js's getEffectivePricePaise(),
+// which checks the ERP-pushed plan_prices table first and only falls back
+// to PLAN_CONFIG's hardcoded values if the ERP hasn't set a price yet.
 const getGstPaise   = (p) => Math.round((p * GST_RATE_BPS) / 10000);
 const getTotalPaise = (p) => p + getGstPaise(p);
 
-const getRenewalDate = (cycle, trialDays = 0) => {
+// [FIX-RENEWAL-DATE] trialDays used to override the cycle length entirely —
+// any paid Starter/Growth purchase (monthly OR annual, any payment method)
+// got a renewal_date only 14 days out instead of the period actually paid
+// for, because trial_days > 0 always won. This function is only ever
+// called from the three POST-PAYMENT-SUCCESS activation paths (/verify,
+// /wallet-pay, /metamask-pay) — there is no separate "start a free trial
+// without paying" flow that calls it — so a trial concept never belonged
+// here at all. Renewal date is now always exactly the paid cycle length.
+const getRenewalDate = (cycle) => {
   const d = new Date();
-  if (trialDays > 0) { d.setDate(d.getDate() + trialDays); return d; }
   if (cycle === 'annual') d.setFullYear(d.getFullYear() + 1);
   else                    d.setMonth(d.getMonth() + 1);
   return d;
@@ -149,8 +161,9 @@ const insertPayment = async (f) => {
         razorpay_order_id, wallet_address, signature,
         metamask_address, metamask_message,
         gstin, pan, renewal_date, amount,
-        gst_type, buyer_state_code, cgst_paise, sgst_paise, igst_paise)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+        gst_type, buyer_state_code, cgst_paise, sgst_paise, igst_paise,
+        coupon_code, discount_paise)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
      RETURNING id`,
     [
       f.user_id, f.plan, f.cycle,
@@ -166,6 +179,8 @@ const insertPayment = async (f) => {
       f.renewal_date       || null,
       f.amount_paise / 100,
       gstType, f.buyerStateCode || null, cgstPaise, sgstPaise, igstPaise,
+      f.coupon_code        || null,
+      f.discount_paise     || 0,
     ]
   );
   return rows[0].id;
@@ -248,17 +263,61 @@ const issueInvoice = async ({ paymentId, plan, cycle, amountPaise, gstin, pan, u
 // ═══════════════════════════════════════════════════════════════════
 // 1. GET /api/subscription/prices
 // ═══════════════════════════════════════════════════════════════════
-router.get('/prices', priceLimiter, (req, res) => {
-  res.set('Cache-Control', 'public, max-age=300');
-  const prices = {};
-  for (const [key, cfg] of Object.entries(PLAN_CONFIG)) {
-    prices[key] = {
-      monthly: cfg.monthly_paise !== null ? cfg.monthly_paise / 100 : null,
-      annual:  cfg.annual_paise  !== null ? cfg.annual_paise  / 100 : null,
-    };
+router.get('/prices', priceLimiter, async (req, res) => {
+  res.set('Cache-Control', 'public, max-age=60'); // shorter than before — prices can now change from the ERP
+  try {
+    const prices = await getAllEffectivePrices(PLAN_CONFIG);
+    return res.json({ prices });
+  } catch (e) {
+    console.error('[GET /subscription/prices]', e.message);
+    // Fall back to the hardcoded defaults rather than fail the pricing page outright
+    const prices = {};
+    for (const [key, cfg] of Object.entries(PLAN_CONFIG)) {
+      prices[key] = {
+        monthly: cfg.monthly_paise !== null ? cfg.monthly_paise / 100 : null,
+        annual:  cfg.annual_paise  !== null ? cfg.annual_paise  / 100 : null,
+      };
+    }
+    return res.json({ prices });
   }
-  return res.json({ prices });
 });
+
+// ═══════════════════════════════════════════════════════════════════
+// 1b. POST /api/subscription/coupon/validate
+// body: { plan, cycle, coupon_code }
+// Lets the checkout UI show "50% off applied" before the user commits to
+// creating a Razorpay order — read-only, does not redeem/consume anything.
+// ═══════════════════════════════════════════════════════════════════
+router.post('/coupon/validate', authenticate,
+  [
+    body('plan').isIn(VALID_PLANS).withMessage('Invalid plan.'),
+    body('cycle').isIn(VALID_CYCLES).withMessage('Invalid cycle.'),
+    body('coupon_code').isString().trim().isLength({ min: 1, max: 40 }),
+  ],
+  async (req, res) => {
+    if (!validate(req, res)) return;
+    const { plan, cycle, coupon_code } = req.body;
+    try {
+      const result = await validateCoupon(coupon_code, { userId: req.user.id, plan, cycle });
+      if (!result.valid) return res.json({ valid: false, reason: result.reason });
+
+      const basePaise = await getEffectivePricePaise(plan, cycle, PLAN_CONFIG);
+      if (basePaise === null || basePaise === 0) return res.json({ valid: false, reason: 'Coupon not applicable to this plan.' });
+
+      const discountPaise = computeDiscount(result.coupon, basePaise);
+      const finalPaise    = basePaise - discountPaise;
+      return res.json({
+        valid: true,
+        code: result.coupon.code,
+        discountPaise, finalPaise, basePaise,
+        discountLabel: result.coupon.discount_type === 'percent' ? `${result.coupon.discount_value}% off` : `₹${(discountPaise/100).toFixed(0)} off`,
+      });
+    } catch (e) {
+      console.error('[POST /subscription/coupon/validate]', e.message);
+      return res.status(500).json({ valid: false, reason: 'Could not validate coupon right now.' });
+    }
+  }
+);
 
 // ═══════════════════════════════════════════════════════════════════
 // 2. POST /api/subscription/order
@@ -269,24 +328,38 @@ router.post('/order',
     body('plan').isIn(VALID_PLANS).withMessage('Invalid plan.'),
     body('cycle').isIn(VALID_CYCLES).withMessage('Invalid cycle.'),
     body('idempotency_key').isString().trim().isLength({ min: 8, max: 64 }),
+    body('coupon_code').optional().isString().trim().isLength({ max: 40 }),
   ],
   async (req, res) => {
     if (!validate(req, res)) return;
-    const { plan, cycle, idempotency_key } = req.body;
+    const { plan, cycle, idempotency_key, coupon_code } = req.body;
     const userId = req.user.id;
     try {
       const existing = await checkIdempotency(userId, idempotency_key);
       if (existing?.status === 'success') return res.json({ ok: true, duplicate: true });
 
-      const amountPaise = getPricePaise(plan, cycle);
-      if (amountPaise === null) return res.status(400).json({ error: 'Corporate plan requires contacting sales at support@ethertrack.in.' });
-      if (amountPaise === 0)   return res.status(400).json({ error: 'Use /free endpoint for free plan.' });
+      const basePaise = await getEffectivePricePaise(plan, cycle, PLAN_CONFIG);
+      if (basePaise === null) return res.status(400).json({ error: 'Corporate plan requires contacting sales at support@ethertrack.in.' });
+      if (basePaise === 0)   return res.status(400).json({ error: 'Use /free endpoint for free plan.' });
 
+      let amountPaise    = basePaise;
+      let discountPaise  = 0;
+      let appliedCoupon  = null;
+      if (coupon_code) {
+        const result = await validateCoupon(coupon_code, { userId, plan, cycle });
+        if (!result.valid) return res.status(400).json({ error: result.reason, code: 'COUPON_INVALID' });
+        discountPaise = computeDiscount(result.coupon, basePaise);
+        amountPaise   = basePaise - discountPaise;
+        appliedCoupon = result.coupon.code;
+      }
+
+      // GST is charged on the net (post-discount) sale price, matching
+      // standard invoicing practice for a discounted sale.
       const totalPaise = getTotalPaise(amountPaise);
       const order = await razorpay.orders.create({
         amount: totalPaise, currency: 'INR',
         receipt: `et_${Date.now()}`,
-        notes:   { user_id: userId, plan, cycle, idempotency_key },
+        notes:   { user_id: userId, plan, cycle, idempotency_key, coupon_code: appliedCoupon || undefined },
       });
 
       await insertPayment({
@@ -296,9 +369,13 @@ router.post('/order',
         total_amount_paise: totalPaise,
         pay_method: 'razorpay', status: 'pending',
         razorpay_order_id: order.id, idempotency_key,
+        coupon_code: appliedCoupon, discount_paise: discountPaise,
       });
 
-      return res.json({ orderId: order.id, amount: totalPaise, currency: 'INR' });
+      return res.json({
+        orderId: order.id, amount: totalPaise, currency: 'INR',
+        ...(appliedCoupon ? { couponApplied: appliedCoupon, discountPaise, basePaise } : {}),
+      });
     } catch (err) {
       console.error('[POST /subscription/order]', err.message);
       return res.status(500).json({ error: 'Could not create payment order.' });
@@ -333,22 +410,39 @@ router.post('/verify',
         return res.status(400).json({ error: 'Payment signature verification failed.', code: 'SIGNATURE_MISMATCH' });
 
       const { rows: [payment] } = await query(
-        `SELECT id, amount_paise, status FROM subscription_payments
+        `SELECT id, plan, cycle, amount_paise, status, coupon_code FROM subscription_payments
          WHERE razorpay_order_id=$1 AND user_id=$2 LIMIT 1`,
         [razorpay_order_id, userId]
       );
       if (!payment) return res.status(400).json({ error: 'Payment record not found.' });
       if (payment.status === 'success') return res.json({ ok: true, duplicate: true });
 
-      const expectedPaise = getPricePaise(plan, cycle);
-      if (expectedPaise === null)
-        return res.status(400).json({ error: 'Corporate plan requires contacting sales.' });
-      if (payment.amount_paise !== expectedPaise)
-        return res.status(400).json({ error: 'Payment amount mismatch. Contact support.', code: 'AMOUNT_MISMATCH' });
+      // [DYNAMIC-PRICING/COUPON-FIX] amount_paise was already computed
+      // server-side at /order time (from the effective price at that moment,
+      // net of any coupon) and is trusted here — do NOT recompute against
+      // getEffectivePricePaise now, since a live price change or an
+      // already-applied coupon would cause a false AMOUNT_MISMATCH on an
+      // otherwise-legitimate payment. What we DO still verify is that the
+      // plan/cycle being activated matches what this specific order was
+      // actually created for, so a client can't request one order then
+      // claim a different (possibly pricier) plan on activation.
+      if (payment.plan !== plan || payment.cycle !== cycle)
+        return res.status(400).json({ error: 'Plan/cycle does not match the order created earlier.', code: 'PLAN_MISMATCH' });
 
+      // [FIX-STRING-CONCAT] payment.amount_paise comes back from Postgres as
+      // a STRING (node-pg's default behavior for BIGINT/NUMERIC columns, to
+      // avoid silent precision loss on values beyond MAX_SAFE_INTEGER) — the
+      // previous line here used it directly in `expectedPaise + gstPaise`,
+      // which JS evaluates as STRING CONCATENATION whenever either operand
+      // is a string, not addition. That produced a garbage total_amount_paise
+      // (e.g. "14399910" + 2591984 → "143999102591984" instead of 17023894),
+      // which then showed up as an absurd rupee figure anywhere that value
+      // was displayed (divided by 100 for INR). Number(...) here guarantees
+      // real arithmetic regardless of the column's underlying pg type.
+      const expectedPaise = Number(payment.amount_paise);
       const gstPaise    = getGstPaise(expectedPaise);
       const totalPaise  = expectedPaise + gstPaise;
-      const renewalDate = getRenewalDate(cycle, PLAN_CONFIG[plan].trial_days);
+      const renewalDate = getRenewalDate(cycle);
 
       await query(
         `UPDATE subscription_payments SET
@@ -368,6 +462,24 @@ router.post('/verify',
 
       await activatePlan({ userId, plan, cycle, paymentId: payment.id, renewalDate });
       const invoiceUrl = await issueInvoice({ paymentId: payment.id, plan, cycle, amountPaise: expectedPaise, gstin, pan, user: req.user, renewalDate });
+
+      // [COUPON] Redemption is only recorded once payment is actually
+      // confirmed — an abandoned checkout never burns the user's one-time use.
+      if (payment.coupon_code) {
+        try {
+          const { rows: [couponRow] } = await query(`SELECT id FROM coupons WHERE code=$1`, [payment.coupon_code]);
+          if (couponRow) {
+            const { rows: [pRow] } = await query(`SELECT discount_paise FROM subscription_payments WHERE id=$1`, [payment.id]);
+            await recordRedemption({
+              couponId: couponRow.id, userId,
+              subscriptionPaymentId: payment.id,
+              discountPaise: pRow?.discount_paise || 0,
+            });
+          }
+        } catch (e) {
+          console.warn('[subscription/verify] coupon redemption record failed (non-fatal):', e.message);
+        }
+      }
 
       await createNotification(userId, 'WALLET',
         `${PLAN_CONFIG[plan].label} Plan Activated`,
@@ -394,18 +506,32 @@ router.post('/wallet-pay',
     body('idempotency_key').isString().trim().isLength({ min: 8, max: 64 }),
     body('gstin').optional().matches(GSTIN_RE).withMessage('Invalid GSTIN.'),
     body('pan').optional().matches(PAN_RE).withMessage('Invalid PAN.'),
+    body('coupon_code').optional().isString().trim().isLength({ max: 40 }),
   ],
   async (req, res) => {
     if (!validate(req, res)) return;
-    const { plan, cycle, idempotency_key, gstin, pan } = req.body;
+    const { plan, cycle, idempotency_key, gstin, pan, coupon_code } = req.body;
     const userId = req.user.id;
     try {
       const existing = await checkIdempotency(userId, idempotency_key);
       if (existing?.status === 'success') return res.json({ ok: true, duplicate: true });
 
-      const amountPaise = getPricePaise(plan, cycle);
-      if (amountPaise === null) return res.status(400).json({ error: 'Corporate plan requires contacting sales at support@ethertrack.in.' });
-      if (amountPaise === 0)   return res.status(400).json({ error: 'Use /free endpoint for free plan.' });
+      const basePaise = await getEffectivePricePaise(plan, cycle, PLAN_CONFIG);
+      if (basePaise === null) return res.status(400).json({ error: 'Corporate plan requires contacting sales at support@ethertrack.in.' });
+      if (basePaise === 0)   return res.status(400).json({ error: 'Use /free endpoint for free plan.' });
+
+      let amountPaise   = basePaise;
+      let discountPaise = 0;
+      let appliedCoupon = null;
+      let couponRowId   = null;
+      if (coupon_code) {
+        const result = await validateCoupon(coupon_code, { userId, plan, cycle });
+        if (!result.valid) return res.status(400).json({ error: result.reason, code: 'COUPON_INVALID' });
+        discountPaise = computeDiscount(result.coupon, basePaise);
+        amountPaise   = basePaise - discountPaise;
+        appliedCoupon = result.coupon.code;
+        couponRowId   = result.coupon.id;
+      }
 
       const gstPaise   = getGstPaise(amountPaise);
       const totalPaise = amountPaise + gstPaise;
@@ -424,7 +550,7 @@ router.post('/wallet-pay',
           code:  'INSUFFICIENT_BALANCE',
         });
 
-      const renewalDate = getRenewalDate(cycle, PLAN_CONFIG[plan].trial_days);
+      const renewalDate = getRenewalDate(cycle);
       let paymentId;
 
       await withTransaction(async (client) => {
@@ -434,8 +560,8 @@ router.post('/wallet-pay',
           `INSERT INTO subscription_payments
              (user_id,plan,cycle,amount_paise,gst_amount_paise,total_amount_paise,
               pay_method,status,idempotency_key,gstin,pan,
-              gstin_validated,pan_validated,renewal_date,amount)
-           VALUES ($1,$2,$3,$4,$5,$6,'wallet','success',$7,$8,$9,$10,$11,$12,$13)
+              gstin_validated,pan_validated,renewal_date,amount,coupon_code,discount_paise)
+           VALUES ($1,$2,$3,$4,$5,$6,'wallet','success',$7,$8,$9,$10,$11,$12,$13,$14,$15)
            RETURNING id`,
           [
             userId, plan, cycle, amountPaise, gstPaise, totalPaise,
@@ -445,6 +571,7 @@ router.post('/wallet-pay',
             pan   ? PAN_RE.test(pan)     : false,
             renewalDate,
             amountPaise / 100,  // $13 — computed in JS, no type ambiguity
+            appliedCoupon, discountPaise,
           ]
         );
         paymentId = pay.id;
@@ -504,6 +631,11 @@ router.post('/wallet-pay',
 
       const invoiceUrl = await issueInvoice({ paymentId, plan, cycle, amountPaise, gstin, pan, user: req.user, renewalDate });
 
+      if (appliedCoupon && couponRowId) {
+        await recordRedemption({ couponId: couponRowId, userId, subscriptionPaymentId: paymentId, discountPaise })
+          .catch(e => console.warn('[wallet-pay] coupon redemption record failed (non-fatal):', e.message));
+      }
+
       await createNotification(userId, 'WALLET',
         `${PLAN_CONFIG[plan].label} Plan Activated`,
         `₹${(totalPaise/100).toFixed(2)} debited from wallet. ${PLAN_CONFIG[plan].label} plan is now active.`,
@@ -532,10 +664,11 @@ router.post('/metamask-pay',
     body('message').isString().notEmpty(),
     body('gstin').optional().matches(GSTIN_RE).withMessage('Invalid GSTIN.'),
     body('pan').optional().matches(PAN_RE).withMessage('Invalid PAN.'),
+    body('coupon_code').optional().isString().trim().isLength({ max: 40 }),
   ],
   async (req, res) => {
     if (!validate(req, res)) return;
-    const { plan, cycle, wallet_address, signature, message, gstin, pan } = req.body;
+    const { plan, cycle, wallet_address, signature, message, gstin, pan, coupon_code } = req.body;
     const userId = req.user.id;
     try {
       if (!message.startsWith('EtherTrack:'))
@@ -570,12 +703,25 @@ router.post('/metamask-pay',
       const existing = await checkIdempotency(userId, idempotencyKey);
       if (existing?.status === 'success') return res.json({ ok: true, duplicate: true });
 
-      const amountPaise = getPricePaise(plan, cycle);
-      if (amountPaise === null) return res.status(400).json({ error: 'Corporate plan requires contacting sales.' });
+      const basePaise = await getEffectivePricePaise(plan, cycle, PLAN_CONFIG);
+      if (basePaise === null) return res.status(400).json({ error: 'Corporate plan requires contacting sales.' });
+
+      let amountPaise   = basePaise;
+      let discountPaise = 0;
+      let appliedCoupon = null;
+      let couponRowId   = null;
+      if (coupon_code) {
+        const result = await validateCoupon(coupon_code, { userId, plan, cycle });
+        if (!result.valid) return res.status(400).json({ error: result.reason, code: 'COUPON_INVALID' });
+        discountPaise = computeDiscount(result.coupon, basePaise);
+        amountPaise   = basePaise - discountPaise;
+        appliedCoupon = result.coupon.code;
+        couponRowId   = result.coupon.id;
+      }
 
       const gstPaise    = getGstPaise(amountPaise);
       const totalPaise  = amountPaise + gstPaise;
-      const renewalDate = getRenewalDate(cycle, PLAN_CONFIG[plan].trial_days);
+      const renewalDate = getRenewalDate(cycle);
 
       const paymentId = await insertPayment({
         user_id: userId, plan, cycle,
@@ -585,10 +731,16 @@ router.post('/metamask-pay',
         wallet_address: recovered, signature,
         metamask_address: recovered, metamask_message: message,
         gstin: gstin || null, pan: pan || null, renewal_date: renewalDate,
+        coupon_code: appliedCoupon, discount_paise: discountPaise,
       });
 
       await activatePlan({ userId, plan, cycle, paymentId, renewalDate });
       const invoiceUrl = await issueInvoice({ paymentId, plan, cycle, amountPaise, gstin, pan, user: req.user, renewalDate });
+
+      if (appliedCoupon && couponRowId) {
+        await recordRedemption({ couponId: couponRowId, userId, subscriptionPaymentId: paymentId, discountPaise })
+          .catch(e => console.warn('[metamask-pay] coupon redemption record failed (non-fatal):', e.message));
+      }
 
       await createNotification(userId, 'WALLET',
         `${PLAN_CONFIG[plan].label} Plan Activated via MetaMask`,

@@ -123,6 +123,11 @@ export default function SubscriptionBilling({
   const [gstinErr,       setGstinErr]       = useState('');
   const [panErr,         setPanErr]         = useState('');
 
+  const [couponInput,    setCouponInput]    = useState('');
+  const [couponStatus,   setCouponStatus]   = useState('idle'); // idle | checking | valid | invalid
+  const [couponResult,   setCouponResult]   = useState(null);   // { code, discountPaise, finalPaise, basePaise, discountLabel }
+  const [couponMsg,      setCouponMsg]      = useState('');
+
   const [showMatrix,     setShowMatrix]     = useState(false);
   const [showGas,        setShowGas]        = useState(false);
   const [showHistory,    setShowHistory]    = useState(false);
@@ -229,8 +234,43 @@ export default function SubscriptionBilling({
     setModalErr('');
     setGstin(''); setPan('');
     setGstinErr(''); setPanErr('');
+    setCouponInput(''); setCouponStatus('idle'); setCouponResult(null); setCouponMsg('');
     refreshBalance();
   }, [refreshBalance]);
+
+  // ── Coupon ───────────────────────────────────────────────────
+  // Read-only preview via /api/subscription/coupon/validate — nothing is
+  // "used up" here, the coupon is only actually redeemed once a payment
+  // goes through (see services/coupons.js recordRedemption on the backend).
+  const handleApplyCoupon = useCallback(async () => {
+    if (!couponInput.trim() || !payModal?.plan) return;
+    setCouponStatus('checking'); setCouponMsg('');
+    try {
+      const result = await subscriptionAPI.validateCoupon(payModal.plan.key, billingCycle, couponInput.trim());
+      if (result?.valid) {
+        setCouponStatus('valid');
+        setCouponResult(result);
+        setCouponMsg(result.discountLabel ? `${result.discountLabel} applied!` : 'Coupon applied!');
+      } else {
+        setCouponStatus('invalid');
+        setCouponResult(null);
+        setCouponMsg(result?.reason || 'Invalid coupon code.');
+      }
+    } catch (e) {
+      setCouponStatus('invalid');
+      setCouponResult(null);
+      setCouponMsg(e?.error || 'Could not validate coupon right now.');
+    }
+  }, [couponInput, payModal, billingCycle]);
+
+  const clearCoupon = useCallback(() => {
+    setCouponInput(''); setCouponStatus('idle'); setCouponResult(null); setCouponMsg('');
+  }, []);
+
+  useEffect(() => {
+    if (payModal) clearCoupon();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [billingCycle]);
 
   // ── Context update after activation ─────────────────────────
   // [SB-2] Made async — instantly re-fetches /me after payment so
@@ -268,7 +308,9 @@ export default function SubscriptionBilling({
   const handleWalletPay = useCallback(async () => {
     if (!validateGstFields()) return;
     const plan  = payModal.plan;
-    const price = getPrice(plan);
+    const basePrice = getPrice(plan);
+    const activeCoupon = couponStatus === 'valid' ? couponResult : null;
+    const price = activeCoupon ? activeCoupon.finalPaise / 100 : basePrice;
 
     if (!idempotencyKey.current || idempotencyKey.current.length < 8) {
       idempotencyKey.current = newKey();
@@ -282,7 +324,8 @@ export default function SubscriptionBilling({
     try {
       const result = await subscriptionAPI.payWithWallet(
         plan.key, billingCycle, idempotencyKey.current,
-        { gstin: gstin || undefined, pan: pan || undefined }
+        { gstin: gstin || undefined, pan: pan || undefined },
+        activeCoupon?.code
       );
       if (result?.ok) {
         onPlanActivated(plan, result);
@@ -299,20 +342,21 @@ export default function SubscriptionBilling({
     } finally {
       setPaying(false);
     }
-  }, [payModal, getPrice, walletBalance, billingCycle, gstin, pan,
+  }, [payModal, getPrice, walletBalance, billingCycle, gstin, pan, couponStatus, couponResult,
       validateGstFields, onPlanActivated, addNotification, showToast]);
 
   // ── RAZORPAY PAY ─────────────────────────────────────────────
   const handleRazorpayPay = useCallback(async () => {
     if (!validateGstFields()) return;
     const plan = payModal.plan;
+    const activeCoupon = couponStatus === 'valid' ? couponResult : null;
     setPaying(true); setModalErr('');
     try {
       const loaded = await loadRazorpay();
       if (!loaded) throw new Error('Razorpay failed to load. Please refresh.');
 
       const order = await subscriptionAPI.createOrder(
-        plan.key, billingCycle, idempotencyKey.current
+        plan.key, billingCycle, idempotencyKey.current, activeCoupon?.code
       );
       if (!order?.orderId) throw new Error('Could not create payment order. Try again.');
 
@@ -360,7 +404,7 @@ export default function SubscriptionBilling({
       setModalErr(e?.message || 'Payment initiation failed.');
       idempotencyKey.current = newKey();
     }
-  }, [payModal, billingCycle, gstin, pan, validateGstFields,
+  }, [payModal, billingCycle, gstin, pan, couponStatus, couponResult, validateGstFields,
       dbUser, onPlanActivated, addNotification, showToast]);
 
   // ── METAMASK PAY ─────────────────────────────────────────────
@@ -408,7 +452,8 @@ export default function SubscriptionBilling({
 
       const result = await subscriptionAPI.payWithMetaMask(
         plan.key, billingCycle, account, signature, message,
-        { gstin: gstin || undefined, pan: pan || undefined }
+        { gstin: gstin || undefined, pan: pan || undefined },
+        (couponStatus === 'valid' ? couponResult?.code : undefined)
       );
       if (result?.ok) {
         onPlanActivated(plan, result);
@@ -426,7 +471,7 @@ export default function SubscriptionBilling({
     } finally {
       setPaying(false);
     }
-  }, [payModal, billingCycle, isMobile, gstin, pan, dbUser,
+  }, [payModal, billingCycle, isMobile, gstin, pan, dbUser, couponStatus, couponResult,
       validateGstFields, onPlanActivated, addNotification, showToast]);
 
   // ── Confirm pay ──────────────────────────────────────────────
@@ -472,11 +517,11 @@ export default function SubscriptionBilling({
   // ── confirmDisabled ──────────────────────────────────────────
   const confirmDisabled = useMemo(() => {
     if (paying || !prices || !payModal) return true;
-    const price = getPrice(payModal.plan);
+    const price = (couponStatus === 'valid' && couponResult) ? couponResult.finalPaise / 100 : getPrice(payModal.plan);
     if (payMethod === 'wallet'   && toPaise(walletBalance) < toPaise(price)) return true;
     if (payMethod === 'metamask' && !dbUser?.wallet_address && !isMobile)    return true;
     return false;
-  }, [paying, prices, payModal, payMethod, walletBalance, dbUser, isMobile, getPrice]);
+  }, [paying, prices, payModal, payMethod, walletBalance, dbUser, isMobile, getPrice, couponStatus, couponResult]);
 
   // ── Proration notice for downgrade ───────────────────────────
   const prorationNotice = useMemo(() => {
@@ -1090,10 +1135,60 @@ export default function SubscriptionBilling({
                   </div>
                   <div className={styles.modalPlanPrice}>
                     {prices
-                      ? `${fmtINR(getPrice(payModal.plan))} / ${billingCycle === 'annual' ? 'year' : 'month'} + 18% GST`
+                      ? (couponStatus === 'valid' && couponResult
+                          ? (
+                            <>
+                              <span style={{ textDecoration: 'line-through', opacity: 0.5, marginRight: 8 }}>
+                                {fmtINR(getPrice(payModal.plan))}
+                              </span>
+                              {fmtINR(couponResult.finalPaise / 100)} / {billingCycle === 'annual' ? 'year' : 'month'} + 18% GST
+                            </>
+                          )
+                          : `${fmtINR(getPrice(payModal.plan))} / ${billingCycle === 'annual' ? 'year' : 'month'} + 18% GST`
+                        )
                       : 'Loading…'
                     }
                   </div>
+                </div>
+
+                {/* Coupon code */}
+                <div className={styles.field} style={{ marginTop: 12 }}>
+                  <label className={styles.fieldLabel} htmlFor="sb-coupon">Coupon code</label>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <input
+                      id="sb-coupon"
+                      type="text"
+                      value={couponInput}
+                      onChange={e => { setCouponInput(e.target.value.toUpperCase()); if (couponStatus !== 'idle') { setCouponStatus('idle'); setCouponResult(null); setCouponMsg(''); } }}
+                      placeholder="e.g. EARLYBIRD50"
+                      autoComplete="off"
+                      disabled={couponStatus === 'valid'}
+                      className={cx('fieldInput', couponStatus === 'invalid' && 'fieldInputErr')}
+                      style={{ flex: 1 }}
+                    />
+                    {couponStatus === 'valid' ? (
+                      <button type="button" className={styles.cancelBtn} onClick={clearCoupon} disabled={paying}>
+                        REMOVE
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className={styles.cancelBtn}
+                        onClick={handleApplyCoupon}
+                        disabled={paying || couponStatus === 'checking' || !couponInput.trim()}
+                      >
+                        {couponStatus === 'checking' ? '…' : 'APPLY'}
+                      </button>
+                    )}
+                  </div>
+                  {couponMsg && (
+                    <div
+                      className={couponStatus === 'valid' ? styles.fieldOk : styles.fieldErr}
+                      role={couponStatus === 'invalid' ? 'alert' : undefined}
+                    >
+                      {couponStatus === 'valid' ? '✓ ' : ''}{couponMsg}
+                    </div>
+                  )}
                 </div>
 
                 {/* Proration notice */}

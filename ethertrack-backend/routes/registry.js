@@ -30,15 +30,40 @@ router.get('/projects', async (req, res) => {
     if (type)     { conditions.push(`p.project_type = $${idx++}`); params.push(type); }
     if (standard) { conditions.push(`p.standard = $${idx++}`);     params.push(standard); }
     params.push(limit, offset);
-    const { rows } = await query(`SELECT p.*, u.full_name as developer_user_name, u.email as developer_email, (SELECT COUNT(*) FROM carbon_batches b WHERE b.project_id=p.id AND b.status='tokenised') as batch_count FROM projects p JOIN users u ON p.developer_id=u.id WHERE ${conditions.join(' AND ')} ORDER BY p.created_at DESC LIMIT $${idx} OFFSET $${idx+1}`, params);
-    const { rows: countRows } = await query(`SELECT COUNT(*) FROM projects p WHERE ${conditions.join(' AND ')}`, params.slice(0,-2));
+    // [FIX-PII-LEAK] Was: `SELECT p.*, u.full_name AS developer_user_name,
+    // u.email AS developer_email ...` — a completely public, unauthenticated
+    // endpoint was returning real users' email addresses and full names to
+    // anyone. Now an explicit allowlist of public-safe project fields only —
+    // no PII, no internal-only columns (developer_id).
+    const { rows } = await query(
+      `SELECT p.id, p.name, p.project_code, p.standard, p.project_type,
+              p.location, p.country, p.description, p.methodology,
+              p.developer_name, p.verifier_name,
+              p.total_credits, p.issued_credits, p.retired_credits,
+              p.ipfs_image_hash, p.status, p.created_at,
+              (SELECT COUNT(*) FROM carbon_batches b WHERE b.project_id=p.id AND b.status='tokenised') AS batch_count
+       FROM projects p
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY p.created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
+      params
+    );
+    const { rows: countRows } = await query(`SELECT COUNT(*) FROM projects p WHERE ${conditions.join(' AND ')}`, params.slice(0, -2));
     res.json({ projects: rows, total: parseInt(countRows[0].count), page: +page, limit: +limit });
   } catch (e) { console.error('Get projects error:', e); res.status(500).json({ error: 'Failed to fetch projects' }); }
 });
 
 router.get('/projects/:id', async (req, res) => {
   try {
-    const { rows } = await query(`SELECT p.*, u.full_name as developer_user_name, u.email as developer_email FROM projects p JOIN users u ON p.developer_id=u.id WHERE p.id=$1`, [req.params.id]);
+    // [FIX-PII-LEAK] Same fix as above — explicit safe allowlist, no
+    // developer_id/email/full_name exposed to the public.
+    const { rows } = await query(
+      `SELECT id, name, project_code, standard, project_type, location, country,
+              description, methodology, developer_name, verifier_name,
+              total_credits, issued_credits, retired_credits,
+              ipfs_document_hash, ipfs_image_hash, status, created_at
+       FROM projects WHERE id=$1`,
+      [req.params.id]
+    );
     if (!rows.length) return res.status(404).json({ error: 'Project not found' });
     const { rows: batches } = await query(`SELECT id, batch_number, vintage_year, total_credits, available_credits, retired_credits, token_id, status, ipfs_metadata_hash, created_at FROM carbon_batches WHERE project_id=$1 ORDER BY created_at DESC`, [req.params.id]);
     res.json({ ...rows[0], batches });
@@ -91,14 +116,36 @@ router.get('/batches', async (req, res) => {
     if (projectId) { conditions.push(`b.project_id=$${idx++}`); params.push(projectId); }
     if (status)    { conditions.push(`b.status=$${idx++}`);      params.push(status); }
     params.push(limit, offset);
-    const { rows } = await query(`SELECT b.*, p.name as project_name, p.standard, p.project_type, p.location FROM carbon_batches b JOIN projects p ON b.project_id=p.id WHERE ${conditions.join(' AND ')} ORDER BY b.created_at DESC LIMIT $${idx} OFFSET $${idx+1}`, params);
+    // [FIX-DATA-EXPOSURE] Was `SELECT b.*` on a public endpoint — exposed
+    // internal user-reference columns (developer_id, tokenised_by) to
+    // anyone unauthenticated. Explicit allowlist now.
+    const { rows } = await query(
+      `SELECT b.id, b.project_id, b.batch_number, b.vintage_year,
+              b.total_credits, b.available_credits, b.retired_credits,
+              b.token_id, b.tokenised_at, b.status, b.expires_at, b.created_at,
+              p.name as project_name, p.standard, p.project_type, p.location
+       FROM carbon_batches b JOIN projects p ON b.project_id=p.id
+       WHERE ${conditions.join(' AND ')} ORDER BY b.created_at DESC LIMIT $${idx} OFFSET $${idx+1}`,
+      params
+    );
     res.json({ batches: rows });
   } catch (e) { res.status(500).json({ error: 'Failed to fetch batches' }); }
 });
 
 router.get('/batches/token/:tokenId', async (req, res) => {
   try {
-    const { rows } = await query(`SELECT b.*, p.name as project_name, p.standard, p.project_type, p.location, p.country, p.developer_name, p.methodology FROM carbon_batches b JOIN projects p ON b.project_id=p.id WHERE b.token_id=$1`, [req.params.tokenId]);
+    // [FIX-DATA-EXPOSURE] Same fix — explicit allowlist, no developer_id/
+    // tokenised_by exposed publicly.
+    const { rows } = await query(
+      `SELECT b.id, b.project_id, b.batch_number, b.vintage_year,
+              b.total_credits, b.available_credits, b.retired_credits,
+              b.token_id, b.tokenised_at, b.status, b.expires_at, b.created_at,
+              p.name as project_name, p.standard, p.project_type, p.location, p.country,
+              p.developer_name, p.methodology
+       FROM carbon_batches b JOIN projects p ON b.project_id=p.id
+       WHERE b.token_id=$1`,
+      [req.params.tokenId]
+    );
     if (!rows.length) return res.status(404).json({ error: 'Batch not found' });
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: 'Failed to fetch batch' }); }

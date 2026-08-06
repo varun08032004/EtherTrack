@@ -11,16 +11,29 @@
  *   2. Backend creates user with bcrypt hash, sends OTP via Resend
  *   3. OTP input shown inline → POST /api/auth/verify-email
  *   4. Backend sets cookies → /api/auth/me → navigate to dashboard
+ *
+ * NOTE: All handlers, state, and API calls below are unchanged from the
+ * previous version. Only the JSX / Tailwind classes were rebuilt to match
+ * the new reference design and to avoid complex arbitrary-value class
+ * patterns (e.g. multi-layer bracket shadows) that were causing the
+ * PostCSS/Tailwind build to silently fail to generate rules for this file.
  */
 
 import React, { useState, useContext } from "react";
 import { useNavigate, Link, useSearchParams } from "react-router-dom";
-import { FaGoogle, FaFacebook, FaEye, FaEyeSlash } from "react-icons/fa";
+import { motion, AnimatePresence } from "framer-motion";
+import { FaGoogle, FaFacebook } from "react-icons/fa";
+import {
+  User, Mail, Lock, Eye, EyeOff, ArrowRight, ShieldCheck,
+  CheckCircle2, Circle, Leaf, Activity, Globe2,
+} from "lucide-react";
 import { signInWithPopup } from "firebase/auth";
 import { auth, googleProvider, facebookProvider } from "../firebaseConfigure";
 import { authAPI } from "../services/api";
 import { AuthContext } from "../App";
 import { showToast } from "../utils/toast";
+import globeImage from "../assets/ethertrack-globe.png";
+import logoImage from "../assets/ethertrack-logo.png";
 
 let Sentry = null;
 try { Sentry = require("@sentry/react"); } catch {}
@@ -65,6 +78,112 @@ const getFriendlyError = (err) => {
       return err?.message || "Something went wrong. Please try again.";
   }
 };
+
+/* ------------------------------------------------------------------ */
+/*  Shared visual primitives                                          */
+/* ------------------------------------------------------------------ */
+
+function Field({ icon: Icon, label, children }) {
+  return (
+    <div className="mb-4">
+      {label && (
+        <label className="mb-1.5 block text-sm font-medium text-white/90">
+          {label}
+        </label>
+      )}
+      <div className="relative">
+        {Icon && (
+          <Icon className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-white/30" />
+        )}
+        {children}
+      </div>
+    </div>
+  );
+}
+
+const inputBase =
+  "h-12 w-full rounded-xl border border-white/10 bg-black/30 pl-10 pr-10 text-sm text-white " +
+  "placeholder-white/25 outline-none transition-colors duration-200 " +
+  "focus:border-green-500 focus:bg-black/50";
+
+function PrimaryButton({ children, loading, loadingLabel, ...props }) {
+  return (
+    <motion.button
+      whileHover={{ y: -1 }}
+      whileTap={{ scale: 0.985 }}
+      transition={{ duration: 0.2 }}
+      disabled={loading}
+      className="group flex h-12 w-full items-center justify-center gap-2 rounded-xl
+                 bg-green-500 text-base font-semibold text-black shadow-lg shadow-green-500/30
+                 transition-colors duration-200 hover:bg-green-400
+                 disabled:cursor-not-allowed disabled:opacity-60"
+      {...props}
+    >
+      <span>{loading ? loadingLabel : children}</span>
+      {!loading && (
+        <ArrowRight className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+      )}
+    </motion.button>
+  );
+}
+
+function SocialButton({ icon, children, ...props }) {
+  return (
+    <button
+      type="button"
+      className="mt-2.5 flex h-11 w-full items-center justify-center gap-2.5 rounded-xl border
+                 border-white/10 bg-black/20 text-sm font-medium text-white/80 transition-colors
+                 duration-200 hover:border-green-500/40 hover:bg-green-500/5
+                 disabled:cursor-not-allowed disabled:opacity-50"
+      {...props}
+    >
+      {icon}
+      {children}
+    </button>
+  );
+}
+
+function ErrorBanner({ error }) {
+  return (
+    <AnimatePresence>
+      {error && (
+        <motion.div
+          initial={{ opacity: 0, y: -6 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0 }}
+          role="alert"
+          aria-live="assertive"
+          className="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-sm text-red-400"
+        >
+          {error}
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Earth-at-night / India-lit-up visual                              */
+/* ------------------------------------------------------------------ */
+
+function GlobeVisual() {
+  return (
+    <div className="relative w-full overflow-hidden rounded-2xl">
+      <img
+        src={globeImage}
+        alt=""
+        className="h-full w-full object-cover"
+      />
+      <div className="absolute inset-x-0 top-0 h-16 bg-gradient-to-b from-black to-transparent" />
+    </div>
+  );
+}
+
+const FEATURES = [
+  { icon: ShieldCheck, title: "Enterprise Grade", subtitle: "Security & Compliance" },
+  { icon: Activity,    title: "Real-time Analytics", subtitle: "Actionable Insights" },
+  { icon: Globe2,      title: "Global Marketplace", subtitle: "Trusted & Transparent" },
+];
 
 // ── Component ─────────────────────────────────────────────────────
 const Signup = () => {
@@ -208,14 +327,11 @@ const Signup = () => {
 
   // ── Password strength ──────────────────────────────────────────
   const strengthChecks = [
-    password.length >= 8,
-    /[A-Z]/.test(password),
-    /[0-9]/.test(password),
-    /[^A-Za-z0-9]/.test(password),
+    { label: "At least 8 characters", pass: password.length >= 8 },
+    { label: "One uppercase letter",  pass: /[A-Z]/.test(password) },
+    { label: "One number",            pass: /[0-9]/.test(password) },
+    { label: "One special character", pass: /[^A-Za-z0-9]/.test(password) },
   ];
-  const strengthLevel = strengthChecks.filter(Boolean).length;
-  const strengthColor = ["#dc2626","#dc2626","#f97316","#facc15","#22c55e"][strengthLevel];
-  const strengthLabel = ["Weak","Weak","Fair","Good","Strong"][strengthLevel];
 
   const handleOtpChange = (e) => {
     setOtp(e.target.value.replace(/\D/g, "").slice(0, 6));
@@ -223,262 +339,294 @@ const Signup = () => {
   };
 
   return (
-    <>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap');
-        .et-auth-page{min-height:100vh;background:#080c0a;display:flex;align-items:center;justify-content:center;font-family:'DM Mono',monospace;position:relative;overflow:hidden}
-        .et-auth-page::before{content:'';position:fixed;inset:0;z-index:0;background-image:linear-gradient(rgba(34,197,94,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(34,197,94,0.03) 1px,transparent 1px);background-size:40px 40px;pointer-events:none}
-        .et-auth-glow{position:fixed;width:500px;height:500px;border-radius:50%;background:radial-gradient(circle,rgba(22,163,74,0.06) 0%,transparent 70%);top:50%;left:50%;transform:translate(-50%,-50%);pointer-events:none;z-index:0}
-        .et-auth-card{position:relative;z-index:1;width:100%;max-width:420px;background:#0a0f0c;border:1px solid #0f2a1a;border-radius:14px;padding:40px 36px;box-shadow:0 24px 64px rgba(0,0,0,0.6),0 0 0 1px #22c55e0a;animation:cardIn .5s ease both}
-        @keyframes cardIn{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
-        .et-auth-title{font-size:22px;font-weight:700;color:#f0fdf4;letter-spacing:.04em;margin-bottom:6px;text-align:center}
-        .et-auth-subtitle{font-size:11px;color:#4ade8066;letter-spacing:.1em;text-align:center;margin-bottom:16px}
-        .et-invite-banner{padding:10px 14px;background:#0a1a0e;border:1px solid #22c55e33;border-radius:8px;font-size:11px;color:#22c55e88;margin-bottom:16px;line-height:1.7;text-align:center}
-        .et-auth-label{display:block;font-size:10px;color:#4ade8088;letter-spacing:.12em;margin-bottom:6px;margin-top:14px}
-        .et-input-wrap{position:relative;display:flex;align-items:center}
-        .et-auth-input{width:100%;padding:11px 40px 11px 14px;background:#060a07;border:1px solid #0f2a1a;border-radius:7px;color:#e2e8e4;font-family:'DM Mono',monospace;font-size:13px;outline:none;transition:border-color .2s,box-shadow .2s;box-sizing:border-box}
-        .et-auth-input.no-icon{padding-right:14px}
-        .et-auth-input:focus{border-color:#22c55e44;box-shadow:0 0 0 3px rgba(34,197,94,0.06)}
-        .et-auth-input::placeholder{color:#4ade8033}
-        .et-auth-input.invalid{border-color:#dc262644}
-        .et-eye-btn{position:absolute;right:12px;background:none;border:none;cursor:pointer;color:#4ade8055;padding:4px;display:flex;align-items:center;transition:color .2s;flex-shrink:0}
-        .et-eye-btn:hover,.et-eye-btn:focus-visible{color:#4ade80;outline:2px solid #22c55e44;border-radius:3px}
-        .et-strength-wrap{display:flex;align-items:center;gap:8px;margin-top:6px}
-        .et-strength{display:flex;gap:4px;flex:1}
-        .et-strength-bar{flex:1;height:3px;border-radius:2px;transition:background .3s}
-        .et-strength-label{font-size:9px;letter-spacing:.08em;min-width:36px;transition:color .3s}
-        .et-auth-btn{width:100%;padding:13px;border-radius:7px;border:none;cursor:pointer;font-family:'DM Mono',monospace;font-size:13px;font-weight:700;letter-spacing:.1em;background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;margin-top:20px;transition:opacity .2s,transform .1s}
-        .et-auth-btn:hover:not(:disabled){opacity:.88;transform:translateY(-1px)}
-        .et-auth-btn:disabled{opacity:.5;cursor:not-allowed}
-        .et-social-btn{width:100%;padding:11px;border-radius:7px;border:1px solid #0f2a1a;background:#060a07;color:#e2e8e4;cursor:pointer;font-family:'DM Mono',monospace;font-size:12px;letter-spacing:.06em;margin-top:10px;display:flex;align-items:center;justify-content:center;gap:10px;transition:border-color .2s,background .2s}
-        .et-social-btn:hover:not(:disabled){border-color:#22c55e44;background:#0d2e1f}
-        .et-social-btn:disabled{opacity:.5;cursor:not-allowed}
-        .et-auth-divider{display:flex;align-items:center;gap:12px;margin:20px 0}
-        .et-auth-divider::before,.et-auth-divider::after{content:'';flex:1;height:1px;background:#0f2a1a}
-        .et-auth-divider span{font-size:10px;color:#4ade8033;letter-spacing:.1em}
-        .et-auth-error{margin-top:12px;padding:10px 14px;background:#450a0a;border:1px solid #dc262644;border-radius:6px;color:#f87171;font-size:12px;animation:fadeIn .3s ease}
-        @keyframes fadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
-        .et-auth-footer{text-align:center;margin-top:24px;font-size:12px;color:#4ade8055}
-        .et-auth-footer a{color:#22c55e;text-decoration:none}
-        .et-auth-footer a:hover{color:#4ade80}
-        /* OTP step */
-        .et-otp-wrap{display:flex;flex-direction:column;align-items:center;gap:20px;padding:8px 0}
-        .et-otp-hint{font-size:12px;color:#4ade8066;text-align:center;line-height:1.7;margin:0}
-        .et-otp-hint strong{color:#22c55e88}
-        .et-otp-input{width:180px;padding:14px;background:#060a07;border:1px solid #22c55e44;border-radius:8px;color:#22c55e;font-family:'DM Mono',monospace;font-size:28px;font-weight:700;letter-spacing:.3em;text-align:center;outline:none;transition:border-color .2s,box-shadow .2s}
-        .et-otp-input:focus{border-color:#22c55e88;box-shadow:0 0 0 3px rgba(34,197,94,0.08)}
-        .et-resend-btn{background:none;border:none;font-family:'DM Mono',monospace;font-size:11px;cursor:pointer;letter-spacing:.06em;padding:0;transition:color .2s}
-        .et-back-link{background:none;border:none;font-family:'DM Mono',monospace;font-size:11px;color:#4ade8044;cursor:pointer;letter-spacing:.06em;padding:0;transition:color .2s;display:block;text-align:center;margin-top:16px;width:100%}
-        .et-back-link:hover{color:#4ade80}
-      `}</style>
+    <div className="min-h-screen w-full bg-black font-sans text-white">
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-12 px-6 py-10 lg:flex-row lg:items-center lg:gap-16 lg:px-10">
 
-      <div className="et-auth-page">
-        <div className="et-auth-glow" />
-        <div className="et-auth-card">
-
-          {/* ── Step 1: Registration ── */}
-          {step === "register" && (
-            <>
-              <div className="et-auth-title">Create Account</div>
-              <div className="et-auth-subtitle">START TRACKING YOUR PORTFOLIO</div>
-
-              {(isInvited || sessionStorage.getItem("pending_invite_token")) && (
-                <div className="et-invite-banner">
-                  🎉 You've been invited to join a team — create your account to accept
-                </div>
-              )}
-
-              <form onSubmit={handleRegister} noValidate>
-                <label className="et-auth-label" htmlFor="signup-name">FULL NAME</label>
-                <div className="et-input-wrap">
-                  <input
-                    id="signup-name"
-                    className="et-auth-input no-icon"
-                    type="text"
-                    placeholder="Your name"
-                    value={fullName}
-                    autoComplete="name"
-                    onChange={e => { setFullName(e.target.value); setError(""); }}
-                  />
-                </div>
-
-                <label className="et-auth-label" htmlFor="signup-email">EMAIL ADDRESS</label>
-                <div className="et-input-wrap">
-                  <input
-                    id="signup-email"
-                    className="et-auth-input no-icon"
-                    type="email"
-                    placeholder="you@company.com"
-                    value={email}
-                    autoComplete="email"
-                    onChange={e => { setEmail(e.target.value); setError(""); }}
-                  />
-                </div>
-
-                <label className="et-auth-label" htmlFor="signup-password">PASSWORD</label>
-                <div className="et-input-wrap">
-                  <input
-                    id="signup-password"
-                    className="et-auth-input"
-                    type={showPassword ? "text" : "password"}
-                    placeholder="Min. 8 characters"
-                    value={password}
-                    autoComplete="new-password"
-                    onChange={e => { setPassword(e.target.value); setError(""); }}
-                  />
-                  <button
-                    type="button"
-                    className="et-eye-btn"
-                    onClick={() => setShowPassword(v => !v)}
-                    aria-label={showPassword ? "Hide password" : "Show password"}
-                  >
-                    {showPassword ? <FaEyeSlash size={14} /> : <FaEye size={14} />}
-                  </button>
-                </div>
-
-                {password && (
-                  <div className="et-strength-wrap">
-                    <div className="et-strength">
-                      {[1,2,3,4].map(i => (
-                        <div key={i} className="et-strength-bar" style={{
-                          background: strengthLevel >= i ? strengthColor : "#1f2937",
-                        }}/>
-                      ))}
-                    </div>
-                    <span className="et-strength-label" style={{ color: strengthColor }}>
-                      {strengthLabel}
-                    </span>
-                  </div>
-                )}
-
-                <label className="et-auth-label" htmlFor="signup-confirm">CONFIRM PASSWORD</label>
-                <div className="et-input-wrap">
-                  <input
-                    id="signup-confirm"
-                    className={`et-auth-input${confirm && confirm !== password ? " invalid" : ""}`}
-                    type={showConfirm ? "text" : "password"}
-                    placeholder="Re-enter password"
-                    value={confirm}
-                    autoComplete="new-password"
-                    onChange={e => { setConfirm(e.target.value); setError(""); }}
-                    onPaste={e => e.preventDefault()}
-                  />
-                  <button
-                    type="button"
-                    className="et-eye-btn"
-                    onClick={() => setShowConfirm(v => !v)}
-                    aria-label={showConfirm ? "Hide password" : "Show password"}
-                  >
-                    {showConfirm ? <FaEyeSlash size={14} /> : <FaEye size={14} />}
-                  </button>
-                </div>
-
-                {error && (
-                  <div className="et-auth-error" role="alert" aria-live="assertive">
-                    {error}
-                  </div>
-                )}
-
-                <button className="et-auth-btn" type="submit" disabled={loading}>
-                  {activeMethod === "email" ? "CREATING ACCOUNT..." : "CREATE ACCOUNT →"}
-                </button>
-              </form>
-
-              <div className="et-auth-divider"><span>OR CONTINUE WITH</span></div>
-
-              <button
-                className="et-social-btn"
-                type="button"
-                onClick={() => handleSocialSignup(googleProvider, "Google")}
-                disabled={loading}
-              >
-                <FaGoogle size={14} color="#4ade80" />
-                {activeMethod === "google" ? "CONNECTING..." : "SIGN UP WITH GOOGLE"}
-              </button>
-              <button
-                className="et-social-btn"
-                type="button"
-                onClick={() => handleSocialSignup(facebookProvider, "Facebook")}
-                disabled={loading}
-              >
-                <FaFacebook size={14} color="#4ade80" />
-                {activeMethod === "facebook" ? "CONNECTING..." : "SIGN UP WITH FACEBOOK"}
-              </button>
-
-              <div className="et-auth-footer">
-                Already have an account? <Link to="/login">Sign in</Link>
+        {/* ============================= LEFT PANEL ============================= */}
+        <div className="w-full lg:w-1/2">
+          {/* Logo */}
+          <div className="mb-8 flex items-center gap-3">
+            <img
+              src={logoImage}
+              alt="EtherTrack Technologies"
+              className="h-10 w-10 shrink-0 object-contain"
+            />
+            <div className="leading-tight">
+              <div className="text-xl font-extrabold tracking-tight">
+                <span className="text-white">ETHER</span>
+                <span className="text-green-500">TRACK</span>
               </div>
-            </>
-          )}
+              <div className="text-xs text-white/40">
+                Track. Tokenize. Trade.
+              </div>
+            </div>
+          </div>
 
-          {/* ── Step 2: OTP verification ── */}
-          {step === "verify" && (
-            <>
-              <div className="et-auth-title">Verify Email</div>
-              <div className="et-auth-subtitle">ENTER YOUR 6-DIGIT CODE</div>
+          {/* Hero */}
+          <h1 className="text-4xl font-bold leading-tight sm:text-5xl">
+            <span className="block text-white">Track Carbon.</span>
+            <span className="block text-white">Tokenize Trust.</span>
+            <span className="block text-green-500">Trade Sustainably.</span>
+          </h1>
 
-              <form onSubmit={handleVerifyOtp} noValidate>
-                <div className="et-otp-wrap">
-                  <p className="et-otp-hint">
-                    We sent a code to <strong>{email}</strong>.<br />
-                    It expires in 10 minutes. Check spam if you don't see it.
+          <p className="mt-5 max-w-md text-base leading-relaxed text-white/50">
+            The all-in-one platform for carbon accounting, credit tokenization
+            and compliant trading.
+          </p>
+
+          {/* Feature row */}
+          <div className="mt-8 grid grid-cols-3 gap-6">
+            {FEATURES.map(({ icon: Icon, title, subtitle }) => (
+              <div key={title} className="flex flex-col gap-2">
+                <Icon className="h-6 w-6 text-green-500" strokeWidth={1.75} />
+                <div className="text-sm font-semibold text-white">{title}</div>
+                <div className="text-xs text-white/40">{subtitle}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Globe */}
+          <div className="mt-10">
+            <GlobeVisual />
+            <div className="mt-3 flex items-center gap-2 text-sm text-white/50">
+              <Leaf className="h-4 w-4 text-green-500/80" />
+              Building a sustainable future, <span className="text-green-500">together.</span>
+            </div>
+          </div>
+        </div>
+
+        {/* ============================= RIGHT PANEL ============================= */}
+        <div className="w-full lg:w-1/2">
+          <motion.div
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4 }}
+            className="relative mx-auto w-full max-w-md rounded-3xl border border-white/10
+                       bg-neutral-950 p-8 shadow-2xl"
+          >
+            <AnimatePresence mode="wait">
+              {/* ── Step 1: Registration ── */}
+              {step === "register" && (
+                <motion.div key="register" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                  {/* Secure badge */}
+                  <div className="absolute right-8 top-8 flex items-center gap-1.5 rounded-full border border-green-500/30
+                                  bg-green-500/10 px-3 py-1 text-xs font-medium text-green-400">
+                    <ShieldCheck className="h-3.5 w-3.5" />
+                    Secure &amp; Compliant
+                  </div>
+
+                  <h2 className="text-2xl font-bold tracking-tight">
+                    Create <span className="text-green-500">your account</span>
+                  </h2>
+                  <p className="mb-6 mt-1 text-sm text-white/50">
+                    Join EtherTrack and build a sustainable future.
                   </p>
-                  <input
-                    className="et-otp-input"
-                    type="text"
-                    inputMode="numeric"
-                    pattern="\d{6}"
-                    maxLength={6}
-                    placeholder="──────"
-                    value={otp}
-                    autoFocus
-                    onChange={handleOtpChange}
-                    aria-label="6-digit verification code"
-                  />
-                  <p style={{ fontSize: "11px", color: "#4ade8044", margin: 0 }}>
-                    {resendTimer > 0 ? (
-                      <span>Resend in {resendTimer}s</span>
-                    ) : (
+
+                  {(isInvited || sessionStorage.getItem("pending_invite_token")) && (
+                    <div className="mb-4 rounded-lg border border-green-500/30 bg-green-500/10 px-4 py-2.5 text-center text-sm leading-relaxed text-green-400">
+                      🎉 You&apos;ve been invited to join a team — create your account to accept
+                    </div>
+                  )}
+
+                  <form onSubmit={handleRegister} noValidate>
+                    <Field icon={User} label="Full Name">
+                      <input
+                        id="signup-name"
+                        className={inputBase}
+                        type="text"
+                        placeholder="Enter your full name"
+                        value={fullName}
+                        autoComplete="name"
+                        onChange={e => { setFullName(e.target.value); setError(""); }}
+                      />
+                    </Field>
+
+                    <Field icon={Mail} label="Business Email">
+                      <input
+                        id="signup-email"
+                        className={inputBase}
+                        type="email"
+                        placeholder="Enter your business email"
+                        value={email}
+                        autoComplete="email"
+                        onChange={e => { setEmail(e.target.value); setError(""); }}
+                      />
+                    </Field>
+
+                    <Field icon={Lock} label="Password">
+                      <input
+                        id="signup-password"
+                        className={inputBase}
+                        type={showPassword ? "text" : "password"}
+                        placeholder="Create a strong password"
+                        value={password}
+                        autoComplete="new-password"
+                        onChange={e => { setPassword(e.target.value); setError(""); }}
+                      />
                       <button
                         type="button"
-                        className="et-resend-btn"
-                        style={{ color: "#22c55e88" }}
-                        onClick={handleResendOtp}
+                        onClick={() => setShowPassword(v => !v)}
+                        aria-label={showPassword ? "Hide password" : "Show password"}
+                        className="absolute right-3.5 top-1/2 -translate-y-1/2 text-white/30 transition-colors hover:text-white/70"
+                        tabIndex={-1}
                       >
-                        Resend code →
+                        {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                       </button>
+                    </Field>
+
+                    <Field icon={Lock} label="Confirm Password">
+                      <input
+                        id="signup-confirm"
+                        className={`${inputBase} ${confirm && confirm !== password ? "border-red-500/50 focus:border-red-500" : ""}`}
+                        type={showConfirm ? "text" : "password"}
+                        placeholder="Re-enter your password"
+                        value={confirm}
+                        autoComplete="new-password"
+                        onChange={e => { setConfirm(e.target.value); setError(""); }}
+                        onPaste={e => e.preventDefault()}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowConfirm(v => !v)}
+                        aria-label={showConfirm ? "Hide password" : "Show password"}
+                        className="absolute right-3.5 top-1/2 -translate-y-1/2 text-white/30 transition-colors hover:text-white/70"
+                        tabIndex={-1}
+                      >
+                        {showConfirm ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </Field>
+
+                    {/* Password requirement checklist */}
+                    {password && (
+                      <div className="mb-5 flex flex-wrap gap-x-5 gap-y-1.5">
+                        {strengthChecks.map(({ label, pass }) => (
+                          <div key={label} className="flex items-center gap-1.5 text-xs">
+                            {pass ? (
+                              <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-green-500" />
+                            ) : (
+                              <Circle className="h-3.5 w-3.5 shrink-0 text-white/20" />
+                            )}
+                            <span className={pass ? "text-white/70" : "text-white/35"}>{label}</span>
+                          </div>
+                        ))}
+                      </div>
                     )}
-                  </p>
-                </div>
 
-                {error && (
-                  <div className="et-auth-error" role="alert" aria-live="assertive">
-                    {error}
+                    <ErrorBanner error={error} />
+
+                    <div className="mt-2">
+                      <PrimaryButton type="submit" loading={loading && activeMethod === "email"} loadingLabel="Creating account…">
+                        Create Account
+                      </PrimaryButton>
+                    </div>
+                  </form>
+
+                  <div className="mt-6 flex items-center gap-4">
+                    <div className="h-px flex-1 bg-white/10" />
+                    <span className="text-xs text-white/35">OR CONTINUE WITH</span>
+                    <div className="h-px flex-1 bg-white/10" />
                   </div>
-                )}
 
-                <button
-                  className="et-auth-btn"
-                  type="submit"
-                  disabled={loading || otp.length !== 6}
-                >
-                  {activeMethod === "verify" ? "VERIFYING..." : "VERIFY & SIGN IN →"}
-                </button>
-              </form>
+                  <SocialButton
+                    icon={<FaGoogle size={14} color="#4ADE80" />}
+                    onClick={() => handleSocialSignup(googleProvider, "Google")}
+                    disabled={loading}
+                  >
+                    {activeMethod === "google" ? "Connecting…" : "Sign up with Google"}
+                  </SocialButton>
+                  <SocialButton
+                    icon={<FaFacebook size={14} color="#4ADE80" />}
+                    onClick={() => handleSocialSignup(facebookProvider, "Facebook")}
+                    disabled={loading}
+                  >
+                    {activeMethod === "facebook" ? "Connecting…" : "Sign up with Facebook"}
+                  </SocialButton>
 
-              <button
-                className="et-back-link"
-                type="button"
-                onClick={() => { setStep("register"); setOtp(""); setError(""); }}
-              >
-                ← Back to sign up
-              </button>
-            </>
-          )}
+                  <p className="mt-6 text-center text-sm text-white/50">
+                    Already have an account?{" "}
+                    <Link to="/login" className="inline-flex items-center gap-1 font-medium text-green-500 hover:text-green-400">
+                      Sign in <ArrowRight className="h-3 w-3" />
+                    </Link>
+                  </p>
 
+                  <div className="mt-4 flex items-center justify-center gap-1.5 text-xs text-white/30">
+                    <Lock className="h-3 w-3" />
+                    Your data is encrypted and secure with us.
+                  </div>
+                </motion.div>
+              )}
+
+              {/* ── Step 2: OTP verification ── */}
+              {step === "verify" && (
+                <motion.div key="verify" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                  <h2 className="text-2xl font-bold tracking-tight">
+                    Verify <span className="text-green-500">your email</span>
+                  </h2>
+                  <p className="mb-6 mt-1 text-sm text-white/50">
+                    Enter your 6-digit code
+                  </p>
+
+                  <form onSubmit={handleVerifyOtp} noValidate>
+                    <div className="flex flex-col items-center gap-5 py-1">
+                      <p className="text-center text-sm leading-relaxed text-white/50">
+                        We sent a code to <span className="text-green-400">{email}</span>.
+                        <br />
+                        It expires in 10 minutes. Check spam if you don&apos;t see it.
+                      </p>
+
+                      <input
+                        className="h-16 w-52 rounded-xl border border-green-500/40 bg-black/30
+                                   text-center text-2xl font-bold tracking-widest text-green-400 outline-none
+                                   transition-colors duration-200 focus:border-green-500"
+                        type="text"
+                        inputMode="numeric"
+                        pattern="\d{6}"
+                        maxLength={6}
+                        placeholder="——————"
+                        value={otp}
+                        autoFocus
+                        onChange={handleOtpChange}
+                        aria-label="6-digit verification code"
+                      />
+
+                      <p className="text-xs text-white/35">
+                        {resendTimer > 0 ? (
+                          <span>Resend in {resendTimer}s</span>
+                        ) : (
+                          <button
+                            type="button"
+                            className="font-medium text-green-500 transition-colors hover:text-green-400"
+                            onClick={handleResendOtp}
+                          >
+                            Resend code →
+                          </button>
+                        )}
+                      </p>
+                    </div>
+
+                    <ErrorBanner error={error} />
+
+                    <div className="mt-6">
+                      <PrimaryButton type="submit" loading={loading && activeMethod === "verify"} loadingLabel="Verifying…" disabled={loading || otp.length !== 6}>
+                        Verify &amp; Sign In
+                      </PrimaryButton>
+                    </div>
+                  </form>
+
+                  <button
+                    type="button"
+                    onClick={() => { setStep("register"); setOtp(""); setError(""); }}
+                    className="mt-4 w-full text-center text-sm text-white/40 transition-colors hover:text-white"
+                  >
+                    ← Back to sign up
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </motion.div>
         </div>
       </div>
-    </>
+    </div>
   );
 };
 

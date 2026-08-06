@@ -16,14 +16,6 @@
 // set of source IPs (e.g. your etpl_ops server's static egress IP on Render).
 // Leave it unset locally — it's skipped entirely when not configured, so
 // localhost dev keeps working with just the token.
-//
-// [CORP-WRITE] requireCorporateWriteToken below is a SEPARATE function using
-// a SEPARATE token (OPS_SYNC_CORPORATE_WRITE_TOKEN) — added for
-// routes/opsIntegrationCorporate.js, which (unlike everything else this
-// middleware has ever guarded) performs real writes: Corporate subscription
-// activation/renewal. requireServiceToken() itself is untouched below —
-// the read-only sync in routes/opsIntegration.js keeps working exactly as
-// it always has, with its own token, unaffected by anything below.
 
 const crypto = require('crypto');
 
@@ -80,41 +72,44 @@ function requireServiceToken(req, res, next) {
   next();
 }
 
-// [CORP-WRITE] Same shape as requireServiceToken above, but checked against
-// a completely separate secret (OPS_SYNC_CORPORATE_WRITE_TOKEN) and a
-// separate optional IP allowlist (OPS_SYNC_CORPORATE_ALLOWED_IPS). A leaked
-// OPS_SYNC_SERVICE_TOKEN (read-only) can never satisfy this check, and vice
-// versa — the two integration surfaces don't share a trust boundary even
-// though they're both "the ERP calling in".
-function requireCorporateWriteToken(req, res, next) {
-  const configured = process.env.OPS_SYNC_CORPORATE_WRITE_TOKEN;
-  if (!configured) {
-    console.error('[serviceAuth] OPS_SYNC_CORPORATE_WRITE_TOKEN is not set — refusing all corporate-write service calls');
-    return res.status(503).json({ error: 'Corporate write integration not configured' });
-  }
-
-  const provided = req.headers['x-service-token'];
-  if (!provided || !timingSafeEqual(provided, configured)) {
-    console.warn(`[serviceAuth] rejected corporate-write service call from ${getClientIp(req)} — bad or missing token`);
-    return res.status(401).json({ error: 'Invalid or missing service token' });
-  }
-
-  const allowlist = (process.env.OPS_SYNC_CORPORATE_ALLOWED_IPS || '')
-    .split(',')
-    .map((ip) => ip.trim())
-    .filter(Boolean);
-
-  if (allowlist.length > 0) {
-    const clientIp = getClientIp(req);
-    const normalizedClientIp = clientIp?.replace('::ffff:', '');
-    if (!allowlist.includes(normalizedClientIp)) {
-      console.warn(`[serviceAuth] rejected corporate-write service call — IP ${normalizedClientIp} not in allowlist`);
-      return res.status(403).json({ error: 'Source not permitted' });
+// requireServiceTokenFor(tokenEnvName, ipsEnvName?) — factory for the
+// additional scoped WRITE surfaces (corporate activation, coupons, pricing).
+// Same blast-radius-isolation reasoning as the corporate-write token already
+// documented in services/platformClient.js on the ERP side: each write
+// surface gets its OWN token under its OWN env var, so a leak of one never
+// grants access to another, and none of them grant access to the read-only
+// OPS_SYNC_SERVICE_TOKEN surface (or vice versa).
+function requireServiceTokenFor(tokenEnvName, ipsEnvName = null) {
+  return function (req, res, next) {
+    const configured = process.env[tokenEnvName];
+    if (!configured) {
+      console.error(`[serviceAuth] ${tokenEnvName} is not set — refusing all calls to this surface`);
+      return res.status(503).json({ error: 'Service integration not configured' });
     }
-  }
 
-  req.isServiceCall = true;
-  next();
+    const provided = req.headers['x-service-token'];
+    if (!provided || !timingSafeEqual(provided, configured)) {
+      console.warn(`[serviceAuth] rejected ${tokenEnvName} call from ${getClientIp(req)} — bad or missing token`);
+      return res.status(401).json({ error: 'Invalid or missing service token' });
+    }
+
+    const allowlist = (process.env[ipsEnvName || `${tokenEnvName}_ALLOWED_IPS`] || '')
+      .split(',')
+      .map((ip) => ip.trim())
+      .filter(Boolean);
+
+    if (allowlist.length > 0) {
+      const clientIp = getClientIp(req);
+      const normalizedClientIp = clientIp?.replace('::ffff:', '');
+      if (!allowlist.includes(normalizedClientIp)) {
+        console.warn(`[serviceAuth] rejected ${tokenEnvName} call — IP ${normalizedClientIp} not in allowlist`);
+        return res.status(403).json({ error: 'Source not permitted' });
+      }
+    }
+
+    req.isServiceCall = true;
+    next();
+  };
 }
 
-module.exports = { requireServiceToken, requireCorporateWriteToken };
+module.exports = { requireServiceToken, requireServiceTokenFor };

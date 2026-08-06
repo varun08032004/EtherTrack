@@ -28,9 +28,10 @@ const {
   sendAdminMessageToUserEmail, sendWalletUpdatedEmail, sendCorporatePlanActivatedEmail,
   sendPlatformAnnouncementEmail,
 } = require('../services/email');
-const { mintApprovedCredit, verifyKYCOnChain, linkWalletOnChain } = require('../services/minter');
+const { mintApprovedCredit, verifyKYCOnChain } = require('../services/minter');
 const { createNotification } = require('./notifications');
 const { getAdapter } = require('../services/registryAdapters');
+const { activateCorporatePlan, renewCorporatePlan } = require('../services/corporateActivation');
 
 const isAdmin = [authenticate, requireRole('admin')];
 
@@ -146,23 +147,16 @@ router.post('/kyc/:id/approve', isAdmin, async (req, res) => {
       'Your KYC has been approved. You now have full access to trading, portfolio, and emission tracking.',
       '/profile', {});
 
-    // Identity-keyed on-chain registration — fires unconditionally,
-    // regardless of whether this user has a wallet bound yet. Fixes the
-    // historical bug where this silently no-op'd if wallet_address was
-    // NULL at approval time, leaving DB verified but chain unregistered.
-    setImmediate(async () => {
-      try {
-        const r = await verifyKYCOnChain(sub[0].user_id, sub[0].kyc_data_hash);
-        if (!r.skipped) await auditLog(req.user.id, 'KYC_ONCHAIN_REGISTERED', sub[0].user_id, `TX: ${r.txHash}`);
-
-        if (usr[0]?.wallet_address) {
-          const l = await linkWalletOnChain(sub[0].user_id, usr[0].wallet_address);
-          if (!l.skipped) await auditLog(req.user.id, 'KYC_WALLET_LINKED', sub[0].user_id, `TX: ${l.txHash}`);
+    if (usr[0]?.wallet_address) {
+      setImmediate(async () => {
+        try {
+          const r = await verifyKYCOnChain(usr[0].wallet_address, sub[0].kyc_data_hash);
+          if (!r.skipped) await auditLog(req.user.id, 'KYC_ONCHAIN_REGISTERED', sub[0].user_id, `TX: ${r.txHash}`);
+        } catch (e) {
+          await auditLog(req.user.id, 'KYC_ONCHAIN_FAILED', sub[0].user_id, e.message).catch(() => {});
         }
-      } catch (e) {
-        await auditLog(req.user.id, 'KYC_ONCHAIN_FAILED', sub[0].user_id, e.message).catch(() => {});
-      }
-    });
+      });
+    }
 
     try {
       await sendKycApprovedEmail(usr[0].email, {
@@ -223,7 +217,6 @@ router.post('/kyc/bulk-approve', isAdmin, async (req, res) => {
     return res.status(400).json({ error: 'Max 200 IDs per bulk operation' });
 
   let approved = 0, failed = 0, errors = [];
-  const onChainQueue = []; // { userId, kycDataHash, walletAddress }
   for (const id of ids) {
     try {
       const { rows: sub } = await query(
@@ -244,33 +237,8 @@ router.post('/kyc/bulk-approve', isAdmin, async (req, res) => {
       await createNotification(sub[0].user_id, 'KYC', '✅ KYC Verified', 'Your KYC has been approved.', '/portfolio', {});
       await auditLog(req.user.id, 'KYC_BULK_APPROVED', sub[0].user_id, `Bulk approve — submission ${id}`);
       approved++;
-
-      const { rows: usr } = await query('SELECT wallet_address FROM users WHERE id=$1', [sub[0].user_id]);
-      onChainQueue.push({ userId: sub[0].user_id, kycDataHash: sub[0].kyc_data_hash, walletAddress: usr[0]?.wallet_address });
     } catch (e) { failed++; errors.push(`${id}: ${e.message}`); }
   }
-
-  // On-chain writes go through the SAME minter wallet as every other
-  // operator call — must run sequentially (not Promise.all) or concurrent
-  // txs will race on nonce and fail. Fire-and-forget so the bulk-approve
-  // response isn't blocked on N on-chain confirmations.
-  if (onChainQueue.length) {
-    setImmediate(async () => {
-      for (const { userId, kycDataHash, walletAddress } of onChainQueue) {
-        try {
-          const r = await verifyKYCOnChain(userId, kycDataHash);
-          if (!r.skipped) await auditLog(req.user.id, 'KYC_ONCHAIN_REGISTERED', userId, `Bulk — TX: ${r.txHash}`);
-          if (walletAddress) {
-            const l = await linkWalletOnChain(userId, walletAddress);
-            if (!l.skipped) await auditLog(req.user.id, 'KYC_WALLET_LINKED', userId, `Bulk — TX: ${l.txHash}`);
-          }
-        } catch (e) {
-          await auditLog(req.user.id, 'KYC_ONCHAIN_FAILED', userId, `Bulk — ${e.message}`).catch(() => {});
-        }
-      }
-    });
-  }
-
   res.json({ success: true, approved, failed, errors });
 });
 
@@ -1012,106 +980,22 @@ router.post('/users/:id/activate-corporate', isAdmin, async (req, res) => {
   const { id } = req.params;
   const { cycle = 'annual', seats = null, customPriceINR = 0, notes = '', renewalMonths = null } = req.body;
 
-  if (!['monthly', 'annual'].includes(cycle))
-    return res.status(400).json({ error: 'cycle must be monthly or annual' });
-  if (seats !== null && (!Number.isInteger(seats) || seats < 1))
-    return res.status(400).json({ error: 'seats must be a positive integer or null (unlimited)' });
-  const priceINR = parseFloat(customPriceINR) || 0;
-  if (priceINR < 0)
-    return res.status(400).json({ error: 'customPriceINR cannot be negative' });
-
   try {
-    const { rows: userRows } = await query(
-      `SELECT id, email, full_name, company_name, kyc_verified,
-              subscription_plan, subscription_cycle, org_id
-       FROM users WHERE id = $1`, [id]
-    );
-    if (!userRows.length) return res.status(404).json({ error: 'User not found' });
-    const user = userRows[0];
-
-    const renewalDate = new Date();
-    if (renewalMonths && Number.isInteger(parseInt(renewalMonths)) && parseInt(renewalMonths) > 0) {
-      renewalDate.setMonth(renewalDate.getMonth() + parseInt(renewalMonths));
-    } else if (cycle === 'annual') {
-      renewalDate.setFullYear(renewalDate.getFullYear() + 1);
-    } else {
-      renewalDate.setMonth(renewalDate.getMonth() + 1);
-    }
-
-    const customPricePaise = Math.round(priceINR * 100);
-    const idempotencyKey   = `corporate_sales_${id}_${Date.now()}`;
-
-    await withTransaction(async (client) => {
-      const ORDER   = ['free', 'starter', 'growth', 'corporate'];
-      const fromIdx = ORDER.indexOf(user.subscription_plan || 'free');
-      const event   = fromIdx < ORDER.indexOf('corporate') ? 'upgraded' : 'activated';
-
-      const { rows: [pay] } = await client.query(
-        `INSERT INTO subscription_payments
-           (user_id, plan, cycle, amount_paise, gst_amount_paise, total_amount_paise,
-            pay_method, status, idempotency_key, renewal_date, amount, notes)
-         VALUES ($1,'corporate',$2,$3,0,$3,'sales','success',$4,$5,$6,$7)
-         RETURNING id`,
-        [id, cycle, customPricePaise, idempotencyKey, renewalDate, priceINR, notes || null]
-      );
-
-      await client.query(
-        `UPDATE users SET
-           subscription_plan         = 'corporate',
-           subscription_cycle        = $1,
-           subscription_renewal_date = $2,
-           subscription_activated_at = COALESCE(subscription_activated_at, NOW()),
-           plan_selected             = TRUE,
-           corporate_managed         = TRUE,
-           updated_at                = NOW()
-         WHERE id = $3`,
-        [cycle, renewalDate, id]
-      );
-
-      await client.query(
-        `INSERT INTO subscription_history
-           (user_id, event_type, from_plan, to_plan, from_cycle, to_cycle,
-            payment_id, amount_paise, gst_amount_paise, renewal_date, triggered_by, notes)
-         VALUES ($1,$2,$3,'corporate',$4,$5,$6,$7,0,$8,'admin',$9)`,
-        [id, event, user.subscription_plan || 'free', user.subscription_cycle || null,
-         cycle, pay.id, customPricePaise, renewalDate, notes || null]
-      );
-
-      const seatLimit = (seats !== null && seats > 0) ? seats : 999;
-      await client.query(
-        `UPDATE organisations SET seats_limit=$1, updated_at=NOW() WHERE owner_id=$2`,
-        [seatLimit, id]
-      );
-    });
-
-    await invalidateUserCache(id);
-    await createNotification(id, 'WALLET', '🏢 Corporate Plan Activated',
-      `Your Corporate plan has been activated by the EtherTrack team.${notes ? ` Note: ${notes}` : ''}`,
-      '/billing', { plan: 'corporate', cycle }).catch(() => {});
-
-    const { rows: [freshUser] } = await query('SELECT email, full_name FROM users WHERE id=$1', [id]);
-    setImmediate(async () => {
-      try {
-        const seatDisplay = (seats !== null && seats > 0) ? seats : 'Unlimited';
-        await sendCorporatePlanActivatedEmail(freshUser.email, {
-          name: freshUser.full_name,
-          seatDisplay,
-          cycle,
-          renewalDateLabel: renewalDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' }),
-          priceINR,
-          notes,
-          billingUrl: `${process.env.FRONTEND_URL}/billing`,
-        });
-      } catch (e) { console.warn('[admin/activate-corporate] email failed:', e.message); }
+    const result = await activateCorporatePlan({
+      userId: id, cycle, seats, customPriceINR, notes, renewalMonths, actorLabel: 'admin',
     });
 
     await auditLog(req.user.id, 'CORPORATE_PLAN_ACTIVATED', id,
-      `Cycle: ${cycle} · Seats: ${seats ?? 'unlimited'} · Price: ₹${priceINR} · ${notes || ''}`);
+      `Cycle: ${cycle} · Seats: ${seats ?? 'unlimited'} · Price: ₹${result.customPriceINR} · ${notes || ''}`);
 
-    return res.json({ ok: true, userId: id, plan: 'corporate', cycle, seats: seats ?? 'unlimited', renewalDate: renewalDate.toISOString(), customPriceINR: priceINR });
+    return res.json({
+      ok: true, userId: id, plan: 'corporate', cycle,
+      seats: result.seats, renewalDate: result.renewalDate.toISOString(),
+      customPriceINR: result.customPriceINR,
+    });
   } catch (e) {
     console.error('[admin/activate-corporate]', e.message);
-    return res.status(500).json({ error: 'Corporate activation failed', detail: e.message });
+    return res.status(e.status || 500).json({ error: e.status ? e.message : 'Corporate activation failed', detail: e.message });
   }
 });
 
@@ -1119,35 +1003,14 @@ router.post('/users/:id/activate-corporate', isAdmin, async (req, res) => {
 router.patch('/users/:id/corporate-renewal', isAdmin, async (req, res) => {
   const { id } = req.params;
   const { renewalDate, seats, notes } = req.body;
-  if (!renewalDate) return res.status(400).json({ error: 'renewalDate required (ISO string or YYYY-MM-DD)' });
-  const parsed = new Date(renewalDate);
-  if (isNaN(parsed.getTime())) return res.status(400).json({ error: 'Invalid renewalDate' });
-  if (parsed < new Date()) return res.status(400).json({ error: 'renewalDate must be in the future' });
   try {
-    const { rows } = await query(`SELECT subscription_plan, email, full_name FROM users WHERE id=$1`, [id]);
-    if (!rows.length) return res.status(404).json({ error: 'User not found' });
-    if (rows[0].subscription_plan !== 'corporate')
-      return res.status(400).json({ error: 'User is not on Corporate plan — activate first' });
-
-    await query(
-      `UPDATE users SET subscription_renewal_date=$1, corporate_managed=TRUE, updated_at=NOW() WHERE id=$2`,
-      [parsed, id]
-    );
-    if (seats != null) {
-      const seatLimit = seats === 'unlimited' ? 999 : parseInt(seats);
-      if (!isNaN(seatLimit) && seatLimit > 0)
-        await query(`UPDATE organisations SET seats_limit=$1, updated_at=NOW() WHERE owner_id=$2`, [seatLimit, id]);
-    }
-    await invalidateUserCache(id);
+    const result = await renewCorporatePlan({ userId: id, renewalDate, seats, notes });
     await auditLog(req.user.id, 'CORPORATE_RENEWAL_UPDATED', id,
-      `New renewal: ${parsed.toISOString()} · Seats: ${seats ?? 'unchanged'} · ${notes || ''}`);
-    await createNotification(id, 'WALLET', '📅 Corporate Plan Renewed',
-      `Your Corporate plan has been renewed until ${parsed.toLocaleDateString('en-IN')}.`,
-      '/billing', { plan: 'corporate' }).catch(() => {});
-    res.json({ ok: true, renewalDate: parsed.toISOString() });
+      `New renewal: ${result.renewalDate.toISOString()} · Seats: ${seats ?? 'unchanged'} · ${notes || ''}`);
+    res.json({ ok: true, renewalDate: result.renewalDate.toISOString() });
   } catch (e) {
     console.error('[admin/corporate-renewal]', e.message);
-    res.status(500).json({ error: 'Renewal update failed' });
+    res.status(e.status || 500).json({ error: e.status ? e.message : 'Renewal update failed' });
   }
 });
 
