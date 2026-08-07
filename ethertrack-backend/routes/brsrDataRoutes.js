@@ -59,6 +59,7 @@
 const express  = require('express');
 const { Pool } = require('pg');
 const { authenticate } = require('../middleware/auth');
+const { hasPermission } = require('../middleware/rbac');
 
 const router = express.Router();
 
@@ -77,7 +78,22 @@ const parseYear = (raw) => {
   return Number.isFinite(y) && y > 2000 && y < 2100 ? y : null;
 };
 
-const getOrgId = (req) => req.user?.id || null;
+// Section A/B/principles are keyed by org_id — for business accounts this
+// resolves to the shared org scope (routes/org.js), so every team member
+// sees and edits the SAME BRSR filing. Individual accounts (no org) keep
+// today's behaviour of a scope private to themselves.
+// NOTE: brsr_environmental (P6) has no org_id column — it stays scoped to
+// req.user.id specifically wherever it's queried below, never to orgId.
+const getOrgId = (req) => req.user?.org_id || req.user?.id || null;
+
+// reports:read / reports:generate mirror the write/read split used for the
+// emissions ledger (owner/admin/manager write, +viewer/auditor read-only).
+// Individuals (no org) are unrestricted on their own data, same as before.
+const canAccessBrsr = (req, action) => {
+  if (!req.user.org_id) return true;
+  const permission = action === 'write' ? 'reports:generate' : 'reports:read';
+  return hasPermission(req.user.team_role || 'viewer', permission);
+};
 
 const dbErr = (res, ctx, err) => {
   console.error(`[brsrData/${ctx}]`, err?.message || err);
@@ -117,6 +133,7 @@ router.use((req, res, next) => {
 router.get('/section-a', async (req, res) => {
   const orgId = getOrgId(req);
   if (!orgId) return res.status(401).json({ error: 'Not authenticated' });
+  if (!canAccessBrsr(req, 'read')) return res.status(403).json({ error: 'Your role does not have access to BRSR data' });
   const year = parseYear(req.query.year);
   if (!year) return res.status(400).json({ error: 'Valid year required (e.g. ?year=2025)' });
 
@@ -134,6 +151,7 @@ router.get('/section-a', async (req, res) => {
 router.post('/section-a', async (req, res) => {
   const orgId = getOrgId(req);
   if (!orgId) return res.status(401).json({ error: 'Not authenticated' });
+  if (!canAccessBrsr(req, 'write')) return res.status(403).json({ error: 'Your role cannot edit BRSR data — ask an org admin or manager' });
   const { year, entity, business, workforce, structure, grievance, _import } = req.body || {};
   const validYear = parseYear(year);
   if (!validYear) return res.status(400).json({ error: 'Valid year is required' });
@@ -190,6 +208,7 @@ router.post('/section-a', async (req, res) => {
 router.get('/section-b', async (req, res) => {
   const orgId = getOrgId(req);
   if (!orgId) return res.status(401).json({ error: 'Not authenticated' });
+  if (!canAccessBrsr(req, 'read')) return res.status(403).json({ error: 'Your role does not have access to BRSR data' });
   const year = parseYear(req.query.year);
   if (!year) return res.status(400).json({ error: 'Valid year required' });
 
@@ -210,6 +229,7 @@ router.get('/section-b', async (req, res) => {
 router.post('/section-b', async (req, res) => {
   const orgId = getOrgId(req);
   if (!orgId) return res.status(401).json({ error: 'Not authenticated' });
+  if (!canAccessBrsr(req, 'write')) return res.status(403).json({ error: 'Your role cannot edit BRSR data — ask an org admin or manager' });
   const { year, policyMatrix, nonCoverage, governance, _import } = req.body || {};
   const validYear = parseYear(year);
   if (!validYear) return res.status(400).json({ error: 'Valid year is required' });
@@ -257,6 +277,7 @@ router.post('/section-b', async (req, res) => {
 router.get('/principle/:principleId', async (req, res) => {
   const orgId = getOrgId(req);
   if (!orgId) return res.status(401).json({ error: 'Not authenticated' });
+  if (!canAccessBrsr(req, 'read')) return res.status(403).json({ error: 'Your role does not have access to BRSR data' });
   const { principleId } = req.params;
   if (!VALID_PRINCIPLES.includes(principleId))
     return res.status(400).json({ error: `Unknown principle "${principleId}". Valid: ${VALID_PRINCIPLES.join(', ')}` });
@@ -277,6 +298,7 @@ router.get('/principle/:principleId', async (req, res) => {
 router.post('/principle/:principleId', async (req, res) => {
   const orgId = getOrgId(req);
   if (!orgId) return res.status(401).json({ error: 'Not authenticated' });
+  if (!canAccessBrsr(req, 'write')) return res.status(403).json({ error: 'Your role cannot edit BRSR data — ask an org admin or manager' });
   const { principleId } = req.params;
   if (!VALID_PRINCIPLES.includes(principleId))
     return res.status(400).json({ error: `Unknown principle "${principleId}"` });
@@ -319,6 +341,7 @@ router.post('/principle/:principleId', async (req, res) => {
 router.get('/all/:year', async (req, res) => {
   const orgId = getOrgId(req);
   if (!orgId) return res.status(401).json({ error: 'Not authenticated' });
+  if (!canAccessBrsr(req, 'read')) return res.status(403).json({ error: 'Your role does not have access to BRSR data' });
   const year = parseYear(req.params.year);
   if (!year) return res.status(400).json({ error: 'Invalid year' });
 
@@ -342,7 +365,7 @@ router.get('/all/:year', async (req, res) => {
       pool.query(
         `SELECT energy, water, waste FROM brsr_environmental
          WHERE user_id = $1 AND year = $2`,
-        [orgId, year]
+        [req.user.id, year], // P6 has no org_id column — always the requester's own row
       ),
     ]);
 

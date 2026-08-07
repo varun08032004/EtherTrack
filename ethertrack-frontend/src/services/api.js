@@ -52,6 +52,13 @@ async function ensureCsrfCookie() {
   await _csrfPromise;
 }
 
+// Exported so other fetch wrappers (e.g. context/PortfolioContext.js's
+// authFetch, used for the wallet-free listing/delisting/retiring calls)
+// share the SAME cached CSRF token instead of each maintaining their own
+// — two independent caches can drift out of sync with the cookie the
+// backend actually issued.
+export { getCsrfToken, ensureCsrfCookie };
+
 function withTimeout(ms) {
   const ctrl = new AbortController();
   const id   = setTimeout(() => ctrl.abort(), ms);

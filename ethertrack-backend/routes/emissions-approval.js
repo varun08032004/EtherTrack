@@ -126,7 +126,7 @@ router.patch('/activities/:id/state', authenticate, async (req, res) => {
   try {
     // Fetch current record — ownership check happens here
     const { rows: existing } = await query(
-      `SELECT ea.id, ea.user_id, ea.approval_state, ea.activity, ea.quantity, ea.co2e, ea.date,
+      `SELECT ea.id, ea.user_id, ea.org_id, ea.approval_state, ea.activity, ea.quantity, ea.co2e, ea.date,
               u.email AS owner_email, u.full_name AS owner_full_name
        FROM emission_activities ea
        LEFT JOIN users u ON u.id = ea.user_id
@@ -138,15 +138,18 @@ router.patch('/activities/:id/state', authenticate, async (req, res) => {
 
     const record = existing[0];
 
-    // Org-scoped roles (reviewer/approver/admin) may act on org records;
-    // makers may only act on their own. Adjust this check if you have
-    // an org_id column on emission_activities — using user_id ownership
-    // as the baseline here since that's what routes/emissions.js uses.
-    const userRole = await resolveUserRole(req.user.id);
-    const isOwner  = record.user_id === req.user.id;
+    // Org-scoped roles (reviewer/approver/admin) may act on any record that
+    // belongs to their OWN organisation — never another company's. Makers
+    // may only act on records they personally logged.
+    const userRole  = await resolveUserRole(req.user.id);
+    const isOwner   = record.user_id === req.user.id;
+    const isSameOrg = Boolean(record.org_id) && record.org_id === req.user.org_id;
 
     if (!isOwner && userRole === 'maker') {
       return res.status(403).json({ error: 'You can only submit your own records' });
+    }
+    if (!isOwner && userRole !== 'maker' && !isSameOrg) {
+      return res.status(403).json({ error: 'You can only act on records within your organisation' });
     }
 
     const currentState = record.approval_state || 'draft';
@@ -272,7 +275,7 @@ router.post('/activities/:id/adjustment', authenticate, async (req, res) => {
 
   try {
     const { rows: existing } = await query(
-      `SELECT ea.id, ea.user_id, ea.approval_state, ea.quantity, ea.factor, ea.scope, ea.activity,
+      `SELECT ea.id, ea.user_id, ea.org_id, ea.approval_state, ea.quantity, ea.factor, ea.scope, ea.activity,
               u.email AS owner_email, u.full_name AS owner_full_name
        FROM emission_activities ea
        LEFT JOIN users u ON u.id = ea.user_id
@@ -290,9 +293,15 @@ router.post('/activities/:id/adjustment', authenticate, async (req, res) => {
       });
     }
 
-    const userRole = await resolveUserRole(req.user.id);
+    const userRole  = await resolveUserRole(req.user.id);
     if (!['approver', 'admin'].includes(userRole)) {
       return res.status(403).json({ error: 'Only approvers or admins may adjust locked records' });
+    }
+    // Approver/admin may only touch records within their own organisation.
+    const isSameOrg = Boolean(record.org_id) && record.org_id === req.user.org_id;
+    const isOwner    = record.user_id === req.user.id;
+    if (!isOwner && !isSameOrg) {
+      return res.status(403).json({ error: 'You can only adjust records within your organisation' });
     }
 
     await query('BEGIN');
@@ -385,13 +394,14 @@ router.get('/activities/:id/adjustments', authenticate, async (req, res) => {
 
   try {
     const { rows: ownerCheck } = await query(
-      `SELECT user_id FROM emission_activities WHERE id = $1`,
+      `SELECT user_id, org_id FROM emission_activities WHERE id = $1`,
       [id]
     );
     if (!ownerCheck.length) return res.status(404).json({ error: 'Record not found' });
     if (ownerCheck[0].user_id !== req.user.id) {
-      const userRole = await resolveUserRole(req.user.id);
-      if (!['reviewer', 'approver', 'admin'].includes(userRole)) {
+      const isSameOrg = Boolean(ownerCheck[0].org_id) && ownerCheck[0].org_id === req.user.org_id;
+      const userRole  = await resolveUserRole(req.user.id);
+      if (!isSameOrg || !['reviewer', 'approver', 'admin'].includes(userRole)) {
         return res.status(403).json({ error: 'Not authorised to view this record' });
       }
     }

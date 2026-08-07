@@ -28,18 +28,50 @@ const { safeQuery: query } = require('../db/pool');
 const { authenticate }     = require('../middleware/auth');
 const { createNotification } = require('./notifications');
 const { requirePlan }      = require('../middleware/planGate');
+const { hasPermission }    = require('../middleware/rbac');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [FEAT-ORG-LEDGER] Shared org emissions ledger
+// Business accounts (req.user.org_id set) share ONE emissions ledger across
+// their team instead of each member having a siloed set of records. Access
+// is gated by the existing team_role permission map in middleware/rbac.js:
+//   emissions:read   → owner, admin, manager, auditor, viewer (everyone)
+//   emissions:write  → owner, admin, manager
+//   emissions:delete → owner, admin
+// Individual accounts (no org_id) are completely unaffected — they keep
+// today's behaviour of managing only their own records, unrestricted.
+// ─────────────────────────────────────────────────────────────────────────────
+function canAccessEmissions(req, action) {
+  if (!req.user.org_id) return true; // solo individual — always allowed on own data
+  return hasPermission(req.user.team_role || 'viewer', `emissions:${action}`);
+}
+
+// Resolve the WHERE clause + param used to scope a query to "this ledger" —
+// the org's shared ledger for business accounts, or just this person's own
+// records for individuals. Keeps every route consistent in one place.
+function ledgerScope(req, paramIndex = 1) {
+  if (req.user.org_id) {
+    return { clause: `org_id = $${paramIndex}`, value: req.user.org_id };
+  }
+  return { clause: `user_id = $${paramIndex}`, value: req.user.id };
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // [FEAT-SSE] In-memory SSE client registry
 // ─────────────────────────────────────────────────────────────────────────────
 const sseClients = new Map();
 
-function addSseClient(userId, res) {
-  if (!sseClients.has(userId)) sseClients.set(userId, new Set());
-  sseClients.get(userId).add(res);
+function addSseClient(keys, res) {
+  const keyArr = (Array.isArray(keys) ? keys : [keys]).filter(Boolean);
+  for (const k of keyArr) {
+    if (!sseClients.has(k)) sseClients.set(k, new Set());
+    sseClients.get(k).add(res);
+  }
   return () => {
-    sseClients.get(userId)?.delete(res);
-    if (sseClients.get(userId)?.size === 0) sseClients.delete(userId);
+    for (const k of keyArr) {
+      sseClients.get(k)?.delete(res);
+      if (sseClients.get(k)?.size === 0) sseClients.delete(k);
+    }
   };
 }
 
@@ -169,7 +201,10 @@ router.get('/stream', authenticate, (req, res) => {
     try { res.write(':heartbeat\n\n'); } catch (_) { cleanup(); }
   }, 25_000);
 
-  const cleanup = addSseClient(String(req.user.id), res);
+  const cleanup = addSseClient(
+    [String(req.user.id), req.user.org_id ? String(req.user.org_id) : null],
+    res
+  );
   req.on('close', () => { clearInterval(heartbeat); cleanup(); });
 });
 
@@ -213,9 +248,14 @@ router.get('/activities', authenticate, async (req, res) => {
   if (req.query.to    && to    === null) return res.status(400).json({ error: 'Invalid to date — use YYYY-MM-DD' });
   if (from && to && from > to)           return res.status(400).json({ error: 'from date must be before to date' });
 
+  if (!canAccessEmissions(req, 'read')) {
+    return res.status(403).json({ error: 'Your role does not have access to emissions data' });
+  }
+
   try {
-    const params  = [req.user.id];
-    const clauses = ['user_id = $1'];
+    const scope   = ledgerScope(req, 1);
+    const params  = [scope.value];
+    const clauses = [scope.clause];
 
     if (year  !== null) { params.push(year);  clauses.push(`EXTRACT(YEAR FROM date) = $${params.length}`); }
     if (scope !== null) { params.push(scope); clauses.push(`scope = $${params.length}`); }
@@ -224,12 +264,14 @@ router.get('/activities', authenticate, async (req, res) => {
     params.push(limit);
 
     const { rows } = await query(
-      `SELECT id, date, activity, quantity, unit, scope, category,
-              factor, co2e, source, verified, notes, ai_audit,
-              created_at, logged_at
-       FROM emission_activities
+      `SELECT ea.id, ea.date, ea.activity, ea.quantity, ea.unit, ea.scope, ea.category,
+              ea.factor, ea.co2e, ea.source, ea.verified, ea.notes, ea.ai_audit,
+              ea.created_at, ea.logged_at, ea.approval_state,
+              ea.user_id, u.full_name AS logged_by_name
+       FROM emission_activities ea
+       LEFT JOIN users u ON u.id = ea.user_id
        WHERE ${clauses.join(' AND ')}
-       ORDER BY date DESC
+       ORDER BY ea.date DESC
        LIMIT $${params.length}`,
       params
     );
@@ -241,6 +283,10 @@ router.get('/activities', authenticate, async (req, res) => {
 // POST /api/emissions/log
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/log', authenticate, requirePlan('growth'), async (req, res) => {
+  if (!canAccessEmissions(req, 'write')) {
+    return res.status(403).json({ error: 'Your role cannot log emissions — ask an org admin or manager' });
+  }
+
   const { date, activity, quantity, unit, scope, category, factor, co2e, notes, source, aiAudit } = req.body;
 
   const cleanDate     = safeDate(date);
@@ -268,11 +314,11 @@ router.post('/log', authenticate, requirePlan('growth'), async (req, res) => {
   try {
     const { rows } = await query(
       `INSERT INTO emission_activities
-         (user_id, date, activity, quantity, unit, scope, category, factor, co2e, notes, source, ai_audit, logged_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
+         (user_id, org_id, date, activity, quantity, unit, scope, category, factor, co2e, notes, source, ai_audit, logged_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
        RETURNING id, date, activity, quantity, unit, scope, category, factor, co2e, notes, source, verified, ai_audit, created_at, logged_at`,
       [
-        req.user.id, cleanDate, cleanActivity, cleanQty,
+        req.user.id, req.user.org_id || null, cleanDate, cleanActivity, cleanQty,
         cleanUnit     || null, cleanScope,
         cleanCategory || null, cleanFactor ?? null, cleanCo2e,
         cleanNotes    || null, cleanSource || null,
@@ -280,7 +326,9 @@ router.post('/log', authenticate, requirePlan('growth'), async (req, res) => {
       ]
     );
 
-    broadcastUpdate(String(req.user.id), 'emission_update', {
+    // Org-shared ledger: broadcast to every team member's connection, not
+    // just the person who logged it, so their dashboards live-update too.
+    broadcastUpdate(String(req.user.org_id || req.user.id), 'emission_update', {
       action:   'log',
       record:   rows[0],
       co2e:     cleanCo2e,
@@ -305,6 +353,10 @@ router.post('/log', authenticate, requirePlan('growth'), async (req, res) => {
 // POST /api/emissions/bulk
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/bulk', authenticate, requirePlan('growth'), async (req, res) => {
+  if (!canAccessEmissions(req, 'write')) {
+    return res.status(403).json({ error: 'Your role cannot log emissions — ask an org admin or manager' });
+  }
+
   const { records } = req.body;
 
   if (!Array.isArray(records) || records.length === 0)
@@ -359,24 +411,24 @@ router.post('/bulk', authenticate, requirePlan('growth'), async (req, res) => {
     for (const r of valid) {
       const { rowCount } = await query(
         `INSERT INTO emission_activities
-           (user_id, date, activity, quantity, unit, scope, category, factor, co2e, notes, source, logged_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
+           (user_id, org_id, date, activity, quantity, unit, scope, category, factor, co2e, notes, source, logged_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
          ON CONFLICT ON CONSTRAINT uc_emission_user_date_activity_qty DO NOTHING
          RETURNING id`,
         [
-          req.user.id, r.date, r.activity, r.quantity, r.unit,
+          req.user.id, req.user.org_id || null, r.date, r.activity, r.quantity, r.unit,
           r.scope, r.category, r.factor, r.co2e, r.notes, r.source,
         ]
       ).catch(async (err) => {
         if (err.code === '42703' || err.message.includes('uc_emission_user_date_activity_qty')) {
           return query(
             `INSERT INTO emission_activities
-               (user_id, date, activity, quantity, unit, scope, category, factor, co2e, notes, source, logged_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
+               (user_id, org_id, date, activity, quantity, unit, scope, category, factor, co2e, notes, source, logged_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
              ON CONFLICT DO NOTHING
              RETURNING id`,
             [
-              req.user.id, r.date, r.activity, r.quantity, r.unit,
+              req.user.id, req.user.org_id || null, r.date, r.activity, r.quantity, r.unit,
               r.scope, r.category, r.factor, r.co2e, r.notes, r.source,
             ]
           );
@@ -390,7 +442,7 @@ router.post('/bulk', authenticate, requirePlan('growth'), async (req, res) => {
 
     await query('COMMIT');
 
-    broadcastUpdate(String(req.user.id), 'emission_update', {
+    broadcastUpdate(String(req.user.org_id || req.user.id), 'emission_update', {
       action:     'bulk',
       inserted,
       duplicates,
@@ -429,14 +481,19 @@ router.delete('/activities/:id', authenticate, async (req, res) => {
   const id = safeUUID(req.params.id);
   if (!id) return res.status(400).json({ error: 'Invalid record ID' });
 
-  try {
-    const { rows } = await query(
-      `DELETE FROM emission_activities WHERE id = $1 AND user_id = $2 RETURNING id`,
-      [id, req.user.id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Record not found or not owned by you' });
+  if (!canAccessEmissions(req, 'delete')) {
+    return res.status(403).json({ error: 'Only org owners/admins can delete emissions records' });
+  }
 
-    broadcastUpdate(String(req.user.id), 'emission_update', {
+  try {
+    const scope = ledgerScope(req, 2);
+    const { rows } = await query(
+      `DELETE FROM emission_activities WHERE id = $1 AND ${scope.clause} RETURNING id`,
+      [id, scope.value]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Record not found or not in your ledger' });
+
+    broadcastUpdate(String(req.user.org_id || req.user.id), 'emission_update', {
       action: 'delete',
       id:     rows[0].id,
     });
@@ -453,6 +510,10 @@ router.delete('/activities/:id', authenticate, async (req, res) => {
 router.post('/bulk-delete', authenticate, async (req, res) => {
   const { ids } = req.body;
 
+  if (!canAccessEmissions(req, 'delete')) {
+    return res.status(403).json({ error: 'Only org owners/admins can delete emissions records' });
+  }
+
   if (!Array.isArray(ids) || ids.length === 0)
     return res.status(400).json({ error: 'ids must be a non-empty array' });
 
@@ -464,28 +525,29 @@ router.post('/bulk-delete', authenticate, async (req, res) => {
     return res.status(400).json({ error: 'One or more record IDs are invalid' });
 
   try {
+    const scope = ledgerScope(req, 2);
     const { rows } = await query(
       `DELETE FROM emission_activities
-       WHERE id = ANY($1::uuid[]) AND user_id = $2
+       WHERE id = ANY($1::uuid[]) AND ${scope.clause}
        RETURNING id, activity, co2e, scope`,
-      [cleanIds, req.user.id]
+      [cleanIds, scope.value]
     );
 
     if (rows.length === 0)
       return res.status(404).json({
-        error: 'No matching records found — they may already be deleted or not owned by you',
+        error: 'No matching records found — they may already be deleted or not in your ledger',
       });
 
     // Broadcast individual delete events so ledger removes each row live
     for (const r of rows) {
-      broadcastUpdate(String(req.user.id), 'emission_update', {
+      broadcastUpdate(String(req.user.org_id || req.user.id), 'emission_update', {
         action: 'delete',
         id:     r.id,
       });
     }
 
     // Also broadcast a bulk_delete summary so summary cards refresh
-    broadcastUpdate(String(req.user.id), 'emission_update', {
+    broadcastUpdate(String(req.user.org_id || req.user.id), 'emission_update', {
       action:      'bulk_delete',
       deleted:     rows.length,
       notFound:    cleanIds.length - rows.length,
@@ -509,27 +571,32 @@ router.post('/bulk-delete', authenticate, async (req, res) => {
 // GET /api/emissions/summary
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/summary', authenticate, async (req, res) => {
+  if (!canAccessEmissions(req, 'read')) {
+    return res.status(403).json({ error: 'Your role does not have access to emissions data' });
+  }
+
   const year = safeYear(req.query.year) ?? new Date().getFullYear();
+  const scope = ledgerScope(req, 1); // $1 = org_id or user_id depending on account type
 
   try {
     const [scopeRows, monthRows, catRows, prevYearRow, s2DetailRows] = await Promise.all([
       query(`SELECT scope, COALESCE(SUM(co2e),0) AS total_co2e, COUNT(*) AS records
-             FROM emission_activities WHERE user_id=$1 AND EXTRACT(YEAR FROM date)=$2
-             GROUP BY scope ORDER BY scope`, [req.user.id, year]),
+             FROM emission_activities WHERE ${scope.clause} AND EXTRACT(YEAR FROM date)=$2
+             GROUP BY scope ORDER BY scope`, [scope.value, year]),
       query(`SELECT EXTRACT(MONTH FROM date)::int AS month, scope, COALESCE(SUM(co2e),0) AS total_co2e
-             FROM emission_activities WHERE user_id=$1 AND EXTRACT(YEAR FROM date)=$2
-             GROUP BY month, scope ORDER BY month, scope`, [req.user.id, year]),
+             FROM emission_activities WHERE ${scope.clause} AND EXTRACT(YEAR FROM date)=$2
+             GROUP BY month, scope ORDER BY month, scope`, [scope.value, year]),
       query(`SELECT category, COALESCE(SUM(co2e),0) AS total_co2e
-             FROM emission_activities WHERE user_id=$1 AND EXTRACT(YEAR FROM date)=$2 AND category IS NOT NULL
-             GROUP BY category ORDER BY total_co2e DESC LIMIT 10`, [req.user.id, year]),
+             FROM emission_activities WHERE ${scope.clause} AND EXTRACT(YEAR FROM date)=$2 AND category IS NOT NULL
+             GROUP BY category ORDER BY total_co2e DESC LIMIT 10`, [scope.value, year]),
       query(`SELECT COALESCE(SUM(co2e),0) AS total_co2e
-             FROM emission_activities WHERE user_id=$1 AND EXTRACT(YEAR FROM date)=$2`,
-            [req.user.id, year - 1]),
+             FROM emission_activities WHERE ${scope.clause} AND EXTRACT(YEAR FROM date)=$2`,
+            [scope.value, year - 1]),
       query(`SELECT
                COALESCE(SUM(co2e) FILTER (WHERE category ILIKE '%Location-based%'),0) AS scope2_location,
                COALESCE(SUM(co2e) FILTER (WHERE category ILIKE '%Market-based%'),  0) AS scope2_market
-             FROM emission_activities WHERE user_id=$1 AND EXTRACT(YEAR FROM date)=$2 AND scope=2`,
-            [req.user.id, year]),
+             FROM emission_activities WHERE ${scope.clause} AND EXTRACT(YEAR FROM date)=$2 AND scope=2`,
+            [scope.value, year]),
     ]);
 
     const s    = (sc) => parseFloat(scopeRows.rows.find(r => r.scope === sc)?.total_co2e || 0);
@@ -562,7 +629,35 @@ router.get('/summary', authenticate, async (req, res) => {
 router.get('/profile', authenticate, async (req, res) => {
   try {
     const { rows } = await query(`SELECT * FROM emission_profiles WHERE user_id=$1`, [req.user.id]);
-    res.json({ profile: rows[0] || null });
+    if (rows[0]) return res.json({ profile: rows[0] });
+
+    // No emission_profiles row saved yet — for business accounts, synthesize
+    // a default from the company details captured at signup so the Company
+    // Profile tab (and BRSR/report generation) isn't blank on day one. This
+    // is NOT persisted until the person explicitly saves the profile.
+    if (req.user.is_company_account && req.user.company_name) {
+      return res.json({
+        profile: {
+          user_id:        req.user.id,
+          company_name:   req.user.company_name,
+          industry:       req.user.industry_sector || null,
+          company_cin:    req.user.company_cin     || null,
+          company_gstin:  req.user.company_gstin   || null,
+          company_pan:    req.user.company_pan     || null,
+          company_type:   req.user.company_type    || null,
+          revenue_cr:     null,
+          employees:      null,
+          floor_sqft:     null,
+          base_year:      null,
+          net_zero_year:  null,
+          net_zero_target_co2e: null,
+          reporting_year: new Date().getFullYear(),
+          is_default:     true, // frontend hint — not yet saved
+        },
+      });
+    }
+
+    res.json({ profile: null });
   } catch (err) { dbErr(res, 'Fetch profile', err); }
 });
 

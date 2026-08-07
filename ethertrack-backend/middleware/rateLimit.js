@@ -100,7 +100,49 @@ const assetActionLimiter = makeLimiter({
   message:  'Too many listing/retirement actions. Please slow down.',
 });
 
-// IP-only OTP limiter (unauthenticated)
+// [FIX-RATE-COVERAGE] The rest of the money/security-sensitive surface
+// that had no dedicated limiter — only the generic 500/15min IP-based
+// catch-all. Each mounted as a prefix limiter in server.js, so one line
+// covers every mutating endpoint under that path rather than hand-tuning
+// dozens of individual routes.
+
+// Wallet binding, bank account add/remove, withdrawal requests — real
+// money movement. Excludes /api/wallet/webhook (Razorpay-signed, handled
+// separately, should not be throttled the same way user actions are).
+const walletActionLimiter = makeLimiter({
+  prefix:   'wallet-action',
+  windowMs: 60 * 1000,
+  max:      20,
+  message:  'Too many wallet actions. Please slow down.',
+});
+
+// Org member management, subscription/payment actions.
+const orgActionLimiter = makeLimiter({
+  prefix:   'org-action',
+  windowMs: 60 * 1000,
+  max:      20,
+  message:  'Too many organisation actions. Please slow down.',
+});
+
+// Entity/user account PATCH/DELETE — account-level changes.
+const entityActionLimiter = makeLimiter({
+  prefix:   'entity-action',
+  windowMs: 60 * 1000,
+  max:      20,
+  message:  'Too many account actions. Please slow down.',
+});
+
+// 2FA setup/verify — same brute-force risk profile as OTP (someone
+// guessing a 6-digit TOTP code), same tight ceiling.
+const twoFactorLimiter = makeLimiter({
+  prefix:       'two-factor',
+  windowMs:     10 * 60 * 1000,
+  max:          5,
+  message:      'Too many 2FA attempts. Please wait 10 minutes.',
+  keyGenerator: (req) => req.user?.id ?? ipKeyGenerator(req),
+});
+
+
 const otpLimiter = makeLimiter({
   prefix:       'otp',
   windowMs:     10 * 60 * 1000,
@@ -116,5 +158,9 @@ module.exports = {
   kycSubmitLimiter,
   adminActionLimiter,
   assetActionLimiter,
+  walletActionLimiter,
+  orgActionLimiter,
+  entityActionLimiter,
+  twoFactorLimiter,
   otpLimiter,
 };

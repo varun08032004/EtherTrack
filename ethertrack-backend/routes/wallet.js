@@ -23,9 +23,10 @@ const pino       = require('pino');
 
 const { safeQuery: query, pool }       = require('../db/pool');
 const { authenticate, invalidateUserCache } = require('../middleware/auth');
+const { walletActionLimiter } = require('../middleware/rateLimit');
 const { createNotification }           = require('./notifications');
 const { sendWalletConnectedEmail, sendDepositConfirmedEmail, sendWithdrawalProcessedEmail, sendWithdrawalFailedEmail, sendBankAccountAddedEmail, sendBankAccountRemovedEmail } = require('../services/email');
-const { verifyKYCOnChain, linkWalletOnChain } = require('../services/minter');
+const { verifyKYCOnChain } = require('../services/minter');
 
 // ── Audit log helper (mirrors routes/admin.js's auditLog) ────────────────────
 const auditLog = async (adminId, action, targetUserId, details) => {
@@ -366,7 +367,7 @@ router.post('/deposit/create-order', authenticate, walletWriteLimiter, async (re
 });
 
 // ── Deposit: verify ───────────────────────────────────────────────────────────
-router.post('/deposit/verify', authenticate, async (req, res) => {
+router.post('/deposit/verify', authenticate, walletActionLimiter, async (req, res) => {
   const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
   if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature)
     return res.status(400).json({ error: 'Missing payment verification fields' });
@@ -796,7 +797,7 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
 });
 
 // ── Trade deduct ──────────────────────────────────────────────────────────────
-router.post('/trade-deduct', authenticate, async (req, res) => {
+router.post('/trade-deduct', authenticate, walletActionLimiter, async (req, res) => {
   const { amount, tokenId, quantity, projectName } = req.body;
   if (!amount || amount <= 0)
     return res.status(400).json({ error: 'Invalid amount' });
@@ -851,7 +852,7 @@ router.post('/trade-deduct', authenticate, async (req, res) => {
 });
 
 // ── Trade refund ──────────────────────────────────────────────────────────────
-router.post('/trade-refund', authenticate, async (req, res) => {
+router.post('/trade-refund', authenticate, walletActionLimiter, async (req, res) => {
   const { amount, reference } = req.body;
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
   if (!reference)             return res.status(400).json({ error: 'Idempotency reference required' });
@@ -983,27 +984,30 @@ router.post('/bind', authenticate, walletWriteLimiter, async (req, res) => {
 
     log.info({ userId: req.user.id, wallet: mask(walletAddress) }, 'Wallet bound');
 
-    // [FIX-4 → superseded] KYC on-chain registration no longer depends on
-    // wallet_address at all (see KYCRegistry.sol — identity-keyed by
-    // userIdHash). If this user was already KYC-approved, all that's
-    // needed here is linking their new wallet to that already-verified
-    // identity — no re-registration, no silent-skip risk.
+    // [FIX-4] Backfill on-chain KYC registration for users who verified KYC
+    // BEFORE binding a wallet. routes/admin.js's `/kyc/:id/approve` only
+    // calls verifyKYCOnChain() if a wallet_address already exists at
+    // approval time — if it doesn't, the on-chain call is silently skipped
+    // with no audit entry and no user-facing error, leaving the DB marked
+    // kyc_verified=TRUE while KYCRegistry has no record for the wallet.
+    // Binding a wallet is the other moment this can be corrected, so we
+    // check and (re)trigger it here too.
     try {
       const { rows: kycRows } = await query(
-        'SELECT kyc_verified FROM users WHERE id = $1',
+        'SELECT kyc_verified, kyc_data_hash FROM users WHERE id = $1',
         [req.user.id]
       );
       if (kycRows[0]?.kyc_verified) {
         setImmediate(async () => {
           try {
-            const r = await linkWalletOnChain(req.user.id, walletAddress.toLowerCase());
+            const r = await verifyKYCOnChain(walletAddress.toLowerCase(), kycRows[0].kyc_data_hash);
             if (!r.skipped) {
-              log.info({ userId: req.user.id, txHash: r.txHash }, 'Wallet linked to on-chain KYC identity');
-              await auditLog(req.user.id, 'KYC_WALLET_LINKED_ON_BIND', req.user.id, `TX: ${r.txHash}`);
+              log.info({ userId: req.user.id, txHash: r.txHash }, 'KYC on-chain registered after wallet bind');
+              await auditLog(req.user.id, 'KYC_ONCHAIN_REGISTERED_ON_BIND', req.user.id, `TX: ${r.txHash}`);
             }
           } catch (e) {
-            log.warn({ userId: req.user.id, err: e.message }, 'Wallet link to KYC identity failed');
-            await auditLog(req.user.id, 'KYC_WALLET_LINK_FAILED_ON_BIND', req.user.id, e.message);
+            log.warn({ userId: req.user.id, err: e.message }, 'KYC on-chain registration on wallet bind failed');
+            await auditLog(req.user.id, 'KYC_ONCHAIN_FAILED_ON_BIND', req.user.id, e.message);
           }
         });
       }
@@ -1130,7 +1134,7 @@ router.get('/bank-accounts', authenticate, walletReadLimiter, async (req, res) =
   }
 });
 
-router.post('/bank-accounts', authenticate, async (req, res) => {
+router.post('/bank-accounts', authenticate, walletActionLimiter, async (req, res) => {
   const { accountName, accountNumber, ifsc, bankName } = req.body;
 
   if (!accountName || !accountNumber || !ifsc || !bankName)
@@ -1171,7 +1175,7 @@ router.post('/bank-accounts', authenticate, async (req, res) => {
   }
 });
 
-router.put('/bank-accounts/:id/default', authenticate, async (req, res) => {
+router.put('/bank-accounts/:id/default', authenticate, walletActionLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -1199,7 +1203,7 @@ router.put('/bank-accounts/:id/default', authenticate, async (req, res) => {
   }
 });
 
-router.delete('/bank-accounts/:id', authenticate, async (req, res) => {
+router.delete('/bank-accounts/:id', authenticate, walletActionLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');

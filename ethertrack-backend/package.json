@@ -47,6 +47,7 @@
     "redis": "^5.12.1",
     "resend": "^2.0.0",
     "socket.io": "^4.8.3",
+    "@socket.io/redis-adapter": "^8.3.0",
     "speakeasy": "^2.0.0",
     "uuid": "^9.0.0",
     "xml2js": "^0.6.2"

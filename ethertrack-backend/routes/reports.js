@@ -83,44 +83,65 @@ const injectMetadata = async (pdfBuffer, { type, year, orgName, auditHash }) => 
 // ─────────────────────────────────────────────────────────────────────────────
 // [FEAT-BRSR-DATA] Assemble full BRSR payload from DB for PDF generation
 // ─────────────────────────────────────────────────────────────────────────────
-async function assembleBrsrData(userId, year) {
+async function assembleBrsrData(userId, year, reqUser = null) {
+  // Same scope resolution as routes/emissions.js and routes/brsrDataRoutes.js:
+  // business accounts share one org-wide ledger, individuals stay solo.
+  // Section A/B/principles already key off org_id (falls back to the
+  // caller's own id for individuals, matching brsrDataRoutes.js). P6
+  // environmental has no org_id column, so it always stays user-scoped.
+  const scopeId = reqUser?.org_id || userId;
+  const isOrgScoped = Boolean(reqUser?.org_id);
+
   const [secA, secB, principlesRows, environmental, emissionRows, retirementRows, profileRows] =
     await Promise.all([
       safeQuery(
         `SELECT entity, business, workforce, structure, grievance
          FROM brsr_section_a WHERE org_id = $1 AND year = $2`,
-        [userId, year]
+        [scopeId, year]
       ),
       safeQuery(
         `SELECT policy_matrix AS "policyMatrix", non_coverage AS "nonCoverage", governance
          FROM brsr_section_b WHERE org_id = $1 AND year = $2`,
-        [userId, year]
+        [scopeId, year]
       ),
       safeQuery(
         `SELECT principle_id, data FROM brsr_principles WHERE org_id = $1 AND year = $2`,
-        [userId, year]
+        [scopeId, year]
       ),
       safeQuery(
         `SELECT energy, water, waste FROM brsr_environmental WHERE user_id = $1 AND year = $2`,
-        [userId, year]
+        [userId, year] // P6 has no org_id column — always the requester's own row
       ),
       safeQuery(
-        `SELECT
-           COALESCE(SUM(co2e) FILTER (WHERE scope = 1), 0) AS scope1,
-           COALESCE(SUM(co2e) FILTER (WHERE scope = 2), 0) AS scope2,
-           COALESCE(SUM(co2e) FILTER (WHERE scope = 3), 0) AS scope3
-         FROM emission_activities
-         WHERE user_id = $1 AND EXTRACT(YEAR FROM date) = $2`,
-        [userId, year]
+        isOrgScoped
+          ? `SELECT
+               COALESCE(SUM(co2e) FILTER (WHERE scope = 1), 0) AS scope1,
+               COALESCE(SUM(co2e) FILTER (WHERE scope = 2), 0) AS scope2,
+               COALESCE(SUM(co2e) FILTER (WHERE scope = 3), 0) AS scope3
+             FROM emission_activities
+             WHERE org_id = $1 AND EXTRACT(YEAR FROM date) = $2`
+          : `SELECT
+               COALESCE(SUM(co2e) FILTER (WHERE scope = 1), 0) AS scope1,
+               COALESCE(SUM(co2e) FILTER (WHERE scope = 2), 0) AS scope2,
+               COALESCE(SUM(co2e) FILTER (WHERE scope = 3), 0) AS scope3
+             FROM emission_activities
+             WHERE user_id = $1 AND EXTRACT(YEAR FROM date) = $2`,
+        [scopeId, year]
       ),
       safeQuery(
-        `SELECT COALESCE(SUM(amount), 0) AS retired_tco2e
-         FROM retirements WHERE retired_by = $1 AND retire_year = $2`,
-        [userId, year]
+        isOrgScoped
+          ? `SELECT COALESCE(SUM(amount), 0) AS retired_tco2e
+             FROM retirements
+             WHERE retire_year = $2
+               AND retired_by IN (SELECT id FROM users WHERE org_id = $1)`
+          : `SELECT COALESCE(SUM(amount), 0) AS retired_tco2e
+             FROM retirements WHERE retired_by = $1 AND retire_year = $2`,
+        [scopeId, year]
       ).catch(() => ({ rows: [{ retired_tco2e: 0 }] })),
       safeQuery(
-        `SELECT company_name, company_cin, industry, revenue_cr, employees, base_year, net_zero_year
-         FROM company_profiles WHERE user_id = $1 LIMIT 1`,
+        `SELECT company_name, company_cin, company_gstin, company_pan, company_type,
+                industry AS industry, revenue_cr, employees, base_year, net_zero_year
+         FROM emission_profiles WHERE user_id = $1 LIMIT 1`,
         [userId]
       ).catch(() => ({ rows: [] })),
     ]);
@@ -148,16 +169,25 @@ async function assembleBrsrData(userId, year) {
   const re = retirementRows.rows[0] || {};
   const pr = profileRows.rows[0]    || {};
 
+  // Fall back to the signup-time company fields on `users` when the person
+  // hasn't filled in the Company Profile tab (emission_profiles) yet — so a
+  // freshly-verified business account still gets a populated BRSR header
+  // instead of "Organisation" with blank fields.
+  const orgName = pr.company_name || reqUser?.company_name || 'Organisation';
+
   return {
-    orgName:    pr.company_name || 'Organisation',
+    orgName,
     year,
     profile: {
-      company_cin:   pr.company_cin   || null,
-      industry:      pr.industry      || null,
-      revenue_cr:    pr.revenue_cr    || null,
-      employees:     pr.employees     || null,
-      base_year:     pr.base_year     || null,
-      net_zero_year: pr.net_zero_year || null,
+      company_cin:   pr.company_cin    || reqUser?.company_cin    || null,
+      company_gstin: pr.company_gstin  || reqUser?.company_gstin  || null,
+      company_pan:   pr.company_pan    || reqUser?.company_pan    || null,
+      company_type:  pr.company_type   || reqUser?.company_type   || null,
+      industry:      pr.industry       || reqUser?.industry_sector || null,
+      revenue_cr:    pr.revenue_cr     || null,
+      employees:     pr.employees      || null,
+      base_year:     pr.base_year      || null,
+      net_zero_year: pr.net_zero_year  || null,
     },
     brsr,
     energyData:  energyData || null,
@@ -221,7 +251,7 @@ router.post('/generate', authenticate, async (req, res) => {
     if (reportType === 'brsr') {
       // [FEAT-BRSR-DATA] Assemble from DB — ignore most body fields for BRSR
       console.log(`[reports] assembling BRSR from DB for user=${req.user.id} year=${year}`);
-      const dbData = await assembleBrsrData(req.user.id, Number(year));
+      const dbData = await assembleBrsrData(req.user.id, Number(year), req.user);
 
       // Merge DB data with verifier from request body (verifier not in DB yet)
       reportData = {
@@ -239,9 +269,17 @@ router.post('/generate', authenticate, async (req, res) => {
       const safePrevEmissions = Array.isArray(previousYearEmissions) ? previousYearEmissions : [];
 
       reportData = {
-        orgName:               orgName || profile?.company_name || 'Organisation',
+        orgName:               orgName || profile?.company_name || req.user.company_name || 'Organisation',
         year:                  Number(year),
-        profile:               profile               || {},
+        profile: {
+          company_name:  req.user.company_name  || null,
+          company_gstin: req.user.company_gstin || null,
+          company_pan:   req.user.company_pan   || null,
+          company_cin:   req.user.company_cin   || null,
+          company_type:  req.user.company_type  || null,
+          industry:      req.user.industry_sector || null,
+          ...(profile || {}), // client-supplied values win over defaults
+        },
         emissions:             safeEmissions,
         retirements:           safeRetirements,
         credits:               safeCredits,

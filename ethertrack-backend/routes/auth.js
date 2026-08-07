@@ -108,7 +108,17 @@ router.post('/register', [
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-  const { email, password, fullName, companyName } = req.body;
+  const { email, password, fullName, accountType, companyName, designation } = req.body;
+
+  // accountType is optional and defaults to individual — business accounts
+  // must supply both companyName and designation so we have something to
+  // seed the organisation and KYC signatory fields with later.
+  const isBusiness = accountType === 'business';
+  if (isBusiness) {
+    if (!companyName?.trim())  return res.status(400).json({ error: 'Company name is required for business accounts.' });
+    if (!designation?.trim())  return res.status(400).json({ error: 'Your position/designation is required for business accounts.' });
+  }
+
   try {
     const existing = await safeQuery('SELECT id FROM users WHERE email=$1', [email]);
     if (existing.rows.length) return res.status(409).json({ error: 'Email already registered' });
@@ -137,11 +147,17 @@ router.post('/register', [
 
     const { rows } = await safeQuery(
       `INSERT INTO users
-         (email, password_hash, full_name, company_name, email_otp, email_otp_expires,
-          otp_attempts, firebase_uid, provider)
-       VALUES ($1,$2,$3,$4,$5,$6,0,$7,'email')
+         (email, password_hash, full_name, company_name, designation, is_company_account,
+          email_otp, email_otp_expires, otp_attempts, firebase_uid, provider)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,$9,'email')
        RETURNING id, email, full_name, role`,
-      [email, passwordHash, fullName, companyName || null, otpHash, otpExpires, firebaseUid]
+      [
+        email, passwordHash, fullName,
+        isBusiness ? companyName.trim() : null,
+        isBusiness ? designation.trim() : null,
+        isBusiness,
+        otpHash, otpExpires, firebaseUid,
+      ]
     );
 
     sendVerificationEmail(email, { name: fullName, otp }).catch(e =>
@@ -218,7 +234,8 @@ router.post('/verify-email',
     const { email, otp } = req.body;
     try {
       const { rows } = await safeQuery(
-        `SELECT id, email_otp, email_otp_expires, full_name, otp_attempts, firebase_uid
+        `SELECT id, email_otp, email_otp_expires, full_name, otp_attempts, firebase_uid,
+                is_company_account, company_name, company_type, industry_sector, designation
          FROM users WHERE email=$1`,
         [email]
       );
@@ -259,6 +276,42 @@ router.post('/verify-email',
          WHERE id=$1`,
         [user.id]
       );
+
+      // ── Auto-create organisation for business accounts ─────────────
+      // Business users shouldn't have to go find a separate "create org"
+      // screen after signup — do it the moment their email is confirmed,
+      // so org_id/team_role are already set before they ever hit the
+      // dashboard. Mirrors POST /org/create in routes/org.js.
+      if (user.is_company_account && user.company_name) {
+        try {
+          const baseSlug = user.company_name.toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 46);
+          const slug = `${baseSlug}-${crypto.randomBytes(3).toString('hex')}`;
+
+          const { rows: orgRows } = await safeQuery(
+            `INSERT INTO organisations
+               (name, slug, company_type, industry, owner_id,
+                subscription_plan, subscription_status, seats_limit)
+             VALUES ($1,$2,$3,$4,$5,'starter','trial',3)
+             RETURNING id`,
+            [user.company_name, slug, user.company_type || null, user.industry_sector || null, user.id]
+          );
+          const orgId = orgRows[0].id;
+
+          await safeQuery(
+            `INSERT INTO org_members (org_id, user_id, team_role, status, accepted_at)
+             VALUES ($1,$2,'owner','active',NOW())`,
+            [orgId, user.id]
+          );
+          await safeQuery(
+            `UPDATE users SET org_id=$1, team_role='owner' WHERE id=$2`,
+            [orgId, user.id]
+          );
+        } catch (orgErr) {
+          // Non-blocking — user can still create/join an org manually later
+          console.warn('[verify-email] auto org creation failed:', orgErr.message);
+        }
+      }
 
       // ── [FIX-15] Sync email verified status to Firebase ───────────
       if (user.firebase_uid) {
@@ -582,6 +635,7 @@ router.get('/me', authenticate, async (req, res) => {
          wallet_address, kyc_status, kyc_verified, email_verified, last_login,
          phone, bio, timezone, avatar_url, notification_prefs,
          company_gstin, company_pan, company_cin, industry_sector, company_type,
+         is_company_account, designation, org_id, team_role,
          subscription_plan, plan_selected, subscription_renewal_date,
          subscription_cycle, subscription_activated_at,
          inr_balance, inr_balance_locked,

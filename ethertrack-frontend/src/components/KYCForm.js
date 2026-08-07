@@ -568,15 +568,17 @@ const KYCFormInner = ({ onComplete }) => {
 
   const [step, setStep] = useState(0);
 
-  // Account type
-  const [kycType, setKycType] = useState('individual');
+  // Account type — default to business (and prefill what we already
+  // collected at signup / in the org profile) for company accounts, so
+  // the person isn't retyping their company name and designation.
+  const [kycType, setKycType] = useState(dbUser?.is_company_account ? 'business' : 'individual');
 
   // Business entity fields
-  const [entityName,            setEntityName]            = useState('');
-  const [gstin,                 setGstin]                 = useState('');
-  const [businessPan,           setBusinessPan]           = useState('');
-  const [cin,                   setCin]                   = useState('');
-  const [signatoryDesignation,  setSignatoryDesignation]  = useState('');
+  const [entityName,            setEntityName]            = useState(dbUser?.company_name  || '');
+  const [gstin,                 setGstin]                 = useState(dbUser?.company_gstin || '');
+  const [businessPan,           setBusinessPan]           = useState(dbUser?.company_pan   || '');
+  const [cin,                   setCin]                   = useState(dbUser?.company_cin   || '');
+  const [signatoryDesignation,  setSignatoryDesignation]  = useState(dbUser?.designation    || '');
   const [businessDocFile,       setBusinessDocFile]       = useState(null);
   const [businessDocPreview,    setBusinessDocPreview]    = useState('');
   const [businessUploadProgress,setBusinessUploadProgress]= useState(0);

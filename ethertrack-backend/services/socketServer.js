@@ -27,7 +27,43 @@ const ALLOWED_ORIGINS = [
   process.env.FRONTEND_URL,
 ].filter(Boolean);
 
-const init = (httpServer) => {
+// [FIX-SCALE] Without this, Socket.io only broadcasts within the process
+// that received the event — the moment you run more than one server
+// instance, a user connected to instance A silently stops receiving
+// real-time updates triggered by actions processed on instance B. No
+// error, no crash, just events that quietly never arrive for some users.
+// This adapter fans events out through Redis pub/sub so every instance
+// sees every emit, regardless of which instance the affected user is
+// connected to.
+//
+// Uses the standard `redis` package (already a dependency — see
+// cron/jobs.js's distributed lock) against REDIS_URL, NOT the Upstash
+// REST client used elsewhere for rate limiting — Upstash's REST API has
+// no pub/sub support, only a real persistent connection does. If
+// REDIS_URL isn't set, falls back to Socket.io's default in-memory
+// adapter (correct on a single instance, silently wrong on multiple —
+// see the warning below).
+const setupRedisAdapter = async (io) => {
+  if (!process.env.REDIS_URL) {
+    console.warn('⚠️  Socket.io: REDIS_URL not set — using in-memory adapter. This is fine on a single instance; if you ever scale to 2+ instances, real-time events will NOT reach all connected users until this is configured.');
+    return;
+  }
+  try {
+    const { createClient } = require('redis');
+    const { createAdapter } = require('@socket.io/redis-adapter');
+    const pubClient = createClient({ url: process.env.REDIS_URL });
+    const subClient = pubClient.duplicate();
+    pubClient.on('error', (e) => console.error('[socket.io-redis pub]', e.message));
+    subClient.on('error', (e) => console.error('[socket.io-redis sub]', e.message));
+    await Promise.all([pubClient.connect(), subClient.connect()]);
+    io.adapter(createAdapter(pubClient, subClient));
+    console.log('✅ Socket.io Redis adapter connected — safe to run multiple instances');
+  } catch (e) {
+    console.warn('⚠️  Socket.io Redis adapter failed to initialize, falling back to in-memory (single-instance only):', e.message);
+  }
+};
+
+const init = async (httpServer) => {
   io = new Server(httpServer, {
     cors: {
       origin:      ALLOWED_ORIGINS,
@@ -78,6 +114,7 @@ const init = (httpServer) => {
   });
 
   console.log('🔌 Socket.io real-time sync ready');
+  await setupRedisAdapter(io);
   return io;
 };
 

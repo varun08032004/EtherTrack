@@ -27,6 +27,7 @@ try { bcrypt = require('bcrypt'); }
 catch { bcrypt = require('bcryptjs'); }
 
 const { safeQuery: query } = require('../db/pool');
+const { twoFactorLimiter }  = require('../middleware/rateLimit');
 const { authenticate }     = require('../middleware/auth');
 
 // [FIX-TOTP-1] Encryption helpers
@@ -329,7 +330,7 @@ const disable2FA = async (req, res) => {
 const router = require('express').Router();
 router.post('/setup',        authenticate, setup2FA);
 router.post('/verify-setup', authenticate, verifySetup2FA);
-router.post('/validate',     validate2FA);
+router.post('/validate', twoFactorLimiter, validate2FA);
 router.post('/disable',      authenticate, disable2FA);
 
 module.exports = router;

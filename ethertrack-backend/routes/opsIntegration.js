@@ -226,10 +226,17 @@ router.get('/customers', async (req, res) => {
 
 // GET /api/ops-integration/churn-events?since=ISO_TIMESTAMP
 //
-// Every paid→free downgrade recorded in subscription_history (event_type
-// 'expired', written by routes/org.js's checkSubscriptionExpiries cron), so
-// the ERP can alert Sales/CS same-day for win-back outreach instead of only
-// finding out whenever someone next re-pulls the customer roster.
+// Every paid→free transition recorded in subscription_history — both an
+// auto-expiry downgrade (event_type 'expired', written by routes/org.js's
+// checkSubscriptionExpiries cron) AND a voluntary self-serve cancellation
+// (event_type 'activated', written by POST /api/subscription/free when a
+// user actively cancels). Filtering on event_type alone used to miss the
+// voluntary case entirely — a deliberate cancel is arguably the MORE
+// important churn signal to catch for win-back outreach, so this now keys
+// off the actual plan transition (paid → free) rather than the event label.
+//
+// `reason` in the response distinguishes the two so the ERP's alert email
+// can word them differently ("cancelled" vs "expired without renewal").
 //
 // `event_id` is subscription_history.id (cast to text so this works whether
 // that column is a serial int or a UUID) — the ERP side's stable dedupe key,
@@ -243,11 +250,12 @@ router.get('/churn-events', async (req, res) => {
     const { rows } = await query(
       `SELECT sh.id::text AS event_id, sh.created_at AS downgraded_at,
               sh.from_plan, sh.from_cycle, sh.renewal_date AS previous_renewal_date,
+              CASE WHEN sh.event_type = 'expired' THEN 'expired' ELSE 'cancelled' END AS reason,
               u.email, u.full_name, u.company_name, u.corporate_managed
        FROM subscription_history sh
        JOIN users u ON u.id = sh.user_id
-       WHERE sh.event_type = 'expired'
-         AND sh.to_plan = 'free'
+       WHERE sh.to_plan = 'free'
+         AND sh.from_plan IS NOT NULL AND sh.from_plan != 'free'
          AND sh.created_at >= $1
        ORDER BY sh.created_at DESC
        LIMIT 500`,
@@ -368,6 +376,70 @@ router.get('/support-tickets', async (req, res) => {
   } catch (e) {
     console.error('[ops-integration/support-tickets]', e.message);
     res.status(500).json({ error: 'Failed to fetch support tickets' });
+  }
+});
+
+// GET /api/ops-integration/disputes?since=ISO_TIMESTAMP&status=open
+//
+// Trade/credit disputes opened on the platform (routes/admin.js's dispute
+// system) — Sales/CS previously had zero visibility into these; a Corporate
+// account with an open dispute would only surface if someone happened to
+// check the platform admin panel separately. Read-only; disputes are still
+// opened/resolved on the platform itself.
+router.get('/disputes', async (req, res) => {
+  const since = req.query.since && !isNaN(Date.parse(req.query.since))
+    ? req.query.since
+    : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+  const status = ['open', 'resolved'].includes(req.query.status) ? req.query.status : null;
+
+  try {
+    const params = [since];
+    let statusClause = '';
+    if (status) { params.push(status); statusClause = `AND d.status = $${params.length}`; }
+
+    const { rows } = await query(
+      `SELECT d.id, d.reason, d.notes, d.status, d.resolution, d.created_at, d.resolved_at,
+              u.email, u.full_name, u.company_name, u.subscription_plan, u.corporate_managed
+       FROM disputes d
+       JOIN users u ON u.id = d.target_user_id
+       WHERE d.created_at >= $1 ${statusClause}
+       ORDER BY d.created_at DESC
+       LIMIT 500`,
+      params
+    );
+    res.json({ disputes: rows });
+  } catch (e) {
+    console.error('[ops-integration/disputes]', e.message);
+    res.status(500).json({ error: 'Failed to fetch disputes' });
+  }
+});
+
+// GET /api/ops-integration/kyc-status?since=ISO_TIMESTAMP
+//
+// Recent KYC submissions — pending queue depth and rejections with reasons
+// — so Sales can see if a lead's KYC is stuck or was rejected (useful
+// context for "why hasn't this account converted / gone Corporate yet").
+// Read-only; KYC review itself still happens on the platform.
+router.get('/kyc-status', async (req, res) => {
+  const since = req.query.since && !isNaN(Date.parse(req.query.since))
+    ? req.query.since
+    : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+
+  try {
+    const { rows } = await query(
+      `SELECT ks.id, ks.status, ks.rejection_reason, ks.submitted_at, ks.reviewed_at,
+              u.email, u.full_name, u.company_name
+       FROM kyc_submissions ks
+       JOIN users u ON u.id = ks.user_id
+       WHERE ks.submitted_at >= $1
+       ORDER BY ks.submitted_at DESC
+       LIMIT 500`,
+      [since]
+    );
+    res.json({ submissions: rows });
+  } catch (e) {
+    console.error('[ops-integration/kyc-status]', e.message);
+    res.status(500).json({ error: 'Failed to fetch KYC status' });
   }
 });
 

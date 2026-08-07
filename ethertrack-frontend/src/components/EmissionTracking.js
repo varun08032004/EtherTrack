@@ -1283,6 +1283,11 @@ export default function EmissionTracking() {
                   {profile.company_cin && <span style={{marginLeft:10}}>CIN: {profile.company_cin}</span>}
                   {profile.industry && <span style={{marginLeft:10}}>{profile.industry}</span>}
                   <span style={{marginLeft:10}}>FY {profile.reporting_year}</span>
+                  {profile.is_default && (
+                    <span style={{marginLeft:10, color:'#eab308'}}>
+                      Prefilled from signup — review &amp; save in Company Profile
+                    </span>
+                  )}
                 </div>
               )}
             </div>

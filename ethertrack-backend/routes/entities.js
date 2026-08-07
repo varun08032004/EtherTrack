@@ -15,6 +15,7 @@
 const router = require('express').Router();
 const { safeQuery: query } = require('../db/pool');
 const { authenticate } = require('../middleware/auth');
+const { entityActionLimiter } = require('../middleware/rateLimit');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
@@ -96,7 +97,7 @@ router.get('/', authenticate, async (req, res) => {
 // ── equity_pct validated 0–100
 // ── entity type validated against whitelist
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/', authenticate, async (req, res) => {
+router.post('/', authenticate, entityActionLimiter, async (req, res) => {
   const {
     name, type, cin, gstin, equity_pct,
     operational_control, financial_control, included,
@@ -196,7 +197,7 @@ router.get('/users', authenticate, async (req, res) => {
 // ── Email validated and normalised to lowercase
 // ── Role validated against whitelist
 // ── User count capped at 50 per account
-router.post('/users', authenticate, async (req, res) => {
+router.post('/users', authenticate, entityActionLimiter, async (req, res) => {
   const { name, email, role, entity } = req.body;
 
   const cleanName  = sanitiseText(name, 200);
@@ -247,7 +248,7 @@ router.post('/users', authenticate, async (req, res) => {
 });
 
 // PATCH /api/entities/users/:id
-router.patch('/users/:id', authenticate, async (req, res) => {
+router.patch('/users/:id', authenticate, entityActionLimiter, async (req, res) => {
   const id = safeInt(req.params.id, 1);
   if (!id) return res.status(400).json({ error: 'Invalid user ID' });
 
@@ -290,7 +291,7 @@ router.patch('/users/:id', authenticate, async (req, res) => {
 });
 
 // DELETE /api/entities/users/:id
-router.delete('/users/:id', authenticate, async (req, res) => {
+router.delete('/users/:id', authenticate, entityActionLimiter, async (req, res) => {
   const id = safeInt(req.params.id, 1);
   if (!id) return res.status(400).json({ error: 'Invalid user ID' });
 
@@ -313,7 +314,7 @@ router.delete('/users/:id', authenticate, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // PATCH /api/entities/:id
-router.patch('/:id', authenticate, async (req, res) => {
+router.patch('/:id', authenticate, entityActionLimiter, async (req, res) => {
   const id = safeInt(req.params.id, 1);
   if (!id) return res.status(400).json({ error: 'Invalid entity ID' });
 
@@ -368,7 +369,7 @@ router.patch('/:id', authenticate, async (req, res) => {
 });
 
 // DELETE /api/entities/:id
-router.delete('/:id', authenticate, async (req, res) => {
+router.delete('/:id', authenticate, entityActionLimiter, async (req, res) => {
   const id = safeInt(req.params.id, 1);
   if (!id) return res.status(400).json({ error: 'Invalid entity ID' });
 

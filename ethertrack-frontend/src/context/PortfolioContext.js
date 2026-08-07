@@ -94,6 +94,7 @@ import {
   buildMarketBuckets,
   getMarketPrice,
 } from '../utils/creditPricing';
+import { getCsrfToken, ensureCsrfCookie } from '../services/api';
 
 // ── Contract addresses — validated at startup ─────────────────────
 const ADDRESSES = {
@@ -199,10 +200,31 @@ const toTokenHex = (id) =>
 const authFetch = async (path, opts = {}) => {
   const token = localStorage.getItem('et_access');
   const isFormData = opts.body instanceof FormData;
+  const method = (opts.method || 'GET').toUpperCase();
+  const isWrite = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
+
+  // [FIX-CSRF-AUTHFETCH] authFetch predates the backend's CSRF middleware —
+  // it never attached X-CSRF-Token, so every write through it (list-credit,
+  // delist-credit, list-credit-ledger, delist-credit-ledger,
+  // retire-credit-ledger, confirm-listing, confirm-delisting — the entire
+  // wallet-free listing/delisting/retiring flow) was silently failing CSRF
+  // validation on the backend. Reuses the SAME cached token as apiFetch in
+  // services/api.js rather than fetching its own, so both stay in sync.
+  if (isWrite) {
+    await ensureCsrfCookie();
+    const csrf = getCsrfToken();
+    if (!csrf) {
+      throw Object.assign(
+        new Error('Could not obtain CSRF token. Refresh the page and try again.'),
+        { status: 403 }
+      );
+    }
+  }
 
   const headers = {
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
+    ...(isWrite ? { 'X-CSRF-Token': getCsrfToken() } : {}),
     ...(opts.headers || {}),
   };
 

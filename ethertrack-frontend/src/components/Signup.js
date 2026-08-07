@@ -6,24 +6,44 @@
  *      Once verified, backend sets httpOnly cookies and navigates to dashboard.
  *      Firebase is only used for Google/Facebook OAuth (unchanged).
  *
+ * NEW: Account type toggle (Individual / Business) added up front.
+ *      Business accounts additionally collect Company Name + Position,
+ *      both sent to the backend on register so an organisation can be
+ *      auto-provisioned server-side once the account is verified.
+ *
+ * NEW (this pass): The registration step is now a 2-slide wizard instead of
+ *      one long form, so the card never has to grow past the viewport:
+ *        Slide 1 "info"        — account type, full name, company/position
+ *        Slide 2 "credentials" — email, password, confirm
+ *      Slides animate horizontally (framer-motion), with a small dot
+ *      progress indicator. Data persists across slides (state lives in the
+ *      parent, slides are just a view). The OTP step is effectively slide 3
+ *      and is unchanged apart from also getting a "step 3 of 3" dot.
+ *
+ * NEW (this pass): hero headline on the left panel now types itself out
+ *      line by line (see TypewriterHero) instead of appearing statically.
+ *
  * Flow:
- *   1. User fills name + email + password → POST /api/auth/register
+ *   1a. Slide "info": user picks account type, enters name (+ company/position
+ *       if business) → Continue
+ *   1b. Slide "credentials": email + password → POST /api/auth/register
  *   2. Backend creates user with bcrypt hash, sends OTP via Resend
  *   3. OTP input shown inline → POST /api/auth/verify-email
  *   4. Backend sets cookies → /api/auth/me → navigate to dashboard
  *
  * UI NOTE: visual layer only — every handler, state variable, and API call
- * below is unchanged from the original. See Login.jsx for the shared design
- * language (colors, card treatment, globe visual) this page reuses.
+ * below is unchanged from the original except where noted above. See
+ * Login.jsx for the shared design language (colors, card treatment, globe
+ * visual) this page reuses.
  */
 
-import React, { useState, useContext } from "react";
+import React, { useState, useContext, useEffect, useRef } from "react";
 import { useNavigate, Link, useSearchParams } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { FaGoogle, FaFacebook } from "react-icons/fa";
 import {
-  User, Mail, Lock, Eye, EyeOff, ArrowRight, ShieldCheck,
-  CheckCircle2, Circle, Leaf, Activity, Globe2,
+  User, Mail, Lock, Eye, EyeOff, ArrowRight, ArrowLeft, ShieldCheck,
+  CheckCircle2, Circle, Check, Leaf, Activity, Globe2, Building2, Briefcase,
 } from "lucide-react";
 import { signInWithPopup } from "firebase/auth";
 import { auth, googleProvider, facebookProvider } from "../firebaseConfigure";
@@ -49,7 +69,7 @@ const withRetry = async (fn, retries = 3, delayMs = 800) => {
   }
 };
 
-const syncToBackend = async (firebaseUser, provider = "google") => {
+const syncToBackend = async (firebaseUser, provider = "google", extra = {}) => {
   const idToken = await firebaseUser.getIdToken();
   return withRetry(() =>
     authAPI.syncUser(
@@ -59,6 +79,12 @@ const syncToBackend = async (firebaseUser, provider = "google") => {
         fullName:      firebaseUser.displayName || "",
         provider,
         emailVerified: firebaseUser.emailVerified,
+        // FIX: account type / company / position were being collected on the
+        // "info" slide but only ever sent to the backend via authAPI.register
+        // — if someone picked "Business", filled in company + position, then
+        // used a social button instead of continuing to email/password, all
+        // of that was silently dropped. Now forwarded through here too.
+        ...extra,
       },
       idToken
     )
@@ -162,6 +188,22 @@ function ErrorBanner({ error }) {
   );
 }
 
+// Small dot progress indicator for the wizard (info → credentials → verify)
+function StepDots({ index, total }) {
+  return (
+    <div className="mb-4 flex items-center justify-center gap-1.5">
+      {Array.from({ length: total }).map((_, i) => (
+        <span
+          key={i}
+          className={`h-[5px] rounded-full transition-all duration-300 ${
+            i === index ? "w-5 bg-[#22C55E]" : "w-[5px] bg-white/15"
+          }`}
+        />
+      ))}
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /*  Earth-at-night / India-lit-up visual (same asset as Login.jsx)    */
 /* ------------------------------------------------------------------ */
@@ -219,8 +261,106 @@ const FEATURES = [
   { icon: Globe2,      title: "Global Marketplace", subtitle: "Trusted & Transparent" },
 ];
 
+/* ------------------------------------------------------------------ */
+/*  Typewriter hero — types each line in sequence, respects reduced   */
+/*  motion, reserves the final height upfront so nothing reflows.     */
+/* ------------------------------------------------------------------ */
+
+const HERO_LINES = [
+  { text: "Track Carbon.", className: "text-white" },
+  { text: "Tokenize Trust.", className: "text-white" },
+  { text: "Trade Sustainably.", className: "text-[#22C55E]" },
+];
+
+function TypewriterHero() {
+  // phase: "typing" (including the hold at the end, while the last line's
+  // cursor just blinks) or "erasing" (deletes back to nothing, then loops
+  // back to "typing" from line 0). Runs forever while the page is open.
+  const [phase, setPhase] = useState("typing");
+  const [lineIndex, setLineIndex] = useState(0);
+  const [charIndex, setCharIndex] = useState(0);
+  const prefersReducedMotion = useRef(
+    typeof window !== "undefined" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  ).current;
+
+  const TYPE_MS = 38;
+  const LINE_PAUSE_MS = 260;
+  const HOLD_MS = 2200;
+  const ERASE_MS = 22;
+  const LINE_ERASE_PAUSE_MS = 180;
+  const RESTART_PAUSE_MS = 500;
+
+  useEffect(() => {
+    if (prefersReducedMotion) return; // static final text, no animation loop
+
+    if (phase === "typing") {
+      const line = HERO_LINES[lineIndex].text;
+      if (charIndex < line.length) {
+        const t = setTimeout(() => setCharIndex(c => c + 1), TYPE_MS);
+        return () => clearTimeout(t);
+      }
+      if (lineIndex < HERO_LINES.length - 1) {
+        const t = setTimeout(() => { setLineIndex(l => l + 1); setCharIndex(0); }, LINE_PAUSE_MS);
+        return () => clearTimeout(t);
+      }
+      // Full text typed — hold for a beat before erasing.
+      const t = setTimeout(() => setPhase("erasing"), HOLD_MS);
+      return () => clearTimeout(t);
+    }
+
+    if (phase === "erasing") {
+      if (charIndex > 0) {
+        const t = setTimeout(() => setCharIndex(c => c - 1), ERASE_MS);
+        return () => clearTimeout(t);
+      }
+      if (lineIndex > 0) {
+        const t = setTimeout(() => {
+          setLineIndex(l => l - 1);
+          setCharIndex(HERO_LINES[lineIndex - 1].text.length);
+        }, LINE_ERASE_PAUSE_MS);
+        return () => clearTimeout(t);
+      }
+      // Fully erased — brief pause, then loop back to typing from scratch.
+      const t = setTimeout(() => setPhase("typing"), RESTART_PAUSE_MS);
+      return () => clearTimeout(t);
+    }
+  }, [phase, charIndex, lineIndex, prefersReducedMotion]);
+
+  return (
+    <h1 className="text-[22px] font-bold leading-[1.15] tracking-tight sm:text-[26px] lg:text-[29px] xl:text-[32px]">
+      {HERO_LINES.map((line, i) => {
+        const complete = prefersReducedMotion || i < lineIndex;
+        const active = !prefersReducedMotion && i === lineIndex;
+        return (
+          <span key={line.text} className={`block ${line.className} ${complete || active ? "" : "invisible"}`}>
+            {complete ? line.text : active ? line.text.slice(0, charIndex) : line.text}
+            {active && (
+              <span className="ml-0.5 inline-block h-[0.9em] w-[2px] animate-[caret-blink_0.9s_steps(1)_infinite] bg-current align-middle" />
+            )}
+          </span>
+        );
+      })}
+    </h1>
+  );
+}
+
+// Slide transition: moves in from the direction you're navigating toward,
+// exits toward the opposite direction. `dir` is 1 for forward, -1 for back.
+const slideVariants = {
+  enter: (dir) => ({ x: dir > 0 ? 60 : -60, opacity: 0 }),
+  center: { x: 0, opacity: 1 },
+  exit: (dir) => ({ x: dir > 0 ? -60 : 60, opacity: 0 }),
+};
+
 // ── Component ─────────────────────────────────────────────────────
 const Signup = () => {
+  // Account category — asked up front so we know whether to collect
+  // company details and can auto-provision an organisation on verify.
+  const [accountType,  setAccountType]  = useState("individual"); // "individual" | "business"
+  const [companyName,  setCompanyName]  = useState("");
+  const [designation,  setDesignation]  = useState("");
+
   // Step 1 fields
   const [fullName,     setFullName]     = useState("");
   const [email,        setEmail]        = useState("");
@@ -228,11 +368,18 @@ const Signup = () => {
   const [confirm,      setConfirm]      = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirm,  setShowConfirm]  = useState(false);
+  const [agreedToTerms, setAgreedToTerms] = useState(false);
 
   // Step 2 — OTP
   const [step,        setStep]        = useState("register"); // "register" | "verify"
   const [otp,         setOtp]         = useState("");
   const [resendTimer, setResendTimer] = useState(0);
+
+  // Wizard slide within "register": "info" (account type/name/company) →
+  // "credentials" (email/password). `direction` drives which way the
+  // slide animates (1 = forward/right, -1 = backward/left).
+  const [subStep,   setSubStep]   = useState("info");
+  const [direction, setDirection] = useState(1);
 
   // Shared
   const [error,        setError]        = useState("");
@@ -259,7 +406,30 @@ const Signup = () => {
     }, 1000);
   };
 
-  // ── Step 1: Register via backend ───────────────────────────────
+  // ── Slide 1 → 2: validate name/company, then advance ───────────
+  const handleContinueToCredentials = (e) => {
+    e?.preventDefault();
+    const trimmedName        = fullName.trim();
+    const trimmedCompany     = companyName.trim();
+    const trimmedDesignation = designation.trim();
+    const isBusiness         = accountType === "business";
+
+    if (!trimmedName) { setError("Please enter your full name."); return; }
+    if (isBusiness && !trimmedCompany)     { setError("Please enter your company name."); return; }
+    if (isBusiness && !trimmedDesignation) { setError("Please enter your position at the company."); return; }
+
+    setError("");
+    setDirection(1);
+    setSubStep("credentials");
+  };
+
+  const handleBackToInfo = () => {
+    setError("");
+    setDirection(-1);
+    setSubStep("info");
+  };
+
+  // ── Slide 2: Register via backend ───────────────────────────────
   const handleRegister = async (e) => {
     e?.preventDefault();
 
@@ -270,10 +440,17 @@ const Signup = () => {
     const trimmedEmail = email.trim();
     const trimmedName  = fullName.trim();
 
+    const trimmedCompany     = companyName.trim();
+    const trimmedDesignation = designation.trim();
+    const isBusiness         = accountType === "business";
+
     if (!trimmedName)                 { setError("Please enter your full name."); return; }
     if (!validateEmail(trimmedEmail)) { setError("Invalid email format."); return; }
     if (password.length < 8)         { setError("Password must be at least 8 characters."); return; }
     if (password !== confirm)        { setError("Passwords do not match."); return; }
+    if (isBusiness && !trimmedCompany)     { setError("Please enter your company name."); return; }
+    if (isBusiness && !trimmedDesignation) { setError("Please enter your position at the company."); return; }
+    if (!agreedToTerms) { setError("Please agree to the Terms of Service and Privacy Policy to continue."); return; }
 
     startLoading("email");
     try {
@@ -281,6 +458,8 @@ const Signup = () => {
         email:    trimmedEmail,
         password,
         fullName: trimmedName,
+        accountType,
+        ...(isBusiness ? { companyName: trimmedCompany, designation: trimmedDesignation } : {}),
       });
       setStep("verify");
       startResendTimer();
@@ -336,6 +515,13 @@ const Signup = () => {
 
   // ── Social signup — still uses Firebase ───────────────────────
   const handleSocialSignup = async (provider, providerLabel) => {
+    // FIX: same validation as handleContinueToCredentials — if someone picked
+    // "Business" but hasn't filled in company/position yet, don't let a social
+    // button skip past that and create an incomplete business account.
+    const isBusiness = accountType === "business";
+    if (isBusiness && !companyName.trim())  { setError("Please enter your company name."); return; }
+    if (isBusiness && !designation.trim())  { setError("Please enter your position at the company."); return; }
+
     const urlParams   = new URLSearchParams(window.location.search);
     const inviteToken = urlParams.get("token");
     if (inviteToken) sessionStorage.setItem("pending_invite_token", inviteToken);
@@ -343,7 +529,10 @@ const Signup = () => {
     startLoading(providerLabel.toLowerCase());
     try {
       const cred = await signInWithPopup(auth, provider);
-      const res  = await syncToBackend(cred.user, providerLabel.toLowerCase());
+      const res  = await syncToBackend(cred.user, providerLabel.toLowerCase(), {
+        accountType,
+        ...(isBusiness ? { companyName: companyName.trim(), designation: designation.trim() } : {}),
+      });
       if (res?.user) {
         await handleLogin({ email: cred.user.email, dbUser: res.user }, cred.user);
       }
@@ -372,9 +561,29 @@ const Signup = () => {
     setError("");
   };
 
+  // FIX: previously required clicking "Verify & Sign In" even after typing
+  // all 6 digits — small but real friction. Auto-submits once complete.
+  useEffect(() => {
+    if (step === "verify" && otp.length === 6 && !loading) {
+      handleVerifyOtp();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [otp, step]);
+
+  // Which dot index to highlight: 0 = info, 1 = credentials, 2 = verify
+  const dotIndex = step === "verify" ? 2 : (subStep === "credentials" ? 1 : 0);
+
   return (
-    <div className="relative h-screen w-full overflow-hidden bg-[#050807] font-sans text-white flex flex-col">
+    <div className="et-viewport relative w-full overflow-hidden bg-[#050807] font-sans text-white flex flex-col">
       <style>{`
+        /* FIX: 100vh doesn't account for mobile browser chrome (e.g. iOS
+           Safari's address bar). 100dvh fixes this where supported; 100vh
+           above it is the fallback for browsers that don't support dvh. */
+        .et-viewport { height: 100vh; height: 100dvh; }
+        @keyframes caret-blink {
+          0%, 49% { opacity: 1; }
+          50%, 100% { opacity: 0; }
+        }
         @keyframes float-particle {
           0%, 100% { transform: translateY(0) translateX(0); opacity: 0.2; }
           50% { transform: translateY(-14px) translateX(6px); opacity: 0.8; }
@@ -382,15 +591,22 @@ const Signup = () => {
         @media (prefers-reduced-motion: reduce) {
           *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
         }
+        .no-scrollbar {
+          scrollbar-width: none;       /* Firefox */
+          -ms-overflow-style: none;    /* IE/Edge */
+        }
+        .no-scrollbar::-webkit-scrollbar {
+          display: none;               /* Chrome/Safari */
+        }
       `}</style>
 
       <div className="pointer-events-none absolute inset-x-0 top-0 h-[500px]
                       bg-[radial-gradient(ellipse_at_50%_-10%,rgba(34,197,94,0.08),transparent_60%)]" />
 
-      <div className="relative mx-auto flex w-full max-w-[1600px] flex-1 min-h-0 flex-col items-stretch px-6 lg:flex-row lg:items-center lg:px-10 lg:py-4">
+      <div className="relative mx-auto flex w-full max-w-[1600px] flex-1 min-h-0 flex-col items-stretch gap-6 overflow-x-hidden px-6 lg:flex-row lg:gap-10 lg:px-10 lg:py-4">
 
         {/* ============================= LEFT PANEL ============================= */}
-        <div className="relative flex min-h-0 w-full flex-col lg:w-[55%] lg:h-full lg:py-3 lg:pr-14">
+        <div className="relative flex min-h-0 w-full flex-col lg:w-[55%] lg:h-full lg:py-3">
           <div>
             {/* Logo */}
             <motion.div
@@ -409,29 +625,26 @@ const Signup = () => {
                   <span className="text-white">ETHER</span>
                   <span className="text-[#22C55E]">TRACK</span>
                 </div>
-                <div className="mt-1 text-[10px] text-white/40">
+                <div className="mt-1 text-[10px] text-white/55">
                   Track. Tokenize. Trade.
                 </div>
               </div>
             </motion.div>
 
-            {/* Hero */}
-            <motion.h1
+            {/* Hero — typewriter */}
+            <motion.div
               initial={{ opacity: 0, y: 12 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.6, delay: 0.1 }}
-              className="text-[22px] font-bold leading-[1.15] tracking-tight sm:text-[26px] lg:text-[29px] xl:text-[32px]"
             >
-              <span className="block text-white">Track Carbon.</span>
-              <span className="block text-white">Tokenize Trust.</span>
-              <span className="block text-[#22C55E]">Trade Sustainably.</span>
-            </motion.h1>
+              <TypewriterHero />
+            </motion.div>
 
             <motion.p
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.6, delay: 0.3 }}
-              className="mt-3 max-w-[420px] text-[12px] leading-relaxed text-white/45"
+              className="mt-3 max-w-[420px] text-[12px] leading-relaxed text-white/55"
             >
               The all-in-one platform for carbon accounting, credit tokenization
               and compliant trading.
@@ -448,7 +661,7 @@ const Signup = () => {
                 <div key={title} className="flex flex-col gap-1">
                   <Icon className="h-4 w-4 text-[#22C55E]" strokeWidth={1.75} />
                   <div className="text-[11.5px] font-semibold text-white/90">{title}</div>
-                  <div className="text-[10px] text-white/40">{subtitle}</div>
+                  <div className="text-[10px] text-white/55">{subtitle}</div>
                 </div>
               ))}
             </motion.div>
@@ -465,29 +678,41 @@ const Signup = () => {
         </div>
 
         {/* ============================= RIGHT PANEL ============================= */}
-        <div className="flex w-full min-h-0 items-center justify-center py-3 lg:w-[45%] lg:py-2">
+        <div className="flex w-full min-h-0 h-full items-center justify-center py-3 lg:w-[45%] lg:py-2">
           <motion.div
             initial={{ opacity: 0, y: 16 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5, delay: 0.15 }}
-            className="relative w-full max-w-[440px] rounded-3xl border border-white/[0.08] bg-[#0F1313]/90
-                       p-5 shadow-[0_30px_80px_rgba(0,0,0,0.45)] backdrop-blur-sm sm:p-6"
+            className="relative w-full max-w-[400px] max-h-full overflow-y-auto overflow-x-hidden no-scrollbar rounded-3xl border border-white/[0.08] bg-[#0F1313]/90
+                       p-4 shadow-[0_30px_80px_rgba(0,0,0,0.45)] backdrop-blur-sm sm:p-5"
           >
-            <AnimatePresence mode="wait">
-              {/* ── Step 1: Registration ── */}
-              {step === "register" && (
-                <motion.div key="register" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                  {/* Secure badge */}
-                  <div className="absolute right-5 top-5 flex items-center gap-1.5 rounded-full border border-[#22C55E]/25
-                                  bg-[#22C55E]/10 px-2.5 py-1 text-[10px] font-medium text-[#4ADE80] sm:right-6 sm:top-6">
-                    <ShieldCheck className="h-3 w-3" />
-                    Secure &amp; Compliant
-                  </div>
+            {/* Secure badge — shown across all slides of the register step */}
+            {step === "register" && (
+              <div className="absolute right-5 top-5 flex items-center gap-1.5 rounded-full border border-[#22C55E]/25
+                              bg-[#22C55E]/10 px-2.5 py-1 text-[10px] font-medium text-[#4ADE80] sm:right-6 sm:top-6">
+                <ShieldCheck className="h-3 w-3" />
+                Secure &amp; Compliant
+              </div>
+            )}
 
+            <StepDots index={dotIndex} total={3} />
+
+            <AnimatePresence mode="wait" custom={direction}>
+              {/* ── Slide 1: account info ── */}
+              {step === "register" && subStep === "info" && (
+                <motion.div
+                  key="info"
+                  custom={direction}
+                  variants={slideVariants}
+                  initial="enter"
+                  animate="center"
+                  exit="exit"
+                  transition={{ duration: 0.25, ease: "easeInOut" }}
+                >
                   <h2 className="text-[19px] font-bold tracking-tight sm:text-[21px]">
                     Create <span className="text-[#22C55E]">your account</span>
                   </h2>
-                  <p className="mb-3.5 mt-1 text-[12px] text-white/45">
+                  <p className="mb-3.5 mt-1 text-[12px] text-white/60">
                     Join EtherTrack and build a sustainable future.
                   </p>
 
@@ -497,7 +722,48 @@ const Signup = () => {
                     </div>
                   )}
 
-                  <form onSubmit={handleRegister} noValidate>
+                  {/* Account category — determines whether we collect company
+                      details and auto-provision an organisation on verify */}
+                  <div className="mb-3.5">
+                    <label className="mb-1.5 block text-[11px] font-medium tracking-[0.08em] text-white/60">
+                      ACCOUNT TYPE
+                    </label>
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() => { setAccountType("individual"); setError(""); }}
+                        aria-pressed={accountType === "individual"}
+                        className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-[12.5px] font-medium transition-all duration-200 ${
+                          accountType === "individual"
+                            ? "border-[#22C55E] bg-[#22C55E]/10 text-[#4ADE80]"
+                            : "border-white/10 bg-black/30 text-white/60 hover:border-white/20"
+                        }`}
+                      >
+                        <User className="h-4 w-4" />
+                        Individual
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setAccountType("business"); setError(""); }}
+                        aria-pressed={accountType === "business"}
+                        className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-[12.5px] font-medium transition-all duration-200 ${
+                          accountType === "business"
+                            ? "border-[#22C55E] bg-[#22C55E]/10 text-[#4ADE80]"
+                            : "border-white/10 bg-black/30 text-white/60 hover:border-white/20"
+                        }`}
+                      >
+                        <Building2 className="h-4 w-4" />
+                        Business
+                      </button>
+                    </div>
+                    <p className="mt-1.5 text-[10.5px] text-white/50">
+                      {accountType === "business"
+                        ? "For companies tracking emissions, tokenizing credits, and generating compliance reports."
+                        : "For individuals buying, selling, and managing a carbon credit portfolio."}
+                    </p>
+                  </div>
+
+                  <form onSubmit={handleContinueToCredentials} noValidate>
                     <Field icon={User} label="FULL NAME">
                       <input
                         id="signup-name"
@@ -506,10 +772,106 @@ const Signup = () => {
                         placeholder="Enter your full name"
                         value={fullName}
                         autoComplete="name"
+                        autoFocus
                         onChange={e => { setFullName(e.target.value); setError(""); }}
                       />
                     </Field>
 
+                    {accountType === "business" && (
+                      <>
+                        <Field icon={Building2} label="COMPANY NAME">
+                          <input
+                            id="signup-company"
+                            className={inputBase}
+                            type="text"
+                            placeholder="Enter your company's registered name"
+                            value={companyName}
+                            autoComplete="organization"
+                            onChange={e => { setCompanyName(e.target.value); setError(""); }}
+                          />
+                        </Field>
+
+                        <Field icon={Briefcase} label="YOUR POSITION">
+                          <input
+                            id="signup-designation"
+                            className={inputBase}
+                            type="text"
+                            placeholder="e.g. Sustainability Manager, CFO, Director"
+                            value={designation}
+                            autoComplete="organization-title"
+                            onChange={e => { setDesignation(e.target.value); setError(""); }}
+                          />
+                        </Field>
+                      </>
+                    )}
+
+                    <ErrorBanner error={error} />
+
+                    <div className="mt-3.5">
+                      <PrimaryButton type="submit">
+                        Continue
+                      </PrimaryButton>
+                    </div>
+                  </form>
+
+                  <div className="mt-3.5 flex items-center gap-4">
+                    <div className="h-px flex-1 bg-white/10" />
+                    <span className="text-[10.5px] text-white/45">OR CONTINUE WITH</span>
+                    <div className="h-px flex-1 bg-white/10" />
+                  </div>
+
+                  <SocialButton
+                    icon={<FaGoogle size={13} color="#4ADE80" />}
+                    onClick={() => handleSocialSignup(googleProvider, "Google")}
+                    disabled={loading}
+                  >
+                    {activeMethod === "google" ? "Connecting…" : "Sign up with Google"}
+                  </SocialButton>
+                  <SocialButton
+                    icon={<FaFacebook size={13} color="#4ADE80" />}
+                    onClick={() => handleSocialSignup(facebookProvider, "Facebook")}
+                    disabled={loading}
+                  >
+                    {activeMethod === "facebook" ? "Connecting…" : "Sign up with Facebook"}
+                  </SocialButton>
+
+                  <p className="mt-3.5 text-center text-[12px] text-white/60">
+                    Already have an account?{" "}
+                    <Link to="/login" className="inline-flex items-center gap-1 font-medium text-[#22C55E] hover:text-[#4ADE80]">
+                      Sign in <ArrowRight className="h-3 w-3" />
+                    </Link>
+                  </p>
+                </motion.div>
+              )}
+
+              {/* ── Slide 2: email + password ── */}
+              {step === "register" && subStep === "credentials" && (
+                <motion.div
+                  key="credentials"
+                  custom={direction}
+                  variants={slideVariants}
+                  initial="enter"
+                  animate="center"
+                  exit="exit"
+                  transition={{ duration: 0.25, ease: "easeInOut" }}
+                >
+                  <button
+                    type="button"
+                    onClick={handleBackToInfo}
+                    className="mb-3 flex items-center gap-1.5 text-[11.5px] text-white/55 transition-colors hover:text-white"
+                  >
+                    <ArrowLeft className="h-3.5 w-3.5" />
+                    Back
+                  </button>
+
+                  <h2 className="text-[19px] font-bold tracking-tight sm:text-[21px]">
+                    Secure <span className="text-[#22C55E]">your account</span>
+                  </h2>
+                  <p className="mb-3.5 mt-1 text-[12px] text-white/60">
+                    Almost there, {fullName.trim().split(" ")[0] || "there"} — just your login details.
+                  </p>
+
+                  <form onSubmit={handleRegister} noValidate>
                     <Field icon={Mail} label="BUSINESS EMAIL">
                       <input
                         id="signup-email"
@@ -518,6 +880,7 @@ const Signup = () => {
                         placeholder="Enter your business email"
                         value={email}
                         autoComplete="email"
+                        autoFocus
                         onChange={e => { setEmail(e.target.value); setError(""); }}
                       />
                     </Field>
@@ -551,8 +914,9 @@ const Signup = () => {
                         placeholder="Re-enter your password"
                         value={confirm}
                         autoComplete="new-password"
+                        aria-invalid={Boolean(confirm && confirm !== password)}
+                        aria-describedby={confirm && confirm !== password ? "confirm-mismatch" : undefined}
                         onChange={e => { setConfirm(e.target.value); setError(""); }}
-                        onPaste={e => e.preventDefault()}
                       />
                       <button
                         type="button"
@@ -564,6 +928,13 @@ const Signup = () => {
                         {showConfirm ? <EyeOff className="h-[16px] w-[16px]" /> : <Eye className="h-[16px] w-[16px]" />}
                       </button>
                     </Field>
+                    {/* FIX: mismatch was color-only (red border) — invisible to
+                        colorblind users until submit. Explicit text instead. */}
+                    {confirm && confirm !== password && (
+                      <p id="confirm-mismatch" className="-mt-1.5 mb-2.5 text-[11px] text-red-400">
+                        Passwords don&apos;t match.
+                      </p>
+                    )}
 
                     {/* Password requirement checklist */}
                     {password && (
@@ -581,63 +952,75 @@ const Signup = () => {
                       </div>
                     )}
 
+                    {/* Required ToS/Privacy consent — a carbon-credit trading
+                        platform needs explicit consent captured at signup,
+                        not just implied by using the product. */}
+                    <label className="mb-1 flex cursor-pointer items-start gap-2 text-[11.5px] leading-relaxed text-white/55">
+                      <span className="relative mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">
+                        <input
+                          type="checkbox"
+                          checked={agreedToTerms}
+                          onChange={e => { setAgreedToTerms(e.target.checked); setError(""); }}
+                          className="peer sr-only"
+                        />
+                        <span className="absolute inset-0 rounded border border-white/20 bg-black/40 transition-colors
+                                         peer-checked:border-[#22C55E] peer-checked:bg-[#22C55E]" />
+                        {agreedToTerms && <Check className="relative h-3 w-3 text-black" strokeWidth={3} />}
+                      </span>
+                      <span>
+                        I agree to the{" "}
+                        <Link to="/terms" target="_blank" rel="noopener noreferrer" className="font-medium text-[#22C55E] hover:text-[#4ADE80]">
+                          Terms of Service
+                        </Link>{" "}
+                        and{" "}
+                        <Link to="/privacy" target="_blank" rel="noopener noreferrer" className="font-medium text-[#22C55E] hover:text-[#4ADE80]">
+                          Privacy Policy
+                        </Link>
+                      </span>
+                    </label>
+
                     <ErrorBanner error={error} />
 
                     <div className="mt-3.5">
-                      <PrimaryButton type="submit" loading={loading && activeMethod === "email"} loadingLabel="Creating account…">
+                      <PrimaryButton
+                        type="submit"
+                        loading={loading && activeMethod === "email"}
+                        loadingLabel="Creating account…"
+                        disabled={loading || !agreedToTerms}
+                      >
                         Create Account
                       </PrimaryButton>
                     </div>
                   </form>
 
-                  <div className="mt-3.5 flex items-center gap-4">
-                    <div className="h-px flex-1 bg-white/10" />
-                    <span className="text-[10.5px] text-white/35">OR CONTINUE WITH</span>
-                    <div className="h-px flex-1 bg-white/10" />
-                  </div>
-
-                  <SocialButton
-                    icon={<FaGoogle size={13} color="#4ADE80" />}
-                    onClick={() => handleSocialSignup(googleProvider, "Google")}
-                    disabled={loading}
-                  >
-                    {activeMethod === "google" ? "Connecting…" : "Sign up with Google"}
-                  </SocialButton>
-                  <SocialButton
-                    icon={<FaFacebook size={13} color="#4ADE80" />}
-                    onClick={() => handleSocialSignup(facebookProvider, "Facebook")}
-                    disabled={loading}
-                  >
-                    {activeMethod === "facebook" ? "Connecting…" : "Sign up with Facebook"}
-                  </SocialButton>
-
-                  <p className="mt-3.5 text-center text-[12px] text-white/45">
-                    Already have an account?{" "}
-                    <Link to="/login" className="inline-flex items-center gap-1 font-medium text-[#22C55E] hover:text-[#4ADE80]">
-                      Sign in <ArrowRight className="h-3 w-3" />
-                    </Link>
-                  </p>
-
-                  <div className="mt-3 flex items-center justify-center gap-1.5 text-[10.5px] text-white/30">
+                  <div className="mt-3 flex items-center justify-center gap-1.5 text-[10.5px] text-white/45">
                     <Lock className="h-3 w-3" />
                     Your data is encrypted and secure with us.
                   </div>
                 </motion.div>
               )}
 
-              {/* ── Step 2: OTP verification ── */}
+              {/* ── Slide 3: OTP verification ── */}
               {step === "verify" && (
-                <motion.div key="verify" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                <motion.div
+                  key="verify"
+                  custom={1}
+                  variants={slideVariants}
+                  initial="enter"
+                  animate="center"
+                  exit="exit"
+                  transition={{ duration: 0.25, ease: "easeInOut" }}
+                >
                   <h2 className="text-[22px] font-bold tracking-tight sm:text-[24px]">
                     Verify <span className="text-[#22C55E]">your email</span>
                   </h2>
-                  <p className="mb-6 mt-1 text-[13px] text-white/45">
+                  <p className="mb-6 mt-1 text-[13px] text-white/60">
                     Enter your 6-digit code
                   </p>
 
                   <form onSubmit={handleVerifyOtp} noValidate>
                     <div className="flex flex-col items-center gap-5 py-1">
-                      <p className="text-center text-[12.5px] leading-relaxed text-white/45">
+                      <p className="text-center text-[12.5px] leading-relaxed text-white/55">
                         We sent a code to <span className="text-[#4ADE80]">{email}</span>.
                         <br />
                         It expires in 10 minutes. Check spam if you don&apos;t see it.
@@ -658,7 +1041,7 @@ const Signup = () => {
                         aria-label="6-digit verification code"
                       />
 
-                      <p className="text-[11.5px] text-white/35">
+                      <p className="text-[11.5px] text-white/50">
                         {resendTimer > 0 ? (
                           <span>Resend in {resendTimer}s</span>
                         ) : (
@@ -684,8 +1067,8 @@ const Signup = () => {
 
                   <button
                     type="button"
-                    onClick={() => { setStep("register"); setOtp(""); setError(""); }}
-                    className="mt-4 w-full text-center text-[12.5px] text-white/40 transition-colors hover:text-white"
+                    onClick={() => { setStep("register"); setSubStep("credentials"); setDirection(-1); setOtp(""); setError(""); }}
+                    className="mt-4 w-full text-center text-[12.5px] text-white/55 transition-colors hover:text-white"
                   >
                     ← Back to sign up
                   </button>

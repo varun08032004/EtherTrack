@@ -1,7 +1,25 @@
 // server.js — EtherTrack API
-// PRODUCTION HARDENED — v16
+// PRODUCTION HARDENED — v17
 // ─────────────────────────────────────────────────────────────────────────────
-// CHANGES vs v15:
+// CHANGES vs v16:
+//
+// [FIX-BRSR-DATA-MOUNT]  Mounted routes/brsrDataRoutes.js at /api/brsr,
+//                       alongside the existing routes/brsr.js on the same
+//                       base path. brsrDataRoutes.js (Section A, Section B,
+//                       principles P1-P5/P7-P9, and the /all/:year snapshot
+//                       used by report generation) was fully written but
+//                       never required or app.use()'d anywhere in this file —
+//                       every route inside it has been 404ing since it was
+//                       added. No path collisions with routes/brsr.js (that
+//                       file only owns /environmental and a few others);
+//                       mounted directly after it to match the ordering
+//                       brsrDataRoutes.js's own header comment expects.
+//                       Left OFF the CSRF_SKIP_PREFIX list on purpose — its
+//                       POST endpoints are normal authenticated writes from
+//                       the logged-in frontend and should carry the CSRF
+//                       token like every other write route.
+//
+// CHANGES vs v15 (retained from v16):
 //
 // [FIX-INVOICE-VERIFY]  Mounted /api/invoices → routes/invoiceVerify.js —
 //                       public, unauthenticated lookup backing the QR code
@@ -164,6 +182,9 @@ const auditRoutes                = require('./routes/audit');
 const auditorVerificationRoutes  = require('./routes/auditor-verification');
 const auditorAccessRoutes        = require('./routes/audit-auditor-access');
 const brsrRoutes        = require('./routes/brsr');
+// [FIX-BRSR-DATA-MOUNT v17] Section A/B/principles data layer — same base
+// path as brsrRoutes above, no route collisions (see mount comment below).
+const brsrDataRoutes    = require('./routes/brsrDataRoutes');
 const patRoutes         = require('./routes/pat');
 const cctsRoutes        = require('./routes/ccts');
 const alertRoutes       = require('./routes/alerts');
@@ -378,6 +399,11 @@ app.use('/api/rates',               limiter(60 * 1000,        60,  'Too many rat
 app.use('/api/emissions/log',       limiter(60 * 1000,        30,  'Too many emission logs. Slow down.'));
 app.use('/api/emissions/bulk',      limiter(60 * 60 * 1000,   10,  'Too many bulk imports. Try again later.'));
 app.use('/api/brsr/environmental',  limiter(60 * 1000,        20,  'Too many BRSR saves. Slow down.'));
+// [FIX-BRSR-DATA-MOUNT v17] Same modest ceiling as /environmental above,
+// now that section-a/section-b/principle saves are actually reachable.
+app.use('/api/brsr/section-a',      limiter(60 * 1000,        20,  'Too many BRSR saves. Slow down.'));
+app.use('/api/brsr/section-b',      limiter(60 * 1000,        20,  'Too many BRSR saves. Slow down.'));
+app.use('/api/brsr/principle',      limiter(60 * 1000,        20,  'Too many BRSR saves. Slow down.'));
 app.use('/api/ccts/profile',        limiter(60 * 1000,        20,  'Too many CCTS saves. Slow down.'));
 app.use('/api/pat/profile',         limiter(60 * 1000,        20,  'Too many PAT saves. Slow down.'));
 app.use('/api/compliance',          limiter(60 * 1000,        60,  'Too many compliance requests. Slow down.'));
@@ -473,6 +499,12 @@ app.use('/api/portfolio',     portfolioRoutes);
 app.use('/api/portfolio',     operatorTradingRoutes);
 app.use('/api/emissions',     emissionRoutes);
 app.use('/api/brsr',          brsrRoutes);
+// [FIX-BRSR-DATA-MOUNT v17] Section A/B/principles + /all/:year snapshot.
+// Mounted on the SAME base path as brsrRoutes above — Express matches
+// sub-paths in registration order and there's no overlap (brsrRoutes owns
+// /environmental etc.; brsrDataRoutes owns /section-a, /section-b,
+// /principle/:id, /all/:year), so both routers happily coexist here.
+app.use('/api/brsr',          brsrDataRoutes);
 app.use('/api/pat',           patRoutes);
 app.use('/api/ccts',          cctsRoutes);
 app.use('/api/compliance',    cctsCFORoutes);

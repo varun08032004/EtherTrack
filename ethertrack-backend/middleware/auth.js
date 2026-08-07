@@ -112,7 +112,10 @@ const USER_SELECT = `
          corporate_managed,
          subscription_plan,
          subscription_cycle,
-         subscription_renewal_date
+         subscription_renewal_date,
+         org_id, team_role, is_company_account, designation,
+         company_name, company_gstin, company_pan, company_cin,
+         company_type, industry_sector
   FROM users
   WHERE id::text = $1
      OR firebase_uid = $1
