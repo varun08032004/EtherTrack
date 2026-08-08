@@ -39,8 +39,6 @@ async function main() {
   
   console.log(`✅ TimelockController deployed to: ${timelockAddress}`);
   console.log(`   Min Delay: ${(await timelock.getMinDelay())} seconds`);
-  console.log(`   Admin: ${await timelock.admin()}`);
-  console.log(`   Proposers: ${(await timelock.getRoleMembers(await timelock.PROPOSER_ROLE())).join(", ")}`);
 
   // Verify contract deployment
   const code = await ethers.provider.getCode(timelockAddress);
@@ -81,17 +79,17 @@ async function main() {
   console.log("\n🔍 Verifying Timelock Roles:");
   const proposerRole = await timelock.PROPOSER_ROLE();
   const executorRole = await timelock.EXECUTOR_ROLE();
-  const adminRole = await timelock.ADMIN_ROLE();
   
   console.log(`   PROPOSER_ROLE: ${proposerRole}`);
   console.log(`   EXECUTOR_ROLE: ${executorRole}`);
-  console.log(`   ADMIN_ROLE: ${adminRole}`);
+  console.log(`   DEFAULT_ADMIN_ROLE: 0x0000000000000000000000000000000000000000000000000000000000000000`);
   
-  const proposerMembers = await timelock.getRoleMembers(proposerRole);
-  console.log(`   Proposers: ${proposerMembers.join(", ")}`);
+  // Check if deployer has proposer role
+  const deployerHasProposer = await timelock.hasRole(proposerRole, deployer.address);
+  console.log(`   Deployer has PROPOSER_ROLE: ${deployerHasProposer}`);
   
-  const adminMembers = await timelock.getRoleMembers(adminRole);
-  console.log(`   Admins: ${adminMembers.join(", ")}`);
+  const deployerHasAdmin = await timelock.hasRole("0x0000000000000000000000000000000000000000000000000000000000000000", deployer.address);
+  console.log(`   Deployer has DEFAULT_ADMIN_ROLE: ${deployerHasAdmin}`);
 
   console.log("\n✅ TimelockController deployed successfully!");
   console.log("\n📋 NEXT STEPS:");

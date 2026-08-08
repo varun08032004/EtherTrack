@@ -1,0 +1,14 @@
+{
+  "network": "sepolia",
+  "chainId": 11155111,
+  "timelockAddress": "0x47F60Bc8559B82f61240125083A6AD6124C1D541",
+  "deployer": "0xE026653F4fDfe7Bd02fd1F6534Da631DD3410489",
+  "minDelay": 3600,
+  "proposers": [
+    "0xE026653F4fDfe7Bd02fd1F6534Da631DD3410489"
+  ],
+  "executors": [],
+  "admin": "0xE026653F4fDfe7Bd02fd1F6534Da631DD3410489",
+  "deployedAt": "2026-08-08T17:43:12.077Z",
+  "blockNumber": "11446791"
+}
