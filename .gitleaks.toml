@@ -1,0 +1,200 @@
+# Gitleaks Configuration for EtherTrack
+# https://github.com/gitleaks/gitleaks
+
+[allowlist]
+description = "Allowlisted patterns for EtherTrack"
+paths = [
+  '\.env\.example$',
+  '.*\.example$',
+  '.*\.template$',
+  '.*\.md$',
+  '.*\.txt$',
+  '.*\.json$',
+  'package.*\.json$',
+  'package-lock\.json$',
+  'yarn\.lock$',
+  'pnpm-lock\.yaml$',
+  '.*\.lock$',
+  '.*\.yml$',
+  '.*\.yaml$',
+  '.*\.toml$',
+  '.*\.ini$',
+  '.*\.config\.js$',
+  '.*\.config\.ts$',
+  'craco\.config\.js$',
+  'tailwind\.config\.js$',
+  'postcss\.config\.js$',
+  'vitest\.config\.js$',
+  '.*\.spec\.js$',
+  '.*\.test\.js$',
+  '.*\.spec\.ts$',
+  '.*\.test\.ts$',
+  '.*\.d\.ts$',
+  '.*\.map$',
+  'LICENSE',
+  'README.*',
+  'CHANGELOG.*',
+  'CONTRIBUTING.*',
+  'CODEOWNERS',
+  '.*\.github/.*',
+  '.*\.husky/.*',
+  '.*\.sh$',
+  '.*\.bat$',
+  '.*\.ps1$',
+  'Dockerfile.*',
+  'docker-compose.*',
+  '.*\.dockerfile$',
+  '\.dockerignore$',
+  '.*\.gitignore$',
+  '.*\.gitattributes$',
+  '.*\.gitmodules$',
+  '.*\.ico$',
+  '.*\.png$',
+  '.*\.jpg$',
+  '.*\.jpeg$',
+  '.*\.gif$',
+  '.*\.svg$',
+  '.*\.woff$',
+  '.*\.woff2$',
+  '.*\.ttf$',
+  '.*\.eot$',
+]
+
+# Allowlisted specific patterns that are not secrets
+regexes = [
+  # Example/placeholder values
+  '(?i)(example|placeholder|your_|your-|dummy_|dummy-|test_|test-|fake_|fake-|sample_|sample-|xxx+|yyy+|zzz+|<.*>|\[.*\])',
+  # Public Firebase config (these are meant to be public)
+  'AIzaSy[A-Za-z0-9_-]{33}',
+  # Public Supabase anon key pattern (JWT with anon role)
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBuc3ptdGdvZHlwd2Fka3VlY2NoIiwicm9sZSI6ImFub24i',
+  # Ethereum addresses (public)
+  '0x[a-fA-F0-9]{40}',
+  # Contract addresses (public)
+  '0x[a-fA-F0-9]{40}',
+  # Chain IDs
+  '11155111|137|80001|1|5|42161',
+  # Version numbers
+  '\\d+\.\d+\.\d+(-(alpha|beta|rc)\.\d+)?',
+  # Sentry DSN pattern (public)
+  'https://[a-z0-9]+@[a-z0-9]+\.ingest\.[a-z]+\.sentry\.io/\d+',
+  # Razorpay test key IDs (public)
+  'rzp_test_[a-zA-Z0-9]+',
+  # Resend API key IDs (public)
+  're_[a-zA-Z0-9]+',
+  # JWT tokens in test/example context
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ',
+  # UUIDs
+  '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+]
+
+# Allowlisted specific files that may contain secrets but are safe
+files = [
+  'ethertrack-frontend/\.env\.example$',
+  'ethertrack-frontend/\.env\.production$',
+  'ethertrack-frontend/\.env\.production\.local$',
+  'ethertrack-backend/\.env\.example$',
+  '\.env\.example$',
+]
+
+[[rules]]
+id = 'generic-api-key'
+description = 'Generic API Key'
+regex = '(?i)(api[_-]?key|apikey)[\s:=]+[a-zA-Z0-9_-]{20,}'
+tags = ['key', 'api']
+
+[[rules]]
+id = 'generic-secret'
+description = 'Generic Secret'
+regex = '(?i)(secret[_-]?key|secretkey)[\s:=]+[a-zA-Z0-9_-]{20,}'
+tags = ['secret', 'key']
+
+[[rules]]
+id = 'private-key'
+description = 'Private Key'
+regex = '-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'
+tags = ['private-key', 'key']
+
+[[rules]]
+id = 'aws-access-key'
+description = 'AWS Access Key'
+regex = 'AKIA[0-9A-Z]{16}'
+tags = ['aws', 'key']
+
+[[rules]]
+id = 'aws-secret-key'
+description = 'AWS Secret Key'
+regex = '(?i)aws[_-]?secret[_-]?access[_-]?key[\s:=]+[a-zA-Z0-9/+=]{40}'
+tags = ['aws', 'secret']
+
+[[rules]]
+id = 'github-token'
+description = 'GitHub Token'
+regex = 'gh[pousr]_[A-Za-z0-9_]{36,251}'
+tags = ['github', 'token']
+
+[[rules]]
+id = 'slack-token'
+description = 'Slack Token'
+regex = 'xox[baprs]-[0-9]{12}-[0-9]{12}-[0-9]{12}-[a-z0-9]{32}'
+tags = ['slack', 'token']
+
+[[rules]]
+id = 'slack-webhook'
+description = 'Slack Webhook'
+regex = 'https://hooks\.slack\.com/services/T[A-Z0-9]{8}/B[A-Z0-9]{8}/[a-zA-Z0-9]{24}'
+tags = ['slack', 'webhook']
+
+[[rules]]
+id = 'password-in-url'
+description = 'Generic Password in URL'
+regex = '[a-zA-Z][a-zA-Z0-9+.-]*://[^:]+:[^@]+@'
+tags = ['password', 'url']
+
+[[rules]]
+id = 'jwt-token'
+description = 'JWT Token'
+regex = 'eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*'
+tags = ['jwt', 'token']
+
+[[rules]]
+id = 'private-key-hex'
+description = 'Private Key (Hex 64 chars)'
+regex = '\\b[0-9a-f]{64}\b'
+tags = ['private-key', 'hex']
+
+[[rules]]
+id = 'ethereum-private-key'
+description = 'Ethereum Private Key'
+regex = '0x[0-9a-f]{64}'
+tags = ['ethereum', 'private-key']
+
+[[rules]]
+id = 'supabase-service-role'
+description = 'Supabase Service Role Key'
+regex = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBuc3ptdGdvZHlwd2Fka3VlY2NoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSI'
+tags = ['supabase', 'service-role']
+
+[[rules]]
+id = 'firebase-service-account'
+description = 'Firebase Service Account'
+regex = '"type":\s*"service_account"'
+tags = ['firebase', 'service-account']
+
+[[rules]]
+id = 'razorpay-secret'
+description = 'Razorpay Secret Key'
+regex = 'rzp_(live|test)_[a-zA-Z0-9]{32}'
+tags = ['razorpay', 'secret']
+
+[[rules]]
+id = 'alchemy-rpc-key'
+description = 'Alchemy/Infura RPC URL with Key'
+regex = 'https://(eth-mainnet|eth-sepolia|polygon-mainnet|polygon-mumbai)\.alchemyapi\.io/v2/[a-zA-Z0-9]{32}'
+tags = ['alchemy', 'rpc', 'key']
+
+[[rules]]
+id = 'pinata-secret'
+description = 'Pinata API Secret'
+regex = '[a-f0-9]{64}'
+tags = ['pinata', 'secret']

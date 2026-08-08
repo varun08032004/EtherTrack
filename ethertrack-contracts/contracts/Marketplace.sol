@@ -5,9 +5,41 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC1155/IERC1155Receiver.sol";
+import "@openzeppelin/contracts/governance/TimelockController.sol";
 import "./CarbonCreditToken.sol";
 import "./KYCRegistry.sol";
 import "./Treasury.sol";
+
+/**
+ * Minimal TimelockController interface for external reference
+ */
+interface ITimelockController {
+    function PROPOSER_ROLE() external view returns (bytes32);
+    function EXECUTOR_ROLE() external view returns (bytes32);
+    function ADMIN_ROLE() external view returns (bytes32);
+    function minDelay() external view returns (uint256);
+    function getBlockNumber() external view returns (uint256);
+    function getMinDelay() external view returns (uint256);
+    function isOperation(bytes32 id) external view returns (bool);
+    function isOperationPending(bytes32 id) external view returns (bool);
+    function isOperationReady(bytes32 id) external view returns (bool);
+    function isOperationDone(bytes32 id) external view returns (bool);
+    function schedule(
+        address target,
+        uint256 value,
+        bytes calldata data,
+        bytes32 predecessor,
+        bytes32 salt,
+        uint256 delay
+    ) external returns (bytes32);
+    function execute(
+        address target,
+        uint256 value,
+        bytes calldata data,
+        bytes32 predecessor,
+        bytes32 salt
+    ) external payable returns (bytes32);
+}
 
 /**
  * EtherTrack Marketplace v2
@@ -53,6 +85,9 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
 
     // ── NEW: Backend signer wallet ────────────────────────────────────────────
     address public signerWallet;
+
+    // ── NEW: Timelock controller for admin operations ──────────────────────
+    ITimelockController public timelockController;
 
     enum OrderSide   { BUY, SELL }
     enum OrderStatus { OPEN, FILLED, PARTIALLY_FILLED, CANCELLED, EXPIRED }
@@ -540,6 +575,15 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
         signerWallet = _signer;
     }
 
+    /// @notice Timelock-compatible setter for signer wallet
+    ///         Only callable by TimelockController (after proposal + delay)
+    function setSignerWalletViaTimelock(address _signer) external {
+        require(msg.sender == address(timelockController), "Marketplace: only timelock");
+        require(_signer != address(0), "Marketplace: zero address");
+        emit SignerWalletUpdated(signerWallet, _signer);
+        signerWallet = _signer;
+    }
+
     /// @notice Repoint this contract at a different KYCRegistry deployment
     ///         without redeploying Marketplace itself. Existing listings,
     ///         balances, and trade history are untouched.
@@ -549,9 +593,17 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
         kycRegistry = KYCRegistry(newRegistry);
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
+    /// @notice Timelock-compatible setter for KYC Registry
+    function setKYCRegistryViaTimelock(address newRegistry) external {
+        require(msg.sender == address(timelockController), "Marketplace: only timelock");
+        require(newRegistry != address(0), "Invalid registry address");
+        emit KYCRegistryUpdated(address(kycRegistry), newRegistry);
+kycRegistry = KYCRegistry(newRegistry);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════════════
     // EXISTING: LIST CREDITS — unchanged
-    // ═════════════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════════════════════════════
 
     function listCredit(
         uint256 tokenId,
