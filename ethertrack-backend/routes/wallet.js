@@ -372,6 +372,23 @@ router.post('/deposit/verify', authenticate, walletActionLimiter, async (req, re
   if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature)
     return res.status(400).json({ error: 'Missing payment verification fields' });
 
+  // FIRST: Check if already processed by webhook — before attempting lock
+  const { rows: alreadyDone } = await query(
+    `SELECT balance_after, reference, razorpay_payment_id
+     FROM wallet_transactions
+     WHERE razorpay_order_id = $1 AND user_id = $2 AND status = 'success'`,
+    [razorpay_order_id, req.user.id]
+  );
+  if (alreadyDone.length) {
+    return res.json({
+      success:   true,
+      message:   'Already processed',
+      balance:   alreadyDone[0].balance_after,
+      reference: alreadyDone[0].reference,
+      paymentId: alreadyDone[0].razorpay_payment_id,
+    });
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -385,21 +402,6 @@ router.post('/deposit/verify', authenticate, walletActionLimiter, async (req, re
 
     if (!txRows.length) {
       await client.query('ROLLBACK');
-      const { rows: done } = await query(
-        `SELECT balance_after, reference, razorpay_payment_id
-         FROM wallet_transactions
-         WHERE razorpay_order_id = $1 AND user_id = $2 AND status = 'success'`,
-        [razorpay_order_id, req.user.id]
-      );
-      if (done.length) {
-        return res.json({
-          success:   true,
-          message:   'Already processed',
-          balance:   done[0].balance_after,
-          reference: done[0].reference,
-          paymentId: done[0].razorpay_payment_id,
-        });
-      }
       return res.status(404).json({ error: 'Transaction not found or already processed' });
     }
 
@@ -718,6 +720,7 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
 
     await client.query('COMMIT');
 
+    // Initiate payout AFTER commit — but track state in DB
     let payoutId = null;
     try {
       const { payout } = await initiateRazorpayPayout({
@@ -726,32 +729,43 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
       });
       payoutId = payout.id;
       await query(
-        `UPDATE wallet_transactions SET razorpay_payout_id = $1 WHERE id = $2`,
+        `UPDATE wallet_transactions SET razorpay_payout_id = $1, status = 'processing', updated_at = NOW() WHERE id = $2`,
         [payoutId, txId]
       );
       log.info({ userId: req.user.id, amount, txRef, payoutId }, 'Razorpay payout initiated');
     } catch (payoutErr) {
-      log.error({ err: payoutErr?.message, userId: req.user.id, txRef }, 'Payout initiation failed — reversing ledger');
+      log.error({ err: payoutErr?.message, userId: req.user.id, txRef }, 'Payout initiation failed — marking withdrawal as failed');
+      // Mark as failed and reverse ledger in a new transaction with status check
       const reverseClient = await pool.connect();
       try {
         await reverseClient.query('BEGIN');
-        const { rows: currentUser } = await reverseClient.query(
-          'SELECT inr_balance FROM users WHERE id = $1', [req.user.id]
+        // Lock the withdrawal row and verify it's still pending
+        const { rows: txRows } = await reverseClient.query(
+          `SELECT id, status FROM wallet_transactions WHERE id = $1 FOR UPDATE`, [txId]
         );
-        const reverseBefore = parseFloat(currentUser[0].inr_balance);
-        const reverseAfter  = await adjustLedger(req.user.id, amount, 'credit', reverseClient);
-        await reverseClient.query(
-          `UPDATE wallet_transactions SET status = 'failed', updated_at = NOW() WHERE id = $1`,
-          [txId]
-        );
-        await reverseClient.query(
-          `INSERT INTO wallet_transactions
-             (user_id, type, method, amount, status, balance_before, balance_after, notes)
-           VALUES ($1, 'credit', 'system', $2, 'success', $3, $4, $5)`,
-          [req.user.id, amount, reverseBefore, reverseAfter,
-           `Auto-reversal — payout initiation failed: ${txRef}`]
-        );
-        await reverseClient.query('COMMIT');
+        if (!txRows.length || txRows[0].status !== 'pending') {
+          await reverseClient.query('ROLLBACK');
+          log.warn({ txId }, 'Withdrawal status changed during reversal attempt');
+        } else {
+          const { rows: currentUser } = await reverseClient.query(
+            'SELECT inr_balance FROM users WHERE id = $1 FOR UPDATE', [req.user.id]
+          );
+          const reverseBefore = parseFloat(currentUser[0].inr_balance);
+          const reverseAfter  = await adjustLedger(req.user.id, amount, 'credit', reverseClient);
+          await reverseClient.query(
+            `UPDATE wallet_transactions SET status = 'failed', updated_at = NOW() WHERE id = $1`,
+            [txId]
+          );
+          await reverseClient.query(
+            `INSERT INTO wallet_transactions
+               (user_id, type, method, amount, status, balance_before, balance_after, notes)
+             VALUES ($1, 'credit', 'system', $2, 'success', $3, $4, $5)`,
+            [req.user.id, amount, reverseBefore, reverseAfter,
+             `Auto-reversal — payout initiation failed: ${txRef}`]
+          );
+          await reverseClient.query('COMMIT');
+          log.info({ userId: req.user.id, amount, txRef }, 'Withdrawal reversed due to payout failure');
+        }
       } catch (reverseErr) {
         await reverseClient.query('ROLLBACK');
         log.error({ err: reverseErr?.message, userId: req.user.id }, 'CRITICAL: Ledger reversal failed — manual intervention required');
@@ -798,9 +812,20 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
 
 // ── Trade deduct ──────────────────────────────────────────────────────────────
 router.post('/trade-deduct', authenticate, walletActionLimiter, async (req, res) => {
-  const { amount, tokenId, quantity, projectName } = req.body;
+  const { amount, tokenId, quantity, projectName, idempotencyKey } = req.body;
   if (!amount || amount <= 0)
     return res.status(400).json({ error: 'Invalid amount' });
+  if (!idempotencyKey)
+    return res.status(400).json({ error: 'Idempotency key required' });
+
+  // Check for existing transaction with this idempotency key
+  const { rows: existing } = await query(
+    `SELECT id, balance_after FROM wallet_transactions
+     WHERE user_id = $1 AND reference = $2 AND status = 'success'`,
+    [req.user.id, idempotencyKey]
+  );
+  if (existing.length)
+    return res.json({ success: true, balance: existing[0].balance_after, idempotent: true });
 
   const client = await pool.connect();
   try {
@@ -816,10 +841,11 @@ router.post('/trade-deduct', authenticate, walletActionLimiter, async (req, res)
     const balanceAfter  = await adjustLedger(req.user.id, amount, 'debit', client);
     const { rows: txRows } = await client.query(
       `INSERT INTO wallet_transactions
-         (user_id, type, method, amount, status, balance_before, balance_after, notes)
-       VALUES ($1, 'debit', 'system', $2, 'success', $3, $4, $5)
+         (user_id, type, method, amount, status, balance_before, balance_after, reference, notes)
+       VALUES ($1, 'debit', 'system', $2, 'success', $3, $4, $5, $6)
        RETURNING reference`,
       [req.user.id, amount, balanceBefore, balanceAfter,
+       idempotencyKey,
        `Trade: ${quantity} × ${sanitiseText(projectName || 'carbon credits', 60)} (Token #${tokenId})`]
     );
     await client.query('COMMIT');
@@ -857,14 +883,14 @@ router.post('/trade-refund', authenticate, walletActionLimiter, async (req, res)
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
   if (!reference)             return res.status(400).json({ error: 'Idempotency reference required' });
 
+  // Check for existing refund with this reference
   const { rows: existing } = await query(
-    `SELECT id FROM wallet_transactions
-     WHERE user_id = $1 AND type = 'credit' AND method = 'system'
-       AND notes LIKE $2`,
-    [req.user.id, `%Refund%${reference}%`]
+    `SELECT id, balance_after FROM wallet_transactions
+     WHERE user_id = $1 AND reference = $2 AND status = 'success'`,
+    [req.user.id, reference]
   );
   if (existing.length)
-    return res.json({ success: true, message: 'Already refunded', idempotent: true });
+    return res.json({ success: true, balance: existing[0].balance_after, idempotent: true });
 
   const client = await pool.connect();
   try {
@@ -876,9 +902,10 @@ router.post('/trade-refund', authenticate, walletActionLimiter, async (req, res)
     const balanceAfter  = await adjustLedger(req.user.id, amount, 'credit', client);
     await client.query(
       `INSERT INTO wallet_transactions
-         (user_id, type, method, amount, status, balance_before, balance_after, notes)
-       VALUES ($1, 'credit', 'system', $2, 'success', $3, $4, $5)`,
+         (user_id, type, method, amount, status, balance_before, balance_after, reference, notes)
+       VALUES ($1, 'credit', 'system', $2, 'success', $3, $4, $5, $6)`,
       [req.user.id, amount, balanceBefore, balanceAfter,
+       reference,
        `Refund — MetaMask rejected: ${sanitiseText(reference, 40)}`]
     );
     await client.query('COMMIT');

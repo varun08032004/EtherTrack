@@ -664,6 +664,24 @@ server.listen(PORT, () => {
   );
   console.log('📅 Subscription expiry cron started (first run in 30 s)');
 
+  // CreditLedger reconciliation cron — runs hourly to detect on-chain/DB drift
+  const { reconcileAllBalances } = require('./services/creditLedger');
+  const runCreditLedgerReconciliation = async () => {
+    try {
+      const mismatches = await reconcileAllBalances();
+      if (mismatches.length === 0) {
+        console.log('[CreditLedger] Reconciliation complete — all balances match');
+      }
+    } catch (e) {
+      console.error('[CreditLedger] Reconciliation cron error:', e.message);
+    }
+  };
+  // Run once at startup
+  setTimeout(runCreditLedgerReconciliation, 60_000);
+  // Then every hour
+  setInterval(runCreditLedgerReconciliation, 60 * 60 * 1000);
+  console.log('🔍 CreditLedger reconciliation cron started (first run in 60 s, then hourly)');
+
   try {
     const { startEmailWorker } = require('./services/email');
     startEmailWorker();

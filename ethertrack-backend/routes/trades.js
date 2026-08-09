@@ -1,12 +1,12 @@
 'use strict';
 /**
- * routes/trades.js — EtherTrack Production Settlement Engine v4 (MERGED)
- * ─────────────────────────────────────────────────────────────────────────────
+ * routes/trades.js -- EtherTrack Production Settlement Engine v4 (MERGED)
+ * -----------------------------------------------------------------------------
  * [CERT-OWNERSHIP] [NEW] Every completed purchase now issues a Certificate
  *                  of Ownership (see services/certificates.js), not just
  *                  retirements. Covers wallet-based (real transfer) and
  *                  ledger-based (wallet-free, pooled custody) buyers alike.
- * ─────────────────────────────────────────────────────────────────────────────
+ * -----------------------------------------------------------------------------
  */
 
 const router      = require('express').Router();
@@ -189,6 +189,10 @@ router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) 
     if (dup.length) return res.json({ success: true, tradeId: dup[0].id, idempotent: true });
   }
 
+  // Use advisory lock to prevent concurrent trades on the same batch
+  const batchLockKey = parseInt(batchId.replace(/-/g, ''), 16) % 2147483647;
+  await query(`SELECT pg_advisory_xact_lock($1)`, [batchLockKey]);
+
   try {
     const { rows: batches } = await query(
       `SELECT cb.*, u.id AS seller_id, u.wallet_address AS seller_wallet,
@@ -223,16 +227,44 @@ router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) 
     const subtotalINR = parseFloat((pricePerCredit * qty).toFixed(2));
     const fees        = calcFees(subtotalINR);
     const totalETH    = subtotalINR / ethRate;
-    const feeETH      = fees.totalFeeINR / ethRate;
+const feeETH      = fees.totalFeeINR / ethRate;
 
-    let tradeId;
+  let tradeId;
 
-    await withTransaction(async (client) => {
+  // Use advisory lock to prevent concurrent trades on the same batch
+const batchLockKey = parseInt(batchId.replace(/-/g, ''), 16) % 2147483647;
+  await query(`SELECT pg_advisory_xact_lock($1)`, [batchLockKey]);
+
+  await withTransaction(async (client) => {
+      // Lock the batch row FIRST -- eliminates race window between SELECT and FOR UPDATE
       const { rows: batchLocked } = await client.query(
-        `SELECT available_credits, listed_quantity FROM carbon_batches WHERE id = $1 FOR UPDATE`, [batchId]
+        `SELECT cb.*, u.id AS seller_id, u.wallet_address AS seller_wallet,
+                u.email AS seller_email, u.full_name AS seller_name,
+                u.inr_balance AS seller_inr_balance, u.razorpay_contact_id
+         FROM carbon_batches cb JOIN users u ON u.id = cb.user_id
+         WHERE cb.id = $1 FOR UPDATE`, [batchId]
       );
-      if (!batchLocked.length || batchLocked[0].available_credits < qty)
-        throw Object.assign(new Error(`Only ${batchLocked[0]?.available_credits || 0} credits available`), { statusCode: 400 });
+      if (!batchLocked.length) throw Object.assign(new Error('Batch not found'), { statusCode: 404 });
+      const batch    = batchLocked[0];
+      const sellerId = batch.seller_id;
+
+      if (sellerId === req.user.id)
+        throw Object.assign(new Error('Cannot buy your own listing'), { statusCode: 400 });
+      if (batch.available_credits < qty)
+        throw Object.assign(new Error(`Only ${batch.available_credits} credits available`), { statusCode: 400 });
+
+      if (listingId) {
+        const { rows: lr } = await client.query(
+          `SELECT price_per_credit_inr FROM market_listings WHERE listing_id = $1`, [listingId]
+        );
+        if (lr.length) {
+          const canonical = parseFloat(lr[0].price_per_credit_inr);
+          if (Math.abs(pricePerCredit - canonical) / canonical > 0.01)
+            throw Object.assign(new Error('Price mismatch. Listing price changed. Please refresh.'), {
+              statusCode: 400, code: 'PRICE_MISMATCH', expectedPrice: canonical,
+            });
+        }
+      }
 
       if (paymentMode === 'inr') {
         const { rows: buyerRows } = await client.query(
@@ -252,9 +284,11 @@ router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) 
           `INSERT INTO wallet_transactions (user_id, type, method, amount, status, notes, trade_type)
            VALUES ($1, 'debit', 'inr', $2, 'success', $3, 'buy_credit')`,
           [req.user.id, fees.buyerPaysINR,
-           `Purchase ${qty} × ${batch.project_name} @ ₹${pricePerCredit} (incl. 0.5% fee + GST)`]
+           `Purchase ${qty} x ${batch.project_name} @ Rs.${pricePerCredit} (incl. 0.5% fee + GST)`]
         );
 
+        // Lock seller row before crediting
+        await client.query('SELECT inr_balance FROM users WHERE id = $1 FOR UPDATE', [sellerId]);
         await client.query(
           `UPDATE users SET inr_balance = inr_balance + $1, updated_at = NOW() WHERE id = $2`,
           [fees.sellerGetsINR, sellerId]
@@ -263,7 +297,7 @@ router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) 
           `INSERT INTO wallet_transactions (user_id, type, method, amount, status, notes, trade_type)
            VALUES ($1, 'credit', 'inr', $2, 'success', $3, 'sell_credit')`,
           [sellerId, fees.sellerGetsINR,
-           `Sale ${qty} × ${batch.project_name} @ ₹${pricePerCredit} (after 0.5% fee + GST)`]
+           `Sale ${qty} x ${batch.project_name} @ Rs.${pricePerCredit} (after 0.5% fee + GST)`]
         );
 
         if (COMPANY_USER_ID) {
@@ -432,11 +466,11 @@ router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) 
 
     await Promise.all([
       createNotification(req.user.id, 'TRADE', 'Purchase Complete',
-        `${qty} × ${batch.project_name} — ₹${fees.buyerPaysINR.toLocaleString('en-IN')} paid`,
+        `${qty} x ${batch.project_name} -- Rs.${fees.buyerPaysINR.toLocaleString('en-IN')} paid`,
         '/portfolio', { tradeId, quantity: qty }).catch(() => {}),
       createNotification(sellerId, 'TRADE',
         paymentMode === 'inr' ? 'Credits Sold' : 'Credits Sold (ETH pending)',
-        `${qty} × ${batch.project_name} — ₹${fees.sellerGetsINR.toLocaleString('en-IN')} ${paymentMode === 'inr' ? 'credited' : 'pending'}`,
+        `${qty} x ${batch.project_name} -- Rs.${fees.sellerGetsINR.toLocaleString('en-IN')} ${paymentMode === 'inr' ? 'credited' : 'pending'}`,
         '/wallet', { tradeId, quantity: qty }).catch(() => {}),
     ]);
 
@@ -459,7 +493,7 @@ router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) 
       chainLogging:  paymentMode === 'inr' ? 'queued' : 'on_chain',
       invoiceQueued: true,
       ownershipCertId,
-      message: `Trade completed — ${qty} credits purchased`,
+      message: `Trade completed -- ${qty} credits purchased`,
     });
 
   } catch (e) {
@@ -584,33 +618,22 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
   const existing = await checkIdempotency(req.user.id, idempotencyKey);
   if (existing) return res.json({ success: true, tradeId: existing.id, idempotent: true });
 
-  try {
-    const { rows: batches } = await query(
-      `SELECT cb.*, u.id AS seller_id, u.wallet_address AS seller_wallet, u.email AS seller_email, u.full_name AS seller_name
-       FROM carbon_batches cb JOIN users u ON u.id = cb.user_id
-       WHERE cb.id = $1`, [order.batch_id]
-    );
-    if (!batches.length) return res.status(404).json({ error: 'Batch not found' });
-    const batch    = batches[0];
-    const sellerId = batch.seller_id;
+  // Use advisory lock to prevent concurrent trades on the same batch
+  const batchLockKey = parseInt(order.batch_id.replace(/-/g, ''), 16) % 2147483647;
+  await query(`SELECT pg_advisory_xact_lock($1)`, [batchLockKey]);
 
-    const ethRate        = await getLiveETHRate();
-    const subtotal       = parseFloat(order.subtotal_inr);
-    const pricePerCredit = parseFloat(order.price_per_credit_inr);
-    const qty            = parseInt(order.quantity);
-    const fees = {
-      buyerFeeINR:    parseFloat(order.total_fee_inr) / 2,
-      sellerFeeINR:   parseFloat(order.total_fee_inr) / 2,
-      totalFeeINR:    parseFloat(order.total_fee_inr),
-      gstINR:         parseFloat(order.gst_inr),
-      buyerPaysINR:   parseFloat(order.buyer_pays_inr),
-      sellerGetsINR:  parseFloat(order.seller_gets_inr),
-      platformNetINR: parseFloat(order.total_fee_inr) - parseFloat(order.gst_inr),
-    };
+  await withTransaction(async (client) => {
+      // Lock the batch row FIRST -- eliminates race window
+      const { rows: batchLocked } = await client.query(
+        `SELECT cb.*, u.id AS seller_id, u.wallet_address AS seller_wallet,
+                u.email AS seller_email, u.full_name AS seller_name
+         FROM carbon_batches cb JOIN users u ON u.id = cb.user_id
+         WHERE cb.id = $1 FOR UPDATE`, [order.batch_id]
+      );
+      if (!batchLocked.length) throw Object.assign(new Error('Batch not found'), { statusCode: 404 });
+      const batch    = batchLocked[0];
+      const sellerId = batch.seller_id;
 
-    let tradeId;
-
-    await withTransaction(async (client) => {
       const { rows: bl } = await client.query(
         `SELECT available_credits, listed_quantity FROM carbon_batches WHERE id = $1 FOR UPDATE`, [order.batch_id]
       );
@@ -719,7 +742,7 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
           [result.txHash, result.blockNumber, tradeId]
         );
         chainTxHash = result.txHash; chainBlockNumber = result.blockNumber; custodyModel = 'wallet';
-        console.log(`[checkout-verify] Trade ${tradeId} settled on-chain (wallet) — TX: ${result.txHash}`);
+        console.log(`[checkout-verify] Trade ${tradeId} settled on-chain (wallet) -- TX: ${result.txHash}`);
       } else {
         const { logOwnershipChangeOnChain } = require('../services/creditLedger');
         const result = await logOwnershipChangeOnChain({
@@ -729,7 +752,7 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
           actionType  : 'BUY',
           refTable    : 'trades',
           refId       : tradeId,
-          note        : `Purchase — ${batch.project_name}`,
+          note        : `Purchase -- ${batch.project_name}`,
         });
 
         await query(
@@ -737,7 +760,7 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
           [result.txHash, result.blockNumber, tradeId]
         );
         chainTxHash = result.txHash; chainBlockNumber = result.blockNumber; custodyModel = 'pooled';
-        console.log(`[checkout-verify] Trade ${tradeId} logged on-chain (ledger, no wallet) — TX: ${result.txHash}`);
+console.log(`[checkout-verify] Trade ${tradeId} logged on-chain (ledger, no wallet) -- TX: ${result.txHash}`);
       }
     } catch (chainErr) {
       await query(
@@ -748,13 +771,13 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
         `INSERT INTO admin_audit_log (admin_id, action, target_user_id, details)
          VALUES ($1,$2,$3,$4)`,
         [req.user.id, 'INR_TRADE_ONCHAIN_SETTLEMENT_FAILED', req.user.id,
-         `Trade ${tradeId} — payment captured but on-chain settlement failed: ${chainErr.message}`]
+         `Trade ${tradeId} -- payment captured but on-chain settlement failed: ${chainErr.message}`]
       ).catch(() => {});
-      console.error(`[checkout-verify] ⚠️ On-chain settlement FAILED for trade ${tradeId} — payment already captured. Needs manual remediation:`, chainErr.message);
+      console.error(`[checkout-verify] [WARNING] On-chain settlement FAILED for trade ${tradeId} -- payment already captured. Needs manual remediation:`, chainErr.message);
     }
 
     // [CERT-OWNERSHIP] Issue Certificate of Ownership regardless of which
-    // branch above ran — covers both real wallet transfer and ledger log.
+    // branch above ran -- covers both real wallet transfer and ledger log.
     let ownershipCertId = null;
     try {
       ownershipCertId = await issueOwnershipCertificate({
@@ -784,10 +807,10 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
 
     await Promise.all([
       createNotification(req.user.id, 'TRADE', 'Purchase Complete',
-        `${qty} × ${batch.project_name} — ₹${fees.buyerPaysINR.toLocaleString('en-IN')} via Razorpay`,
+        `${qty} x ${batch.project_name} -- Rs.${fees.buyerPaysINR.toLocaleString('en-IN')} via Razorpay`,
         '/portfolio', { tradeId, quantity: qty }).catch(() => {}),
       createNotification(sellerId, 'TRADE', 'Credits Sold via Razorpay',
-        `${qty} × ${batch.project_name} — ₹${fees.sellerGetsINR.toLocaleString('en-IN')} to your bank`,
+        `${qty} x ${batch.project_name} -- Rs.${fees.sellerGetsINR.toLocaleString('en-IN')} to your bank`,
         '/wallet', { tradeId, quantity: qty }).catch(() => {}),
     ]);
 
@@ -807,14 +830,9 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
       chainLogging:      'queued',
       invoiceQueued:     true,
       ownershipCertId,
-      message: `Trade completed — ${qty} credits purchased via Razorpay`,
+      message: `Trade completed -- ${qty} credits purchased via Razorpay`,
     });
-
-  } catch (e) {
-    console.error('[trades/checkout-verify]', e.message);
-    return res.status(e.statusCode || 500).json({ error: e.message || 'Settlement failed' });
-  }
-});
+  });
 
 router.get('/:id/verify', readLimiter, async (req, res) => {
   try {
@@ -947,7 +965,7 @@ const creditSellerFromChain = async ({ txHash, sellerId, sellerGetsINR, tradeId 
         [tradeId]
       ).catch(() => {});
     });
-    console.log(`[trades] Seller ${sellerId} credited ₹${sellerGetsINR} for ETH trade ${tradeId}`);
+    console.log(`[trades] Seller ${sellerId} credited Rs.${sellerGetsINR} for ETH trade ${tradeId}`);
   } catch (e) {
     console.error('[creditSellerFromChain]', e.message, { txHash, tradeId });
   }

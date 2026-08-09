@@ -1,0 +1,57 @@
+{
+  "network": "sepolia",
+  "timelockAddress": "0x47F60Bc8559B82f61240125083A6AD6124C1D541",
+  "minDelay": 3600,
+  "proposer": "0xE026653F4fDfe7Bd02fd1F6534Da631DD3410489",
+  "operations": [
+    {
+      "name": "CarbonCreditToken.setOperator(timelock)",
+      "target": "0x0C72dcc5a88C66259DDB09B187F9A8392f6cf3C2",
+      "data": "0x00000000000000000000000047f60bc8559b82f61240125083a6ad6124c1d541",
+      "operationId": "0x006b7814972d5c5c1b7b5a0e8f4a694b2e9d396f3137e2a4f05a8a3235f7c889",
+      "txHash": "0x822d06d32aa48a8cd1dde76569ca4db81bf2852ae27fbb377d56cac1bdb96552",
+      "eta": 1786215660
+    },
+    {
+      "name": "Marketplace.setSignerWalletViaTimelock(currentSigner)",
+      "target": "0x3cDE5d0e6A0B0955d5fb72e7E5Ba2e3070AEA19A",
+      "data": "0x000000000000000000000000e026653f4fdfe7bd02fd1f6534da631dd3410489",
+      "operationId": "0xab2518c466b3a515cd2d3a612e4bdb94be6d2a0eadae0449345815c5f8f6df4e",
+      "txHash": "0xdc9163e13e406872af50ebd1f80b57e708c8f618fab52cd66f0a4a085c0f016b",
+      "eta": 1786215672
+    },
+    {
+      "name": "CreditLedger.setOperator(timelock)",
+      "target": "0x2046625FC6181DeE411a35F160Cb00b9FEC9d830",
+      "data": "0x00000000000000000000000047f60bc8559b82f61240125083a6ad6124c1d541",
+      "operationId": "0xa6c820accdda51d2a1184e0771790530c7224d88b4d39bad453e420409a5ebc4",
+      "txHash": "0xf99d8f10c68668d440f1f48f01f0ad4b0ed2be79953d280cc423c0029ca234ac",
+      "eta": 1786215685
+    },
+    {
+      "name": "KYCRegistry.transferOwnership(timelock)",
+      "target": "0x443e068FE6F2F7B57C71A3Bc5492aA98b5069597",
+      "data": "0x00000000000000000000000047f60bc8559b82f61240125083a6ad6124c1d541",
+      "operationId": "0x0936370bbe5b7b65322236f14d1b02f22815d129d294e12a9e9edf0baa1aa9cb",
+      "txHash": "0x54cc7d37d8b95ce847564da98e95edd8d52d26c553d5b5d8a1e064381192413e",
+      "eta": 1786215696
+    },
+    {
+      "name": "Treasury.transferOwnership(timelock)",
+      "target": "0x2504e917A78C8094Aee0cba8e076fc3891b95265",
+      "data": "0x00000000000000000000000047f60bc8559b82f61240125083a6ad6124c1d541",
+      "operationId": "0xcc612ef2108d9b615d2a4ba75480644a857661b16dd82c61f9ce117e65ab0222",
+      "txHash": "0xeba89128dbf98fed5ccc835a46eb5d1bcfe2cbf7116d8725d416f6818892af06",
+      "eta": 1786215708
+    },
+    {
+      "name": "AuditTrail.transferOwnership(timelock)",
+      "target": "0x98D9f9555bd2049Fb52DCe040C1B895CB55BcE81",
+      "data": "0x00000000000000000000000047f60bc8559b82f61240125083a6ad6124c1d541",
+      "operationId": "0xf7b722bab1d410d729b8ebef496325a930adff438c6accbb383cc0a2f166220e",
+      "txHash": "0xfadd855fdad4abfe3865c8a9ba63187f6ff7b7cc3306f48358b7fbaa44ff12d1",
+      "eta": 1786215720
+    }
+  ],
+  "scheduledAt": "2026-08-08T18:02:00.435Z"
+}

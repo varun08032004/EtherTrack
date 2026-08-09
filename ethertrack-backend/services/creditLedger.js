@@ -221,6 +221,59 @@ const transferLedgerOwnership = async ({
   }
 };
 
+/**
+
+/**
+ * Reconciliation cron — compares all DB cached balances against on-chain values.
+ * Should be run periodically (e.g., hourly) to detect drift from partial failures,
+ * manual contract interactions, or indexing gaps.
+ * 
+ * @returns {Promise<Array>} Array of mismatches found
+ */
+const reconcileAllBalances = async () => {
+  const { rows } = await query(
+    `SELECT user_id, token_id, balance, total_retired
+     FROM credit_ledger_balances
+     WHERE balance > 0 OR total_retired > 0`
+  );
+
+  const mismatches = [];
+
+  for (const row of rows) {
+    try {
+      const result = await verifyLedgerBalance(row.user_id, row.token_id);
+      if (!result.matches) {
+        mismatches.push({
+          userId: row.user_id,
+          tokenId: row.token_id,
+          dbBalance: row.balance,
+          dbRetired: row.total_retired,
+          onChainBalance: result.onChain,
+          onChainRetired: result.onChainRetired,
+          severity: 'P1',
+        });
+        console.error(`[creditLedger/reconcile] MISMATCH user=${row.user_id} token=${row.token_id} DB=${row.balance} ONCHAIN=${result.onChain}`);
+      }
+    } catch (e) {
+      console.error(`[creditLedger/reconcile] Error checking user=${row.user_id} token=${row.token_id}:`, e.message);
+      mismatches.push({
+        userId: row.user_id,
+        tokenId: row.token_id,
+        error: e.message,
+        severity: 'P2',
+      });
+    }
+  }
+
+  if (mismatches.length > 0) {
+    // Alert via Sentry
+    const Sentry = require('@sentry/node');
+    Sentry.captureMessage(`CreditLedger reconciliation found ${mismatches.length} mismatches`, 'warning');
+  }
+
+  return mismatches;
+};
+
 module.exports = {
   computeUserIdHash,
   getOrCreateUserIdHash,
@@ -229,5 +282,6 @@ module.exports = {
   transferLedgerOwnership,
   getLedgerBalance,
   verifyLedgerBalance,
+  reconcileAllBalances,
   ACTION_TYPE,
 };

@@ -1,0 +1,7 @@
+{
+  "network": "sepolia",
+  "timelockAddress": "0x47F60Bc8559B82f61240125083A6AD6124C1D541",
+  "executor": "0xE026653F4fDfe7Bd02fd1F6534Da631DD3410489",
+  "operations": [],
+  "executedAt": "2026-08-08T19:20:14.456Z"
+}

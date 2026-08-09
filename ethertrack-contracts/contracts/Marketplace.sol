@@ -593,6 +593,16 @@ contract Marketplace is Ownable, Pausable, ReentrancyGuard, IERC1155Receiver {
         kycRegistry = KYCRegistry(newRegistry);
     }
 
+    /// @notice Initialize timelock controller reference (call once after deployment)
+    /// @dev Only callable by owner before timelock is set
+    function initializeTimelock(address _timelockController) external onlyOwner {
+        require(address(timelockController) == address(0), "Already initialized");
+        timelockController = ITimelockController(_timelockController);
+        emit TimelockControllerInitialized(address(0), _timelockController);
+    }
+
+    event TimelockControllerInitialized(address indexed oldTimelock, address indexed newTimelock);
+
     /// @notice Timelock-compatible setter for KYC Registry
     function setKYCRegistryViaTimelock(address newRegistry) external {
         require(msg.sender == address(timelockController), "Marketplace: only timelock");

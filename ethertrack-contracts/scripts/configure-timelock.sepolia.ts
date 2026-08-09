@@ -74,8 +74,15 @@ async function main() {
   const proposerRoleHash = await timelock.PROPOSER_ROLE();
   const executorRoleHash = await timelock.EXECUTOR_ROLE();
   
-  console.log(`\nProposers: ${(await timelock.getRoleMembers(proposerRoleHash)).join(", ")}`);
-  console.log(`Executors: ${(await timelock.getRoleMembers(executorRoleHash)).join(", ")}`);
+  // Check proposer
+  const safeHasProposer = await timelock.hasRole(proposerRoleHash, safeAddress);
+  console.log(`   Safe has PROPOSER_ROLE: ${safeHasProposer}`);
+  
+  // Check each contract has executor role
+  for (const [name, address] of Object.entries(CONTRACTS)) {
+    const hasRole = await timelock.hasRole(executorRoleHash, address);
+    console.log(`   ${name} has EXECUTOR_ROLE: ${hasRole}`);
+  }
 
   // 4. Save configuration
   const config = {

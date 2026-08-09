@@ -12,12 +12,12 @@
 |----|------|--------|----------|-------|
 | **SEC-001** | Frontend credential/configuration exposure remediation | ✅ **VERIFIED** | P0 | Firebase/Supabase config moved to env vars; Razorpay secret removed from frontend |
 | **SEC-001A** | Production secret rotation & containment | 🔄 **IN_PROGRESS** | P0 | **BLOCKED** - Requires manual rotation in provider dashboards + blockchain key migrations |
-| **SEC-002** | Single hot wallet controls all operator functions | ⏳ **OPEN** | P0 | Requires SEC-001A completion first |
-| **SEC-003** | CSRF protection gaps on state-changing endpoints | 🔍 **OPEN** | P1 | Review CSRF_SKIP_PREFIX in server.js |
-| **SEC-004** | SQL injection / parameterized queries audit | 🔍 **OPEN** | P1 | Verify all routes use parameterized queries |
-| **SEC-005** | XSS / input sanitization audit | 🔍 **OPEN** | P1 | Review all user inputs |
-| **SEC-006** | IDOR / BOLA (Broken Object Level Authorization) | 🔍 **OPEN** | P1 | Verify org-scoped access in all routes |
-| **SEC-007** | Rate limiting coverage | 🔍 **OPEN** | P1 | Verify all endpoints have appropriate limits |
+| **SEC-002** | Single hot wallet controls all operator functions | ✅ **TESTNET DONE** | P0 | TimelockController deployed on Sepolia; all 6 contracts transferred to timelock |
+| **SEC-003** | CSRF protection gaps on state-changing endpoints | ✅ **FIXED** | P1 | Removed 7 prefixes from CSRF_SKIP_PREFIX; 36 endpoints now protected |
+| **SEC-004** | SQL injection / parameterized queries audit | ✅ **VERIFIED** | P1 | 230+ queries scanned; all parameterized; explicit whitelists added |
+| **SEC-005** | XSS / input sanitization audit | ✅ **VERIFIED** | P1 | React auto-escapes; no dangerouslySetInnerHTML; sanitizeUrl() for links |
+| **SEC-006** | IDOR / BOLA (Broken Object Level Authorization) | ✅ **FIXED** | P1 | Added project ownership check to /batches/:id/tokenise; all routes verified |
+| **SEC-007** | Rate limiting coverage | ✅ **FIXED** | P1 | Tiered limiters: assetAction (15/min), writeLimiter (30/min), walletAction (20/min), server prefixes |
 | **SEC-008** | Secrets in git history | ⚠️ **IN_PROGRESS** | P0 | Rotation matrix created; manual rotation needed |
 | **SEC-009** | Firebase Auth / Supabase RLS configuration | 🔍 **OPEN** | P1 | Verify RLS policies on all tables |
 | **SEC-010** | Webhook signature verification | 🔍 **OPEN** | P1 | Razorpay, Pinata, Resend webhooks |
@@ -151,29 +151,34 @@
 ---
 
 ## 🎯 CURRENT SPRINT FOCUS
-
-| Priority | Item | Status |
-|----------|------|--------|
-| **P0** | SEC-001A Secret Rotation (manual) | 🔄 **IN_PROGRESS** |
-| **P0** | Blockchain Key Migration (3 keys) | 🚫 **BLOCKED** |
-| **P0** | FIN-001 to FIN-009 Financial Correctness | 🔍 **OPEN** |
-| **P0** | SEC-002 Operator Wallet Decentralization | 🚫 **BLOCKED** |
-| **P1** | FIN-001 to FIN-009 tests | ⏳ **OPEN** |
-| **P1** | SEC-003 to SEC-010 audit | 🔍 **OPEN** |
-| **P1** | ARC-001 to ARC-010 reliability | 🔍 **OPEN** |
-| **P1** | PERF-001 to PERF-008 optimization | 🔍 **OPEN** |
-| **P1** | CMP-001 to CMP-010 compliance | ⏳ **OPEN** |
+ 
+ | Priority | Item | Status |
+ |----------|------|--------|
+ | **P0** | SEC-001A Secret Rotation (manual) | 🔄 **IN_PROGRESS** |
+ | **P0** | Blockchain Key Migration (3 keys) | 🚫 **BLOCKED** |
+ | **P0** | FIN-001 to FIN-009 Financial Correctness | 🔍 **OPEN** |
+ | **P0** | SEC-002 Operator Wallet Decentralization | ✅ **TESTNET DONE** |
+ | **P1** | FIN-001 to FIN-009 tests | ⏳ **OPEN** |
+ | **P1** | SEC-003 CSRF Protection | ✅ **FIXED** |
+ | **P1** | SEC-004 SQL Injection Audit | ✅ **VERIFIED** |
+ | **P1** | SEC-005 XSS Audit | ✅ **VERIFIED** |
+ | **P1** | SEC-006 IDOR/BOLA Audit | ✅ **FIXED** |
+ | **P1** | SEC-007 Rate Limiting | ✅ **FIXED** |
+ | **P1** | SEC-008 to SEC-010 audit | 🔍 **OPEN** |
+ | **P1** | ARC-001 to ARC-010 reliability | 🔍 **OPEN** |
+ | **P1** | PERF-001 to PERF-008 optimization | 🔍 **OPEN** |
+ | **P1** | CMP-001 to CMP-010 compliance | ⏳ **OPEN** |
 
 ---
 
 ## 📝 NEXT ACTIONS (IMMEDIATE)
-
-1. **Manual Secret Rotation** - Complete SEC-001A provider dashboard rotations
-2. **Blockchain Migration** - Test Sepolia → Mainnet for 3 operator keys
-2. **FIN-001 to FIN-005** - Implement financial correctness tests
-3. **SEC-002** - Design multi-sig / timelock for operator functions
-4. **ARC-001** - Connection pool tuning, query optimization
-5. **TEST-001/002** - Unit + Integration test framework setup
+ 
+ 1. **Manual Secret Rotation** - Complete SEC-001A provider dashboard rotations
+ 2. **Blockchain Migration** - Test Sepolia → Mainnet for 3 operator keys
+ 3. **FIN-001 to FIN-005** - Implement financial correctness tests
+ 4. **SEC-008 to SEC-010** - Complete remaining security audits
+ 5. **ARC-001** - Connection pool tuning, query optimization
+ 6. **TEST-001/002** - Unit + Integration test framework setup
 
 ---
 

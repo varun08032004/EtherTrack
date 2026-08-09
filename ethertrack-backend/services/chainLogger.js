@@ -190,9 +190,11 @@ async function logTrade(trade) {
     );
 
     // Store pending tx hash immediately — don't wait for confirmation
+    // Use 'confirming' status to prevent retry cron from picking up this trade
+    // before the confirmation callback completes.
     await safeQuery(
       `UPDATE trades
-       SET chain_tx_hash = $1, chain_status = 'pending', chain_logged_at = NOW()
+       SET chain_tx_hash = $1, chain_status = 'confirming', chain_logged_at = NOW()
        WHERE id = $2`,
       [tx.hash, trade.dbTradeId]
     ).catch(err => {
@@ -207,7 +209,7 @@ async function logTrade(trade) {
       safeQuery(
         `UPDATE trades
          SET chain_status = 'confirmed', chain_block = $1
-         WHERE id = $2`,
+         WHERE id = $2 AND chain_status = 'confirming'`,
         [receipt.blockNumber, trade.dbTradeId]
       ).catch(err => {
         Sentry.captureException(err, { tags: { module: 'chainLogger' }, extra: { tradeId: trade.dbTradeId, step: 'db-update-confirmed' } });
@@ -216,6 +218,11 @@ async function logTrade(trade) {
     }).catch(err => {
       console.error('[chainLogger] confirmation error:', err.message);
       Sentry.captureException(err, { tags: { module: 'chainLogger' }, extra: { tradeId: trade.dbTradeId, step: 'tx-confirmation' } });
+      // On confirmation failure, mark as failed so retry cron can pick it up
+      safeQuery(
+        `UPDATE trades SET chain_status = 'failed' WHERE id = $1 AND chain_status = 'confirming'`,
+        [trade.dbTradeId]
+      ).catch(() => {});
       _queueRetry(trade);
     });
 
@@ -307,7 +314,9 @@ async function retryPendingLogs() {
             t.payment_mode, t.buyer_wallet, t.seller_wallet, t.inr_settlement_at
      FROM pending_chain_logs cl
      JOIN trades t ON t.id = cl.trade_id
-     WHERE cl.attempts < $1 AND cl.next_retry_at <= NOW()
+     WHERE cl.attempts < $1
+       AND cl.next_retry_at <= NOW()
+       AND t.chain_status IN ('pending', 'failed')  -- Skip 'confirming' to avoid race with confirmation callback
      ORDER BY cl.next_retry_at ASC
      LIMIT 10`,
     [MAX_RETRY_ATTEMPTS]
