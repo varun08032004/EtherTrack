@@ -241,36 +241,15 @@ const CSRF_SKIP_EXACT = new Set([
 const CSRF_SKIP_PREFIX = [
   '/api/wallet/webhook',
   '/api/subscription/webhook',
-  // [FIX-CSRF-SCOPE] '/api/subscription', '/api/trades', '/api/portfolio',
-  // '/api/transactions', and '/api/support' were previously exempted here
-  // too — that's wrong. authenticate() falls back to the et_access cookie
-  // when no Authorization header is sent, and that cookie is
-  // sameSite:'none' in production (required for the cross-origin
-  // frontend). Combined, any state-changing route under an exempted
-  // prefix was forgeable cross-site: a malicious page could trigger a
-  // buy/sell/retire/cancel-listing/support-ticket request using the
-  // victim's ambient cookie, with no CSRF token required. The legitimate
-  // frontend already sends X-CSRF-Token on every non-auth write (see
-  // services/api.js `isWrite && !isAuthRoute`), so removing these from
-  // the skip-list closes the forgery gap without breaking real traffic.
-  // GET requests under these prefixes are already exempt automatically —
-  // csrfProtect returns early on GET/HEAD/OPTIONS before this list is
-  // even consulted — so read-only calls are unaffected either way.
-  '/api/market',
-  '/api/verify',
   // [FIX-INVOICE-VERIFY v16] GET-only in practice, but listed for clarity/
   // consistency with the rest of this list — csrfProtect already lets all
   // GET/HEAD/OPTIONS requests through before this list is even consulted,
   // so this entry is a no-op safety net rather than a functional requirement.
   '/api/invoices',
-  '/api/news',
-  '/api/ccc',
   '/api/kyc/stream',
-  '/api/reports',
-  '/api/audit',
-  '/api/ipfs',
   // [FIX-ERP-ROUTE v15] OAuth callbacks arrive as GET redirects from providers
   // (no CSRF cookie). Mutating endpoints all require JWT `requireAuth`.
+  // NOTE: /api/erp/test and /api/erp/pull are now CSRF-protected (use cookie auth)
   '/api/erp',
   // [OPS-INTEGRATION-WRITE] Service-token authenticated (X-Service-Token
   // header, checked in middleware/serviceAuth.js), never carries a session
