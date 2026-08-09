@@ -647,7 +647,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 
 // ── Withdraw ──────────────────────────────────────────────────────────────────
 router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
-  const { amount, accountNumber, ifsc, accountName } = req.body;
+  const { amount, accountNumber, ifsc, accountName, idempotencyKey } = req.body;
 
   if (!amount || amount < 100)
     return res.status(400).json({ error: 'Minimum withdrawal is ₹100' });
@@ -657,8 +657,17 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
     return res.status(400).json({ error: 'Invalid IFSC code format' });
   if (!req.user.kyc_verified)
     return res.status(403).json({ error: 'KYC verification required to withdraw', code: 'KYC_REQUIRED' });
+  if (!idempotencyKey)
+    return res.status(400).json({ error: 'Idempotency key required', code: 'IDEMPOTENCY_KEY_REQUIRED' });
 
-  const today = new Date().toISOString().slice(0, 10);
+  // Check for duplicate withdrawal request
+  const { rows: existing } = await query(
+    `SELECT id, balance_after FROM wallet_transactions
+     WHERE user_id = $1 AND reference = $2 AND status = 'success'`,
+    [req.user.id, idempotencyKey]
+  );
+  if (existing.length)
+    return res.json({ success: true, balance: existing[0].balance_after, idempotent: true });
   const { rows: limitRows } = await query(
     `SELECT COALESCE(SUM(amount), 0) AS used
      FROM wallet_transactions
@@ -702,13 +711,14 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
     const { rows: txRows } = await client.query(
       `INSERT INTO wallet_transactions
          (user_id, type, method, amount, status, balance_before, balance_after,
-          bank_account_number, bank_ifsc, bank_account_name, notes)
-       VALUES ($1, 'debit', 'bank', $2, 'pending', $3, $4, $5, $6, $7, $8)
+          bank_account_number, bank_ifsc, bank_account_name, reference, notes)
+       VALUES ($1, 'debit', 'bank', $2, 'pending', $3, $4, $5, $6, $7, $8, $9)
        RETURNING id, reference`,
       [
         req.user.id, amount, balanceBefore, balanceAfter,
         accountNumber, ifsc.toUpperCase(),
         sanitiseText(accountName, 60),
+        idempotencyKey,
         `Withdrawal to ${sanitiseText(accountName, 30)} · ${mask(accountNumber)}` +
         (tdsAmount > 0 ? ` | TDS 194S: ₹${tdsAmount}` : '') +
         ' | Razorpay nodal payout',
@@ -725,7 +735,7 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
     try {
       const { payout } = await initiateRazorpayPayout({
         amount, tdsAmount, accountName, accountNumber,
-        ifsc: ifsc.toUpperCase(), reference: txRef, userId: req.user.id,
+        ifsc: ifsc.toUpperCase(), reference: idempotencyKey, userId: req.user.id,
       });
       payoutId = payout.id;
       await query(
@@ -734,7 +744,7 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
       );
       log.info({ userId: req.user.id, amount, txRef, payoutId }, 'Razorpay payout initiated');
     } catch (payoutErr) {
-      log.error({ err: payoutErr?.message, userId: req.user.id, txRef }, 'Payout initiation failed — marking withdrawal as failed');
+      log.error({ err: payoutErr?.message, userId: req.user.id, idempotencyKey }, 'Payout initiation failed — marking withdrawal as failed');
       // Mark as failed and reverse ledger in a new transaction with status check
       const reverseClient = await pool.connect();
       try {
@@ -761,10 +771,10 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
                (user_id, type, method, amount, status, balance_before, balance_after, notes)
              VALUES ($1, 'credit', 'system', $2, 'success', $3, $4, $5)`,
             [req.user.id, amount, reverseBefore, reverseAfter,
-             `Auto-reversal — payout initiation failed: ${txRef}`]
+             `Auto-reversal — payout initiation failed: ${idempotencyKey}`]
           );
           await reverseClient.query('COMMIT');
-          log.info({ userId: req.user.id, amount, txRef }, 'Withdrawal reversed due to payout failure');
+          log.info({ userId: req.user.id, amount, idempotencyKey }, 'Withdrawal reversed due to payout failure');
         }
       } catch (reverseErr) {
         await reverseClient.query('ROLLBACK');
