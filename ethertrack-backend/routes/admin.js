@@ -35,6 +35,16 @@ const { activateCorporatePlan, renewCorporatePlan } = require('../services/corpo
 
 const isAdmin = [authenticate, requireRole('admin')];
 
+// ── SQL Injection Defense: Column Whitelists ────────────────────────
+const RETIREMENT_UPDATABLE_COLUMNS = new Set([
+  'retire_scope',
+  'beneficiary_name',
+  'beneficiary_entity',
+  'beneficiary_gstin',
+  'reporting_standard',
+  'purpose',
+]);
+
 // ── Helpers ───────────────────────────────────────────────────────
 const escHtml = (s) =>
   String(s)
@@ -643,12 +653,20 @@ router.post('/retirements/:id/correct', isAdmin, async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     const old = rows[0];
     const updates = []; const values = []; let idx = 1;
-    if (retire_scope       != null) { updates.push(`retire_scope=$${idx++}`);       values.push(retire_scope); }
-    if (beneficiary_name   != null) { updates.push(`beneficiary_name=$${idx++}`);   values.push(beneficiary_name); }
-    if (beneficiary_entity != null) { updates.push(`beneficiary_entity=$${idx++}`); values.push(beneficiary_entity); }
-    if (beneficiary_gstin  != null) { updates.push(`beneficiary_gstin=$${idx++}`);  values.push(beneficiary_gstin); }
-    if (reporting_standard != null) { updates.push(`reporting_standard=$${idx++}`); values.push(reporting_standard); }
-    if (purpose            != null) { updates.push(`purpose=$${idx++}`);            values.push(purpose); }
+    const allowedUpdates = {
+      retire_scope: retire_scope,
+      beneficiary_name: beneficiary_name,
+      beneficiary_entity: beneficiary_entity,
+      beneficiary_gstin: beneficiary_gstin,
+      reporting_standard: reporting_standard,
+      purpose: purpose,
+    };
+    for (const [col, val] of Object.entries(allowedUpdates)) {
+      if (val != null && RETIREMENT_UPDATABLE_COLUMNS.has(col)) {
+        updates.push(`${col}=$${idx++}`);
+        values.push(val);
+      }
+    }
     if (!updates.length) return res.status(400).json({ error: 'No fields to update' });
     updates.push(`updated_at=NOW()`);
     values.push(id);

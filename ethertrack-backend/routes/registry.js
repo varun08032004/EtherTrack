@@ -9,6 +9,10 @@ const { sendMintSuccessEmail } = require('../services/email');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
+// ── SQL Injection Defense: Column Whitelists ────────────────────────
+const PROJECT_FILTER_COLUMNS = new Set(['project_type', 'standard']);
+const PROJECT_STATUS_VALUES = new Set(['approved', 'pending', 'rejected', 'draft']);
+
 const genProjectCode = async () => {
   const year = new Date().getFullYear();
   const { rows } = await query('SELECT COUNT(*) FROM projects WHERE project_code LIKE $1', [`ET-${year}-%`]);
@@ -24,11 +28,20 @@ router.get('/projects', async (req, res) => {
   try {
     const { status, type, standard, page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
+    
+    // Validate status against whitelist
+    const safeStatus = PROJECT_STATUS_VALUES.has(status) ? status : 'approved';
     const conditions = ['p.status = $1'];
-    const params = [status || 'approved'];
+    const params = [safeStatus];
     let idx = 2;
-    if (type)     { conditions.push(`p.project_type = $${idx++}`); params.push(type); }
-    if (standard) { conditions.push(`p.standard = $${idx++}`);     params.push(standard); }
+    
+    // Validate filter columns against whitelist
+    if (type && PROJECT_FILTER_COLUMNS.has('project_type')) {
+      conditions.push(`p.project_type = $${idx++}`); params.push(type);
+    }
+    if (standard && PROJECT_FILTER_COLUMNS.has('standard')) {
+      conditions.push(`p.standard = $${idx++}`);     params.push(standard);
+    }
     params.push(limit, offset);
     // [FIX-PII-LEAK] Was: `SELECT p.*, u.full_name AS developer_user_name,
     // u.email AS developer_email ...` — a completely public, unauthenticated
