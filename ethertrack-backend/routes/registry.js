@@ -189,6 +189,12 @@ router.post('/batches/:id/tokenise', authenticate, requireWallet, async (req, re
     if (!batchRows.length) return res.status(404).json({ error: 'Batch not found' });
     const batch   = batchRows[0];
     const project = { ...batch, id: batch.project_id, name: batch.project_name };
+    
+    // IDOR FIX: Verify user owns the project
+    if (project.developer_id !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Not your project' });
+    }
+    
     const metadata = buildBatchMetadata({ ...batch, token_id: tokenId }, project);
     metadata.registry.tokenId = tokenId;
     const ipfsResult = await uploadJSON(metadata, `batch-${batch.batch_number}`);
