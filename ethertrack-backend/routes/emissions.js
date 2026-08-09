@@ -28,6 +28,7 @@ const { safeQuery: query } = require('../db/pool');
 const { authenticate }     = require('../middleware/auth');
 const { createNotification } = require('./notifications');
 const { requirePlan }      = require('../middleware/planGate');
+const { writeLimiter }     = require('../middleware/rateLimit');
 const { hasPermission }    = require('../middleware/rbac');
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -282,7 +283,7 @@ router.get('/activities', authenticate, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/emissions/log
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/log', authenticate, requirePlan('growth'), async (req, res) => {
+router.post('/log', authenticate, requirePlan('growth'), writeLimiter, async (req, res) => {
   if (!canAccessEmissions(req, 'write')) {
     return res.status(403).json({ error: 'Your role cannot log emissions — ask an org admin or manager' });
   }
@@ -352,7 +353,7 @@ router.post('/log', authenticate, requirePlan('growth'), async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/emissions/bulk
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/bulk', authenticate, requirePlan('growth'), async (req, res) => {
+router.post('/bulk', authenticate, requirePlan('growth'), writeLimiter, async (req, res) => {
   if (!canAccessEmissions(req, 'write')) {
     return res.status(403).json({ error: 'Your role cannot log emissions — ask an org admin or manager' });
   }
@@ -477,7 +478,7 @@ router.post('/bulk', authenticate, requirePlan('growth'), async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // DELETE /api/emissions/activities/:id
 // ─────────────────────────────────────────────────────────────────────────────
-router.delete('/activities/:id', authenticate, async (req, res) => {
+router.delete('/activities/:id', authenticate, writeLimiter, async (req, res) => {
   const id = safeUUID(req.params.id);
   if (!id) return res.status(400).json({ error: 'Invalid record ID' });
 
@@ -507,7 +508,7 @@ router.delete('/activities/:id', authenticate, async (req, res) => {
 // [FEAT-BULK-DELETE] Deletes multiple records in one request.
 // Called by GHGLedger.jsx when user confirms bulk deletion via checkboxes.
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/bulk-delete', authenticate, async (req, res) => {
+router.post('/bulk-delete', authenticate, writeLimiter, async (req, res) => {
   const { ids } = req.body;
 
   if (!canAccessEmissions(req, 'delete')) {
@@ -664,7 +665,7 @@ router.get('/profile', authenticate, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/emissions/profile
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/profile', authenticate, async (req, res) => {
+router.post('/profile', authenticate, writeLimiter, async (req, res) => {
   const {
     companyName, industry, revenueCr, employees, floorSqft,
     netZeroYear, netZeroTargetCo2e, reportingYear,

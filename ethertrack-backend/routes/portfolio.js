@@ -12,27 +12,8 @@ const router      = require('express').Router();
 const { safeQuery: query } = require('../db/pool');
 const { authenticate, requireKYC } = require('../middleware/auth');
 const { sendCreditSubmittedEmail, sendListingConfirmedEmail, sendDelistingConfirmedEmail } = require('../services/email');
-const rateLimit   = require('express-rate-limit');
+const { assetActionLimiter } = require('../middleware/rateLimit');
 const Joi         = require('joi');
-
-// ── Rate limiters ────────────────────────────────────────────────
-const submitLimiter = rateLimit({
-  windowMs : 60 * 60 * 1000, // 1 hour
-  max      : 10,
-  keyGenerator : req => String(req.user.id),
-  handler  : (req, res) =>
-    res.status(429).json({ error: 'Too many submissions. Try again in an hour.' }),
-  standardHeaders: true,
-  legacyHeaders  : false,
-});
-
-const exportLimiter = rateLimit({
-  windowMs : 60 * 1000,
-  max      : 20,
-  keyGenerator : req => String(req.user.id),
-  handler  : (req, res) =>
-    res.status(429).json({ error: 'Export rate limit exceeded.' }),
-});
 
 // ── Constants & validation maps ──────────────────────────────────
 const PROJECT_TYPE_MAP = {
@@ -149,7 +130,7 @@ router.post(
   '/submit-credit',
   authenticate,
   requireKYC,
-  submitLimiter,
+  assetActionLimiter,
   async (req, res) => {
     const { error: validationError, value: body } = submitCreditSchema.validate(req.body);
     if (validationError) {
@@ -309,7 +290,7 @@ router.post(
 // PortfolioV3.jsx handleListForSale, which now includes `quantity: qty` in
 // its confirm-listing call).
 // ─────────────────────────────────────────────────────────────────
-router.post('/confirm-listing', authenticate, async (req, res) => {
+router.post('/confirm-listing', authenticate, assetActionLimiter, async (req, res) => {
   const { batchId, listingIdOnchain, txHash, pricePerCreditInr, quantity } = req.body;
 
   if (!batchId) {
@@ -391,7 +372,7 @@ router.post('/confirm-listing', authenticate, async (req, res) => {
 // full cancel + a brand new listCredit() for the remainder, which will
 // call confirm-listing again with the new (correct) quantity.
 // ─────────────────────────────────────────────────────────────────
-router.post('/confirm-delisting', authenticate, async (req, res) => {
+router.post('/confirm-delisting', authenticate, assetActionLimiter, async (req, res) => {
   const { batchId } = req.body;
 
   if (!batchId) {
@@ -781,7 +762,7 @@ const sendCsvResponse = (res, filename, lines) => {
 // ─────────────────────────────────────────────────────────────────
 // GET /api/portfolio/export/ghg-protocol
 // ─────────────────────────────────────────────────────────────────
-router.get('/export/ghg-protocol', authenticate, exportLimiter, async (req, res) => {
+router.get('/export/ghg-protocol', authenticate, assetActionLimiter, async (req, res) => {
   const year = safeYear(req.query.year);
   try {
     const [creditsRes, emissionsRes, retirementsRes] = await Promise.all([
@@ -850,7 +831,7 @@ router.get('/export/ghg-protocol', authenticate, exportLimiter, async (req, res)
 // ─────────────────────────────────────────────────────────────────
 // GET /api/portfolio/export/brsr
 // ─────────────────────────────────────────────────────────────────
-router.get('/export/brsr', authenticate, exportLimiter, async (req, res) => {
+router.get('/export/brsr', authenticate, assetActionLimiter, async (req, res) => {
   const year = safeYear(req.query.year);
   try {
     const [emissionsRes, retirementsRes, userRes] = await Promise.all([
@@ -912,7 +893,7 @@ router.get('/export/brsr', authenticate, exportLimiter, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────
 // GET /api/portfolio/export/cdp
 // ─────────────────────────────────────────────────────────────────
-router.get('/export/cdp', authenticate, exportLimiter, async (req, res) => {
+router.get('/export/cdp', authenticate, assetActionLimiter, async (req, res) => {
   const year = safeYear(req.query.year);
   try {
     const [emissionsRes, retirementsRes, creditsRes] = await Promise.all([
@@ -976,7 +957,7 @@ router.get('/export/cdp', authenticate, exportLimiter, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────
 // GET /api/portfolio/export/tcfd
 // ─────────────────────────────────────────────────────────────────
-router.get('/export/tcfd', authenticate, exportLimiter, async (req, res) => {
+router.get('/export/tcfd', authenticate, assetActionLimiter, async (req, res) => {
   const year = safeYear(req.query.year);
   try {
     const [emissionsRes, retirementsRes] = await Promise.all([

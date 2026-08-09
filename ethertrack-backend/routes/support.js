@@ -23,6 +23,7 @@ const router = express.Router();
 const { safeQuery } = require('../db/pool');
 const { sendNewTicketInternalAlert, sendSupportTicketReceivedEmail } = require('../services/email'); // adjust export name if different
 const { authenticate, optionalAuth, requireRole } = require('../middleware/auth');
+const { assetActionLimiter } = require('../middleware/rateLimit');
 
 // requireAdmin from middleware/auth.js is requireRole('admin') only — it does
 // NOT include 'superadmin'. AdminDashboard.jsx's render guard treats both
@@ -45,7 +46,7 @@ function isValidEmail(email) {
 // valid session cookie/token exists, req.user is populated (so we can record
 // user_id); if not, the request still proceeds for anonymous visitors.
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/tickets', optionalAuth, async (req, res) => {
+router.post('/tickets', optionalAuth, assetActionLimiter, async (req, res) => {
   try {
     const { name, email, subject, message, page } = req.body;
     const userId = req.user?.id || null; // present if logged in, null otherwise
@@ -212,7 +213,7 @@ router.patch('/tickets/:id', authenticate, requireAdmin, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/support/feedback — log 👍/👎 on a KB answer
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/feedback', optionalAuth, async (req, res) => {
+router.post('/feedback', optionalAuth, assetActionLimiter, async (req, res) => {
   try {
     const { topicId, topicQuestion, helpful, page, userQuery } = req.body;
     const userId = req.user?.id || null;
@@ -237,7 +238,7 @@ router.post('/feedback', optionalAuth, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/support/unanswered — log a query Ethi couldn't answer
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/unanswered', optionalAuth, async (req, res) => {
+router.post('/unanswered', optionalAuth, assetActionLimiter, async (req, res) => {
   try {
     const { query, page } = req.body;
     const userId = req.user?.id || null;

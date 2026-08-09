@@ -23,6 +23,7 @@
 const router = require('express').Router();
 const { safeQuery: query } = require('../db/pool');
 const { authenticate, requireKYC } = require('../middleware/auth');
+const { assetActionLimiter } = require('../middleware/rateLimit');
 const {
   listCreditForOnChain,
   cancelListingForOnChain,
@@ -44,7 +45,7 @@ const auditLog = async (adminId, action, targetUserId, details) => {
 // already granted setApprovalForAll(marketplace, true) ONCE (checked
 // on-chain by listCreditFor itself, which reverts clearly if missing).
 // ══════════════════════════════════════════════════════════════════
-router.post('/list-credit', authenticate, requireKYC, async (req, res) => {
+router.post('/list-credit', authenticate, requireKYC, assetActionLimiter, async (req, res) => {
   const { tokenId, amount, priceInEth, priceInINR, durationDays = 30 } = req.body;
 
   if (tokenId == null || !amount || amount <= 0) {
@@ -101,7 +102,7 @@ router.post('/list-credit', authenticate, requireKYC, async (req, res) => {
 // Operator-executed delisting — zero approval needed, Marketplace
 // already holds the escrowed tokens itself.
 // ══════════════════════════════════════════════════════════════════
-router.post('/delist-credit', authenticate, async (req, res) => {
+router.post('/delist-credit', authenticate, assetActionLimiter, async (req, res) => {
   const { listingIdOnchain } = req.body;
 
   if (listingIdOnchain == null) {
@@ -153,7 +154,7 @@ router.post('/delist-credit', authenticate, async (req, res) => {
 // retireCredit() flow (still MetaMask-based) — this endpoint is only for
 // wallet-free ledger users.
 // ══════════════════════════════════════════════════════════════════
-router.post('/retire-credit-ledger', authenticate, requireKYC, async (req, res) => {
+router.post('/retire-credit-ledger', authenticate, requireKYC, assetActionLimiter, async (req, res) => {
   const { tokenId, amount } = req.body;
 
   if (tokenId == null || !amount || amount <= 0) {
@@ -223,7 +224,7 @@ router.post('/retire-credit-ledger', authenticate, requireKYC, async (req, res) 
 // ledger balance. The actual on-chain SELL/BUY log entries happen at
 // purchase time (see checkout-verify's ledger-to-ledger branch).
 // ══════════════════════════════════════════════════════════════════
-router.post('/list-credit-ledger', authenticate, requireKYC, async (req, res) => {
+router.post('/list-credit-ledger', authenticate, requireKYC, assetActionLimiter, async (req, res) => {
   const { tokenId, batchId, amount, priceInINR, durationDays = 30 } = req.body;
 
   if (tokenId == null || !amount || amount <= 0) {
@@ -277,7 +278,7 @@ router.post('/list-credit-ledger', authenticate, requireKYC, async (req, res) =>
 // Wallet-free delisting — just deactivates the DB listing row. Nothing to
 // move on-chain since nothing was ever escrowed out of pooled custody.
 // ══════════════════════════════════════════════════════════════════
-router.post('/delist-credit-ledger', authenticate, async (req, res) => {
+router.post('/delist-credit-ledger', authenticate, assetActionLimiter, async (req, res) => {
   const { listingId } = req.body;
   if (!listingId) return res.status(400).json({ error: 'listingId is required' });
 
@@ -331,7 +332,7 @@ function calcLedgerFees(subtotalINR) {
 }
 
 // POST /api/portfolio/ledger-checkout-order
-router.post('/ledger-checkout-order', authenticate, requireKYC, async (req, res) => {
+router.post('/ledger-checkout-order', authenticate, requireKYC, assetActionLimiter, async (req, res) => {
   const { ledgerListingId, quantity } = req.body;
   if (!ledgerListingId || !quantity || quantity <= 0) {
     return res.status(400).json({ error: 'ledgerListingId and a positive quantity are required' });
@@ -413,7 +414,7 @@ router.post('/ledger-checkout-order', authenticate, requireKYC, async (req, res)
 });
 
 // POST /api/portfolio/ledger-checkout-verify
-router.post('/ledger-checkout-verify', authenticate, requireKYC, async (req, res) => {
+router.post('/ledger-checkout-verify', authenticate, requireKYC, assetActionLimiter, async (req, res) => {
   const { razorpay_order_id, razorpay_payment_id, razorpay_signature, ledgerListingId, quantity } = req.body;
 
   if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !ledgerListingId || !quantity) {

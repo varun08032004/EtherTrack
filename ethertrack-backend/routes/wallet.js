@@ -1053,7 +1053,7 @@ router.get('/status', authenticate, walletReadLimiter, async (req, res) => {
 });
 
 // ── KYC sync ──────────────────────────────────────────────────────────────────
-router.post('/kyc', authenticate, async (req, res) => {
+router.post('/kyc', authenticate, walletActionLimiter, async (req, res) => {
   const { kycDataHash, aadhaarHash, panHash } = req.body;
   try {
     if (req.user.wallet_address) {

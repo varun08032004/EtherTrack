@@ -132,8 +132,13 @@ const entityActionLimiter = makeLimiter({
   message:  'Too many account actions. Please slow down.',
 });
 
-// 2FA setup/verify — same brute-force risk profile as OTP (someone
-// guessing a 6-digit TOTP code), same tight ceiling.
+// ── Write limiter (for emissions, compliance, etc.) ───────────────────────
+const writeLimiter = makeLimiter({
+  prefix:   'write-action',
+  windowMs: 60 * 1000,
+  max:      30,
+  message:  'Too many write actions. Please slow down.',
+});
 const twoFactorLimiter = makeLimiter({
   prefix:       'two-factor',
   windowMs:     10 * 60 * 1000,
@@ -163,4 +168,5 @@ module.exports = {
   entityActionLimiter,
   twoFactorLimiter,
   otpLimiter,
+  writeLimiter,
 };
