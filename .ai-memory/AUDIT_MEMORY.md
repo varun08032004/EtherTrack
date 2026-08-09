@@ -118,24 +118,55 @@
  - News URLs: Allowlist domains + HTTPS only (sanitizeUrl())
  - InnerHTML usage: Only container.innerHTML = '' to clear reCAPTCHA
  
- ### SEC-006: IDOR / BOLA Audit ✅ FIXED
- - Scanned all routes with dynamic parameters
- - All routes have proper authentication
- - Most routes have ownership/org checks in SQL (WHERE user_id = $N, WHERE org_id = $N)
- - Fixed IDOR in registry.js: /batches/:id/tokenise now verifies project.developer_id === req.user.id
- - Admin routes protected by requireAdmin/requireRole
- - Org routes protected by requireOrgRole
- - Public routes intentionally public (verification endpoints, registry browse)
- 
- ### SEC-007: Rate Limiting Coverage ✅ FIXED
- - Added tiered rate limiters in middleware/rateLimit.js
- - assetActionLimiter (15/min/user): portfolio confirm-listing/delisting, operator-trading list/delist/retire/ledger-checkout, support tickets/feedback/unanswered, wallet KYC sync
- - writeLimiter (30/min/user): emissions log/bulk/delete/profile, compliance writes
- - walletActionLimiter (20/min/user): wallet KYC sync
- - Server-level prefix limiters: /api/auth (100/15min), /api/kyc (20/hr), /api/emissions/log (30/min), /api/emissions/bulk (10/hr), /api/brsr (20/min), /api/ccts (20/min), /api/compliance (60/min), /api/ccc (120/min), /api/subscription/* (10/min), /api/erp (60/15min), /api/ops-integration (20/min), /api/invoices (40/min)
- - Global catch-all: /api/ (500/15min per IP)
- 
- ### SEC-001A: Secret Rotation
+### SEC-006: IDOR / BOLA Audit ✅ FIXED
+  - Scanned all routes with dynamic parameters
+  - All routes have proper authentication
+  - Most routes have ownership/org checks in SQL (WHERE user_id = $N, WHERE org_id = $N)
+  - Fixed IDOR in registry.js: /batches/:id/tokenise now verifies project.developer_id === req.user.id
+  - Admin routes protected by requireAdmin/requireRole
+  - Org routes protected by requireOrgRole
+  - Public routes intentionally public (verification endpoints, registry browse)
+  
+  ### SEC-007: Rate Limiting Coverage ✅ FIXED
+  - Added tiered rate limiters in middleware/rateLimit.js
+  - assetActionLimiter (15/min/user): portfolio confirm-listing/delisting, operator-trading list/delist/retire/ledger-checkout, support tickets/feedback/unanswered, wallet KYC sync
+  - writeLimiter (30/min/user): emissions log/bulk/delete/profile, compliance writes
+  - walletActionLimiter (20/min/user): wallet KYC sync
+  - Server-level prefix limiters: /api/auth (100/15min), /api/kyc (20/hr), /api/emissions/log (30/min), /api/emissions/bulk (10/hr), /api/brsr (20/min), /api/ccts (20/min), /api/compliance (60/min), /api/ccc (120/min), /api/subscription/* (10/min), /api/erp (60/15min), /api/ops-integration (20/min), /api/invoices (40/min)
+  - Global catch-all: /api/ (500/15min per IP)
+  
+  ### FIN-001 to FIN-006: Financial Correctness ✅ COMPLETE
+  - FIN-001: Double-spend prevention - idempotency keys, advisory locks, FOR UPDATE locks
+  - FIN-002: Oversell prevention - FOR UPDATE locks, advisory locks, GREATEST(0, ...) checks
+  - FIN-003: Negative balance prevention - DB constraints, adjustLedger checks
+  - FIN-004: Duplicate payment prevention - idempotency keys on trades, wallet, subscriptions
+  - FIN-005: Duplicate trade prevention - idempotency keys + DB unique constraint
+  - FIN-006: Duplicate withdrawal prevention - idempotency key on withdrawal endpoint
+  
+  ### FIN-007: Fee Calculation Accuracy ✅ VERIFIED
+  - calcFees() in trades.js: 1% total fee (100 BPS) split 50/50 buyer/seller
+  - GST 18% on platform fee only (not on carbon credit price)
+  - Fee split 50/50 between buyer/seller, GST split 50/50
+  
+  ### FIN-008: GST/Tax Calculation Accuracy ✅ VERIFIED
+  - getGSTType() correctly determines CGST/SGST vs IGST based on buyer GSTIN state code
+  - B2C no-GSTIN defaults to CGST/SGST (same-state assumption)
+  - CGST/SGST vs IGST logic in invoice.js verified
+  - SAC codes and GST breakdown in invoices
+  
+  ### FIN-009: Settlement Atomicity ✅ VERIFIED
+  - withTransaction() wrapper used for all trade settlements
+  - FOR UPDATE locks on batch, buyer, seller rows
+  - Advisory locks (pg_advisory_xact_lock) prevent concurrent trades on same batch
+  - Atomic INR balance updates within transaction
+  
+  ### FIN-010: Reconciliation 🔄 PARTIAL
+  - CreditLedger reconciliation cron added (hourly)
+  - Need: wallet balances ↔ wallet ledger, carbon ownership ↔ CarbonLedger
+  - Need: marketplace trades ↔ trade records, Razorpay payments ↔ internal payments
+  - Need: blockchain events ↔ internal trade state, registry transactions ↔ carbon ownership
+  
+  ### SEC-001A: Secret Rotation
 - ROTATION_MATRIX.md created (22 secrets classified)
 - PRODUCTION_SECRET_ROTATION_RUNBOOK.md created (7-phase runbook)
 - .gitleaks.toml with allowlists for false positives
