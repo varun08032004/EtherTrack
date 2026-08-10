@@ -53,7 +53,7 @@
 | **ARC-006** | Structured logging & correlation IDs | ✅ **COMPLETE** | P1 | Request ID middleware, shared logger, req.log pattern in all routes, background services |
 | **ARC-007** | Health checks (DB, Redis, RPC, external APIs) | ✅ **COMPLETE** | P1 | `/health` endpoint with DB, pool, uptime checks |
 | **ARC-008** | Graceful shutdown / connection draining | ✅ **COMPLETE** | P1 | SIGTERM/SIGINT handling with 10s timeout, pool.end() |
-| **ARC-009** | Backup / PITR strategy | 🔍 **OPEN** | P1 | Supabase PITR enabled; need custom backup scripts |
+| **ARC-009** | Backup / PITR strategy | ✅ **COMPLETE** | P1 | Supabase PITR enabled; custom backup scripts for critical tables, manifest, restore tooling, cron scheduling |
 | **ARC-010** | Disaster recovery runbook | 🔍 **OPEN** | P1 | RTO/RPO definitions; recovery procedures documentation |
 
 ---

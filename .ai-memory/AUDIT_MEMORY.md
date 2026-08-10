@@ -233,9 +233,15 @@ Untracked (to commit):
 - pool.end() on shutdown
 - Connection draining
 
-### ARC-009: Backup / PITR Strategy 🔍 OPEN
-- Supabase PITR enabled
-- Need custom backup scripts for critical data
+### ARC-009: Backup / PITR Strategy ✅ COMPLETE
+- Supabase PITR enabled (7-day retention, configurable up to 30 days)
+- Created `scripts/backup-critical-data.js`: backs up 10 critical tables (wallet_transactions, subscription_payments, trades, users, kyc_submissions, credit_ledger_entries, credit_ledger_balances, carbon_batches, projects, admin_audit_log)
+- Compressed JSON output with gzip, manifest generation, 30-day local retention
+- Supabase Storage upload support (optional bucket config)
+- Created `scripts/backup-cron.js`: distributed lock via app_state, daily at 2:30 AM IST
+- Created `scripts/restore-from-backup.js`: single table or manifest-based restore with upsert semantics
+- Created `scripts/verify-pitr.js`: PITR verification helper
+- Scheduled in server.js via node-cron (daily 2:30 AM IST)
 
 ### ARC-010: Disaster Recovery Runbook 🔍 OPEN
 - RTO/RPO definitions needed
@@ -311,5 +317,5 @@ Untracked (to commit):
 ---
 
 *Last Updated: 2026-08-10*
-*Context: FIN-001 to FIN-010 COMPLETE | SEC-001 to SEC-007 COMPLETE | ARC-001/003/004/005/006/007/008 COMPLETE | ARC-002/009/010 OPEN*
+*Context: FIN-001 to FIN-010 COMPLETE | SEC-001 to SEC-007 COMPLETE | ARC-001/003/004/005/006/007/008/009 COMPLETE | ARC-002/010 OPEN*
 *Memory Persistence: This file survives context resets*

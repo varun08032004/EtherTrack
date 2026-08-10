@@ -780,6 +780,22 @@ server.listen(PORT, () => {
   setInterval(runCreditLedgerReconciliation, 60 * 60 * 1000);
   console.log('🔍 CreditLedger reconciliation cron started (first run in 60 s, then hourly)');
 
+  // ── Critical data backup cron (daily at 2:30 AM IST = 21:00 UTC) ────────────
+  try {
+    const nodeCron = require('node-cron');
+    nodeCron.schedule('0 21 * * *', () => {
+      const { fork } = require('child_process');
+      const backupProcess = fork('./scripts/backup-cron.js');
+      backupProcess.on('exit', (code) => {
+        if (code !== 0) console.error('[Backup] Cron exited with code', code);
+      });
+      backupProcess.on('error', (err) => console.error('[Backup] Fork error:', err.message));
+    }, { timezone: 'Asia/Kolkata' });
+    console.log('💾 Critical data backup cron scheduled (daily 2:30 AM IST)');
+  } catch (e) {
+    console.warn('⚠️  Backup cron not started:', e.message);
+  }
+
   try {
     const { startEmailWorker } = require('./services/email');
     startEmailWorker();
