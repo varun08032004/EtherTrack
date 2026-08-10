@@ -184,9 +184,16 @@ Untracked (to commit):
 - Pool health monitoring with active/idle tracking
 - Graceful shutdown with pool.end()
 
-### ARC-002: Read Replicas / Query Optimization 🔍 OPEN
-- Need N+1 query audit across routes
-- Consider read replicas for read-heavy workloads
+### ARC-002: Read Replicas / Query Optimization ✅ COMPLETE
+- N+1 query audit complete - found and fixed 1 major N+1 in `routes/erp.js` (batch upsert for emission_entries)
+- Read replica support added via `DATABASE_READ_URL` env var in `db/pool.js`
+  - Automatic routing: SELECT/WITH queries → read pool, others → primary pool
+  - Separate pool sizing, health monitoring, and connection limits
+- Query analyzer added in `db/queryAnalyzer.js`
+  - Tracks query execution times, detects slow queries (>1s)
+  - Provides slow query reports and top queries by frequency
+- Health check enhanced to monitor both primary and read pools
+- ERP sync batch upsert: replaced N individual INSERTs with single multi-row INSERT with ON CONFLICT fallback
 
 ### ARC-003: Circuit Breakers for External APIs 🔍 OPEN
 - Razorpay, Pinata, Alchemy, Firebase need circuit breaker pattern
@@ -323,5 +330,5 @@ Untracked (to commit):
 ---
 
 *Last Updated: 2026-08-10*
-*Context: FIN-001 to FIN-010 COMPLETE | SEC-001 to SEC-007 COMPLETE | ARC-001/003/004/005/006/007/008/009/010 COMPLETE | ARC-002 OPEN*
+*Context: FIN-001 to FIN-010 COMPLETE | SEC-001 to SEC-007 COMPLETE | ARC-001 to ARC-010 ALL COMPLETE*
 *Memory Persistence: This file survives context resets*

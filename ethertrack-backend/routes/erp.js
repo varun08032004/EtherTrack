@@ -939,9 +939,14 @@ async function runScheduledSync(orgId, erpId, db) {
     throw e;
   }
 
-  let totalCO2e = 0;
+let totalCO2e = 0;
   let inserted  = 0;
   let partial   = false;
+
+  // Batch upsert - collect all rows for single multi-row INSERT
+  const batchValues = [];
+  const batchParams = [];
+  let paramIndex = 1;
 
   for (const row of rows) {
     const dt = dataTypes.find(d => d.label === row.data_type);
@@ -951,23 +956,58 @@ async function runScheduledSync(orgId, erpId, db) {
     const autoApproveThresh = parseFloat(syncConfig.auto_approve ?? 90);
     const status = (tco2e && autoApproveThresh <= 90) ? 'approved' : 'pending_review';
 
+    batchValues.push(
+      `($${paramIndex},$${paramIndex+1},$${paramIndex+2},$${paramIndex+3},$${paramIndex+4},$${paramIndex+5},$${paramIndex+6},$${paramIndex+7},$${paramIndex+8},$${paramIndex+9},$${paramIndex+10},$${paramIndex+11},$${paramIndex+12},NOW())`
+    );
+    batchParams.push(
+      orgId, erpId, san(row.ref || '', 100), row.date || null, san(row.vendor || '', 200),
+      row.amount || 0, row.currency || 'INR', row.data_type, row.ef_key || null,
+      dt?.scope || null, tco2e, needs_input, status
+    );
+    paramIndex += 13;
+
+    if (tco2e) totalCO2e += tco2e;
+    inserted++;
+  }
+
+  // Single batch upsert
+  if (batchValues.length > 0) {
     try {
-      await db.query(
-        `INSERT INTO emission_entries
+      const batchQuery = `
+        INSERT INTO emission_entries
            (org_id, erp_id, source_ref, date, vendor, amount, currency,
             data_type, ef_key, scope, tco2e, needs_input, status, synced_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
-         ON CONFLICT (org_id, erp_id, source_ref) DO UPDATE
-           SET tco2e=$11, ef_key=$9, status=$13, synced_at=NOW()`,
-        [orgId, erpId, san(row.ref || '', 100), row.date || null, san(row.vendor || '', 200),
-         row.amount || 0, row.currency || 'INR', row.data_type, row.ef_key || null,
-         dt?.scope || null, tco2e, needs_input, status]
-      );
-      if (tco2e) totalCO2e += tco2e;
-      inserted++;
+        VALUES ${batchValues.join(',')}
+        ON CONFLICT (org_id, erp_id, source_ref) DO UPDATE
+          SET tco2e=EXCLUDED.tco2e, ef_key=EXCLUDED.ef_key, status=EXCLUDED.status, synced_at=NOW()
+      `;
+      await db.query(batchQuery, batchParams);
     } catch (e) {
       partial = true;
-      console.error(`[erp:sync] upsert failed for ${row.ref}: ${e.message}`);
+      console.error('[erp:sync] batch upsert failed:', e.message);
+      // Fallback to individual inserts for resilience
+      for (const row of rows) {
+        const dt = dataTypes.find(d => d.label === row.data_type);
+        const { tco2e, needs_input } = calculateEmissions(row, dt);
+        const autoApproveThresh = parseFloat(syncConfig.auto_approve ?? 90);
+        const status = (tco2e && autoApproveThresh <= 90) ? 'approved' : 'pending_review';
+        try {
+          await db.query(
+            `INSERT INTO emission_entries
+               (org_id, erp_id, source_ref, date, vendor, amount, currency,
+                data_type, ef_key, scope, tco2e, needs_input, status, synced_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
+             ON CONFLICT (org_id, erp_id, source_ref) DO UPDATE
+               SET tco2e=$11, ef_key=$9, status=$13, synced_at=NOW()`,
+            [orgId, erpId, san(row.ref || '', 100), row.date || null, san(row.vendor || '', 200),
+             row.amount || 0, row.currency || 'INR', row.data_type, row.ef_key || null,
+             dt?.scope || null, tco2e, needs_input, status]
+          );
+        } catch (e) {
+          partial = true;
+          console.error(`[erp:sync] fallback upsert failed for ${row.ref}:`, e.message);
+        }
+      }
     }
   }
 

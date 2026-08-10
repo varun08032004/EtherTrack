@@ -46,7 +46,7 @@
 | ID | Task | Status | Priority | Notes |
 |----|------|--------|----------|-------|
 | **ARC-001** | Database connection pooling & limits | ✅ **COMPLETE** | P1 | Pool size: 10 (Supabase free tier); pg Pool with health monitoring, retry logic, connection limits |
-| **ARC-002** | Read replicas / query optimization | 🔍 **OPEN** | P2 | N+1 query audit; consider read replicas for read-heavy workloads |
+| **ARC-002** | Read replicas / query optimization | ✅ **COMPLETE** | P2 | N+1 query audit complete; read replica support added (DATABASE_READ_URL); batch upsert in ERP sync; query analyzer for slow query detection |
 | **ARC-003** | Circuit breakers for external APIs | ✅ **COMPLETE** | P1 | Razorpay, Pinata, Alchemy/RPC - circuit breaker pattern implemented |
 | **ARC-004** | Graceful degradation (feature flags) | ✅ **COMPLETE** | P1 | Feature flag system with health checks; INR-only mode auto-enabled when blockchain unhealthy |
 | **ARC-005** | Idempotency keys on all mutations | ✅ **COMPLETE** | P0 | DB UNIQUE constraints on trades, wallet_transactions, subscription_payments, kyc_idempotency_keys; routes updated |
