@@ -48,7 +48,7 @@
 | **ARC-001** | Database connection pooling & limits | ✅ **COMPLETE** | P1 | Pool size: 10 (Supabase free tier); pg Pool with health monitoring, retry logic, connection limits |
 | **ARC-002** | Read replicas / query optimization | 🔍 **OPEN** | P2 | N+1 query audit; consider read replicas for read-heavy workloads |
 | **ARC-003** | Circuit breakers for external APIs | ✅ **COMPLETE** | P1 | Razorpay, Pinata, Alchemy/RPC - circuit breaker pattern implemented |
-| **ARC-004** | Graceful degradation (feature flags) | 🔍 **OPEN** | P2 | Blockchain down → INR-only mode; feature flag system needed |
+| **ARC-004** | Graceful degradation (feature flags) | ✅ **COMPLETE** | P1 | Feature flag system with health checks; INR-only mode auto-enabled when blockchain unhealthy |
 | **ARC-005** | Idempotency keys on all mutations | ✅ **COMPLETE** | P0 | DB UNIQUE constraints on trades, wallet_transactions, subscription_payments, kyc_idempotency_keys; routes updated |
 | **ARC-006** | Structured logging & correlation IDs | ✅ **COMPLETE** | P1 | Request ID middleware, shared logger, req.log pattern in all routes, background services |
 | **ARC-007** | Health checks (DB, Redis, RPC, external APIs) | ✅ **COMPLETE** | P1 | `/health` endpoint with DB, pool, uptime checks |

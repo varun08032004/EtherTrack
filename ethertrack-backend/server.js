@@ -299,12 +299,27 @@ app.use((req, res, next) => {
 
 // ── Request/Response structured logging ──────────────────────────────────────
 const logger = require('./services/logger');
+const { featureFlags } = require('./lib/featureFlags');
+
+// Run initial health checks (async IIFE)
+(async () => {
+  try {
+    await featureFlags.runHealthChecks();
+    logger.info({ flags: featureFlags.getByCategory('blockchain') }, 'Feature flags initialized');
+  } catch (e) {
+    logger.error({ err: e.message }, 'Feature flags initialization failed');
+  }
+})();
+
+const start = process.hrtime.bigint();
+
+// ── Request/Response structured logging middleware ─────────────────────────────
 app.use((req, res, next) => {
-  const start = process.hrtime.bigint();
+  const reqStart = process.hrtime.bigint();
   
   // Capture response finish
   res.on('finish', () => {
-    const durationMs = Number(process.hrtime.bigint() - start) / 1_000_000;
+    const durationMs = Number(process.hrtime.bigint() - reqStart) / 1_000_000;
     const logData = {
       requestId: req.requestId,
       method: req.method,
@@ -490,6 +505,39 @@ app.get('/health', async (req, res) => {
 });
 app.get('/api/health', (req, res) => res.redirect('/health'));
 
+// ── Feature flags API (admin) ──────────────────────────────────────────────────
+const { authenticate, requireRole } = require('./middleware/auth');
+app.get('/api/admin/feature-flags', authenticate, requireRole('admin'), (req, res) => {
+  res.json({ flags: featureFlags.getAll() });
+});
+app.post('/api/admin/feature-flags/:name', authenticate, requireRole('admin'), (req, res) => {
+  const { name } = req.params;
+  const { value } = req.body;
+  if (typeof value !== 'boolean') return res.status(400).json({ error: 'value must be boolean' });
+  const success = featureFlags.set(name, value, 'admin');
+  if (!success) return res.status(404).json({ error: 'Flag not found' });
+  res.json({ success: true, flag: name, value });
+});
+app.post('/api/admin/feature-flags/:name/reset', authenticate, requireRole('admin'), (req, res) => {
+  const { name } = req.params;
+  const success = featureFlags.reset(name);
+  if (!success) return res.status(404).json({ error: 'Flag not found' });
+  res.json({ success: true, flag: name, value: featureFlags.get(name) });
+});
+
+// ── Feature flags middleware ──────────────────────────────────────────────────
+app.use((req, res, next) => {
+  req.featureFlags = {
+    get: (name) => featureFlags.get(name),
+    getAll: () => featureFlags.getAll(),
+    getByCategory: (cat) => featureFlags.getByCategory(cat),
+    isInrOnly: () => featureFlags.get('inrOnlyMode'),
+    isBlockchainEnabled: () => featureFlags.get('blockchain.enabled')
+  };
+  res.setHeader('X-Feature-Flags', JSON.stringify(featureFlags.getByCategory('blockchain')));
+  next();
+});
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.use('/api/reports',       reportRoutes);
 app.use('/api/market',        marketRoutes);
@@ -613,11 +661,20 @@ server.listen(PORT, () => {
     console.warn('⚠️  Socket.io not available');
   }
 
-  if (process.env.ALCHEMY_RPC && process.env.MARKETPLACE_ADDRESS) {
-    blockchain.init();
-    console.log('✅ Blockchain listeners started');
+  // ── Blockchain initialization (feature flag controlled) ──────────────────────
+  if (featureFlags.get('blockchain.enabled')) {
+    if (process.env.ALCHEMY_RPC && process.env.MARKETPLACE_ADDRESS) {
+      blockchain.init();
+      console.log('✅ Blockchain listeners started');
+    } else {
+      console.warn('⚠️  Blockchain listeners skipped — missing ALCHEMY_RPC or MARKETPLACE_ADDRESS');
+      // Auto-disable blockchain features if config missing
+      featureFlags.set('blockchain.enabled', false, 'config');
+      featureFlags.set('inrOnlyMode', true, 'config');
+    }
   } else {
-    console.warn('⚠️  Blockchain listeners skipped — missing ALCHEMY_RPC or MARKETPLACE_ADDRESS');
+    console.log('🔄 INR-only mode active — blockchain features disabled');
+    featureFlags.set('inrOnlyMode', true, 'config');
   }
 
   // ── Chain logger crons (INR/Razorpay trade on-chain logging) ──────────────
@@ -627,7 +684,7 @@ server.listen(PORT, () => {
     console.log('ℹ️  POLYGON_RPC_URL set from ALCHEMY_RPC');
   }
 
-  if (process.env.CHAIN_SIGNER_PRIVATE_KEY && process.env.MARKETPLACE_ADDRESS) {
+  if (featureFlags.get('blockchain.chainLogging') && process.env.CHAIN_SIGNER_PRIVATE_KEY && process.env.MARKETPLACE_ADDRESS) {
     try {
       const chainLogger  = require('./services/chainLogger');
       const feeOps       = require('./services/feeOperations');

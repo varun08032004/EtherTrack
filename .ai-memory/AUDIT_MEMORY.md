@@ -192,9 +192,15 @@ Untracked (to commit):
 - Razorpay, Pinata, Alchemy, Firebase need circuit breaker pattern
 - Need timeout, retry, fallback logic
 
-### ARC-004: Graceful Degradation (Feature Flags) 🔍 OPEN
-- Blockchain down → INR-only mode
-- Feature flag system needed
+### ARC-004: Graceful Degradation (Feature Flags) ✅ COMPLETE
+- Created `lib/featureFlags.js` with FeatureFlags class (CLOSED/OPEN/HALF_OPEN not needed - simple boolean flags with dependencies)
+- Default flags for: blockchain.enabled, blockchain.rpc.healthy, blockchain.contract.deployed, blockchain.minting, blockchain.trading, blockchain.retirement, blockchain.chainLogging, inrOnlyMode, pinata.enabled, razorpay.enabled, firebase.auth
+- Health checks registered for RPC, contract deployment, Pinata, Razorpay, Firebase
+- Automatic INR-only mode when blockchain flags are false
+- Admin API endpoints: GET/POST `/api/admin/feature-flags`, POST `/api/admin/feature-flags/:name/reset`
+- Middleware exposes `req.featureFlags` to all routes
+- Periodic health checks every 60 seconds
+- Server startup initializes health checks and auto-disables blockchain if config missing
 
 ### ARC-003: Circuit Breakers for External APIs ✅ COMPLETE
 - Created `lib/circuitBreaker.js` with CircuitBreaker class (CLOSED/OPEN/HALF_OPEN states)
@@ -305,5 +311,5 @@ Untracked (to commit):
 ---
 
 *Last Updated: 2026-08-10*
-*Context: FIN-001 to FIN-010 COMPLETE | SEC-001 to SEC-007 COMPLETE | ARC-001/003/005/006/007/008 COMPLETE | ARC-002/004/009/010 OPEN*
+*Context: FIN-001 to FIN-010 COMPLETE | SEC-001 to SEC-007 COMPLETE | ARC-001/003/004/005/006/007/008 COMPLETE | ARC-002/009/010 OPEN*
 *Memory Persistence: This file survives context resets*
