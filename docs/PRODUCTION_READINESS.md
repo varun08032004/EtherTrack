@@ -54,7 +54,7 @@
 | **ARC-007** | Health checks (DB, Redis, RPC, external APIs) | ✅ **COMPLETE** | P1 | `/health` endpoint with DB, pool, uptime checks |
 | **ARC-008** | Graceful shutdown / connection draining | ✅ **COMPLETE** | P1 | SIGTERM/SIGINT handling with 10s timeout, pool.end() |
 | **ARC-009** | Backup / PITR strategy | ✅ **COMPLETE** | P1 | Supabase PITR enabled; custom backup scripts for critical tables, manifest, restore tooling, cron scheduling |
-| **ARC-010** | Disaster recovery runbook | 🔍 **OPEN** | P1 | RTO/RPO definitions; recovery procedures documentation |
+| **ARC-010** | Disaster recovery runbook | ✅ **COMPLETE** | P1 | RTO/RPO definitions, recovery procedures for 6 scenarios, communication plan, post-incident process |
 
 ---
 
