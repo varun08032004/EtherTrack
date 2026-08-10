@@ -21,9 +21,29 @@ const { generateTradeInvoice, generateTradeBill, serveTradeInvoice, getGSTType }
 const { sendCreditsSoldEmail } = require('../services/email');
 const { issueOwnershipCertificate } = require('../services/certificates');
 
-const razorpay = new Razorpay({
-  key_id:     process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
+// ── Razorpay with circuit breaker ────────────────────────────────────
+const { getBreaker } = require('../lib/circuitBreaker');
+const razorpayBreaker = getBreaker('razorpay', {
+  failureThreshold: 5,
+  successThreshold: 2,
+  timeout: 30000
+});
+
+let _razorpay = null;
+const getRazorpay = () => {
+  if (_razorpay) return _razorpay;
+  if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET)
+    throw new Error('Razorpay keys not configured');
+  _razorpay = new Razorpay({
+    key_id:     process.env.RAZORPAY_KEY_ID,
+    key_secret: process.env.RAZORPAY_KEY_SECRET,
+  });
+  return _razorpay;
+};
+
+const withRazorpay = (fn) => razorpayBreaker.execute(async () => {
+  const rzp = getRazorpay();
+  return fn(rzp);
 });
 
 const PLATFORM_FEE_BPS  = 100;
@@ -558,7 +578,7 @@ router.post('/checkout-order', authenticate, requireKYC, tradeLimiter, async (re
       });
     }
 
-    const order = await razorpay.orders.create({
+    const order = await withRazorpay((rzp) => rzp.orders.create({
       amount:   Math.round(fees.buyerPaysINR * 100),
       currency: 'INR',
       transfers,
@@ -567,7 +587,7 @@ router.post('/checkout-order', authenticate, requireKYC, tradeLimiter, async (re
         batch_id: String(batchId), quantity: String(qty),
         price_per_credit: String(pricePerCredit), payment_mode: 'direct_razorpay',
       },
-    });
+    }));
 
     await query(
       `INSERT INTO razorpay_checkout_orders

@@ -25,9 +25,28 @@ const { validateCoupon, computeDiscount, recordRedemption } = require('../servic
 
 const router = express.Router();
 
-const razorpay = new Razorpay({
-  key_id:     process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
+const { getBreaker } = require('../lib/circuitBreaker');
+const razorpayBreaker = getBreaker('razorpay', {
+  failureThreshold: 5,
+  successThreshold: 2,
+  timeout: 30000
+});
+
+let _razorpay = null;
+const getRazorpay = () => {
+  if (_razorpay) return _razorpay;
+  if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET)
+    throw new Error('Razorpay keys not configured');
+  _razorpay = new Razorpay({
+    key_id:     process.env.RAZORPAY_KEY_ID,
+    key_secret: process.env.RAZORPAY_KEY_SECRET,
+  });
+  return _razorpay;
+};
+
+const withRazorpay = (fn) => razorpayBreaker.execute(async () => {
+  const rzp = getRazorpay();
+  return fn(rzp);
 });
 
 // ── Rate limiters ─────────────────────────────────────────────────
@@ -356,11 +375,11 @@ router.post('/order',
       // GST is charged on the net (post-discount) sale price, matching
       // standard invoicing practice for a discounted sale.
       const totalPaise = getTotalPaise(amountPaise);
-      const order = await razorpay.orders.create({
+      const order = await withRazorpay((rzp) => rzp.orders.create({
         amount: totalPaise, currency: 'INR',
         receipt: `et_${Date.now()}`,
         notes:   { user_id: userId, plan, cycle, idempotency_key, coupon_code: appliedCoupon || undefined },
-      });
+      }));
 
       await insertPayment({
         user_id: userId, plan, cycle,

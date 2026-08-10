@@ -4,9 +4,17 @@
 
 const axios    = require('axios');
 const FormData = require('form-data');
+const { getBreaker } = require('../lib/circuitBreaker');
 
 const PINATA_URL = 'https://api.pinata.cloud';
 const GATEWAY    = process.env.PINATA_GATEWAY || 'https://gateway.pinata.cloud/ipfs';
+
+// Pinata circuit breaker
+const pinataBreaker = getBreaker('pinata', {
+  failureThreshold: 5,
+  successThreshold: 2,
+  timeout: 30000
+});
 
 // ── Startup validation ────────────────────────────────────────────
 if (!process.env.PINATA_API_KEY || !process.env.PINATA_SECRET_KEY) {
@@ -59,17 +67,13 @@ const uploadJSON = async (jsonData, name = 'metadata') => {
     pinataOptions  : { cidVersion: 1 },
   };
 
-  let res;
-  try {
-    res = await axios.post(`${PINATA_URL}/pinning/pinJSONToIPFS`, body, {
+  const res = await pinataBreaker.execute(async () => {
+    const response = await axios.post(`${PINATA_URL}/pinning/pinJSONToIPFS`, body, {
       headers : authHeaders(),
       timeout : REQUEST_TIMEOUT_MS,
     });
-  } catch (err) {
-    const status  = err.response?.status;
-    const detail  = err.response?.data?.error?.details || err.message;
-    throw new Error(`Pinata JSON upload failed (${status || 'network'}): ${detail}`);
-  }
+    return response;
+  });
 
   const hash = res.data?.IpfsHash;
   if (!hash || !isValidCID(hash)) {
@@ -108,19 +112,15 @@ const uploadFile = async (buffer, filename, mimetype = 'application/pdf') => {
   form.append('pinataMetadata', JSON.stringify({ name: safeFilename }));
   form.append('pinataOptions',  JSON.stringify({ cidVersion: 1 }));
 
-  let res;
-  try {
-    res = await axios.post(`${PINATA_URL}/pinning/pinFileToIPFS`, form, {
+  const res = await pinataBreaker.execute(async () => {
+    const response = await axios.post(`${PINATA_URL}/pinning/pinFileToIPFS`, form, {
       headers          : { ...authHeaders(), ...form.getHeaders() },
       timeout          : REQUEST_TIMEOUT_MS,
       maxContentLength : Infinity,
       maxBodyLength    : Infinity,
     });
-  } catch (err) {
-    const status = err.response?.status;
-    const detail = err.response?.data?.error?.details || err.message;
-    throw new Error(`Pinata file upload failed (${status || 'network'}): ${detail}`);
-  }
+    return response;
+  });
 
   const hash = res.data?.IpfsHash;
   if (!hash || !isValidCID(hash)) {

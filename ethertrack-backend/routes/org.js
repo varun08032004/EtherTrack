@@ -29,10 +29,29 @@ const { sendOrgInviteEmail, sendSubscriptionExpiringSoonEmail, sendSubscriptionE
 const { createNotification } = require('./notifications');
 const { generateGSTInvoice, serveInvoice } = require('../services/invoice');
 
-// ── Razorpay ──────────────────────────────────────────────────────
-const razorpay = new Razorpay({
-  key_id:     process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
+// ── Razorpay with circuit breaker ────────────────────────────────────
+const { getBreaker } = require('../lib/circuitBreaker');
+const razorpayBreaker = getBreaker('razorpay', {
+  failureThreshold: 5,
+  successThreshold: 2,
+  timeout: 30000
+});
+
+let _razorpay = null;
+const getRazorpay = () => {
+  if (_razorpay) return _razorpay;
+  if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET)
+    throw new Error('Razorpay keys not configured');
+  _razorpay = new Razorpay({
+    key_id:     process.env.RAZORPAY_KEY_ID,
+    key_secret: process.env.RAZORPAY_KEY_SECRET,
+  });
+  return _razorpay;
+};
+
+const withRazorpay = (fn) => razorpayBreaker.execute(async () => {
+  const rzp = getRazorpay();
+  return fn(rzp);
 });
 
 // ── Plan config — [v4-PLAN] updated pricing ───────────────────────
@@ -689,11 +708,11 @@ router.post('/plan/create-order', authenticate, orgActionLimiter, async (req, re
   }
 
   try {
-    const order = await razorpay.orders.create({
+    const order = await withRazorpay((rzp) => rzp.orders.create({
       amount:   amount * 100,
       currency: 'INR',
       notes:    { planKey, cycle, userId: req.user.id },
-    });
+    }));
     if (idempotencyKey) {
       await query(
         `INSERT INTO subscription_payments
@@ -781,7 +800,7 @@ router.post('/plan/select', authenticate, orgActionLimiter, async (req, res) => 
         return res.status(400).json({ error: 'Payment signature verification failed', code: 'SIG_MISMATCH' });
 
       let rzpOrder;
-      try { rzpOrder = await razorpay.orders.fetch(razorpay_order_id); }
+      try { rzpOrder = await withRazorpay((rzp) => rzp.orders.fetch(razorpay_order_id)); }
       catch { return res.status(400).json({ error: 'Could not verify Razorpay order', code: 'ORDER_FETCH_FAILED' }); }
 
       const orderAmountINR = rzpOrder.amount / 100;

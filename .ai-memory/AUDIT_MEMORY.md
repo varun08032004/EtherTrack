@@ -196,6 +196,13 @@ Untracked (to commit):
 - Blockchain down → INR-only mode
 - Feature flag system needed
 
+### ARC-003: Circuit Breakers for External APIs ✅ COMPLETE
+- Created `lib/circuitBreaker.js` with CircuitBreaker class (CLOSED/OPEN/HALF_OPEN states)
+- **Razorpay**: Applied to wallet.js, subscription.js, org.js, trades.js, operator-trading.js, feeOperations.js via `withRazorpay` wrapper
+- **Pinata**: Applied to services/ipfs.js for uploadJSON/uploadFile via `pinataBreaker`
+- **Alchemy/RPC**: Applied to services/blockchain.js for queryFilterChunked via `rpcBreaker`
+- Firebase: Not yet wrapped (auth calls are short-lived, lower priority)
+
 ### ARC-005: Idempotency Keys on All Mutations ✅ COMPLETE
 - **trades**: UNIQUE INDEX on (buyer_id, idempotency_key) WHERE status='completed' ✅
 - **wallet_transactions**: Added idempotency_key column + UNIQUE INDEX on (idempotency_key, user_id) WHERE not null ✅
@@ -294,5 +301,5 @@ Untracked (to commit):
 ---
 
 *Last Updated: 2026-08-10*
-*Context: FIN-001 to FIN-010 COMPLETE | SEC-001 to SEC-007 COMPLETE | ARC-001/005/007/008 COMPLETE | ARC-002/003/004/006/009/010 OPEN*
+*Context: FIN-001 to FIN-010 COMPLETE | SEC-001 to SEC-007 COMPLETE | ARC-001/003/005/007/008 COMPLETE | ARC-002/004/006/009/010 OPEN*
 *Memory Persistence: This file survives context resets*

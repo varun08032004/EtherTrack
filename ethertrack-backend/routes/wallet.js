@@ -69,8 +69,15 @@ const mask = str =>
     ? '****' + str.slice(-4)
     : '****';
 
-// ── Razorpay lazy init ────────────────────────────────────────────────────────
+// ── Razorpay lazy init with circuit breaker ────────────────────────────────────────────────────────
 let _razorpay = null;
+const { getBreaker } = require('../lib/circuitBreaker');
+const razorpayBreaker = getBreaker('razorpay', {
+  failureThreshold: 5,
+  successThreshold: 2,
+  timeout: 30000
+});
+
 const getRazorpay = () => {
   if (_razorpay) return _razorpay;
   if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET)
@@ -81,6 +88,12 @@ const getRazorpay = () => {
   });
   return _razorpay;
 };
+
+// Wrapper for Razorpay calls with circuit breaker
+const withRazorpay = (fn) => razorpayBreaker.execute(async () => {
+  const rzp = getRazorpay();
+  return fn(rzp);
+});
 
 // ── ETH/INR rate cache + circuit breaker ─────────────────────────────────────
 let _rateCache   = { inr: 280000, fetchedAt: 0 };
@@ -138,59 +151,58 @@ const DAILY_WITHDRAWAL_LIMIT = 200000;
 
 // ── Razorpay Payout helper ────────────────────────────────────────────────────
 async function initiateRazorpayPayout({ amount, tdsAmount, accountName, accountNumber, ifsc, reference, userId }) {
-  const rzp = getRazorpay();
-  const netAmount = amount - (tdsAmount || 0);
+  return withRazorpay(async (rzp) => {
+    const netAmount = amount - (tdsAmount || 0);
 
-  const contact = await rzp.contacts.create({
-    name:         sanitiseText(accountName, 60),
-    type:         'customer',
-    reference_id: `ET_${userId.slice(0, 8)}_${Date.now()}`,
+    const contact = await rzp.contacts.create({
+      name:         sanitiseText(accountName, 60),
+      type:         'customer',
+      reference_id: `ET_${userId.slice(0, 8)}_${Date.now()}`,
+    });
+
+    const fundAccount = await rzp.fundAccount.create({
+      contact_id:   contact.id,
+      account_type: 'bank_account',
+      bank_account: {
+        name:           sanitiseText(accountName, 60),
+        ifsc:           ifsc.toUpperCase(),
+        account_number: accountNumber,
+      },
+    });
+
+    const payout = await rzp.payouts.create({
+      account_number:       process.env.RAZORPAY_ACCOUNT_NUMBER,
+      fund_account_id:      fundAccount.id,
+      amount:               Math.round(netAmount * 100),
+      currency:             'INR',
+      mode:                 'IMPS',
+      purpose:              'payout',
+      queue_if_low_balance: true,
+      reference_id:         reference,
+      narration:            `EtherTrack withdrawal ${reference}`,
+    });
+
+    return { contact, fundAccount, payout };
   });
-
-  const fundAccount = await rzp.fundAccount.create({
-    contact_id:   contact.id,
-    account_type: 'bank_account',
-    bank_account: {
-      name:           sanitiseText(accountName, 60),
-      ifsc:           ifsc.toUpperCase(),
-      account_number: accountNumber,
-    },
-  });
-
-  const payout = await rzp.payouts.create({
-    account_number:       process.env.RAZORPAY_ACCOUNT_NUMBER,
-    fund_account_id:      fundAccount.id,
-    amount:               Math.round(netAmount * 100),
-    currency:             'INR',
-    mode:                 'IMPS',
-    purpose:              'payout',
-    queue_if_low_balance: true,
-    reference_id:         reference,
-    narration:            `EtherTrack withdrawal ${reference}`,
-  });
-
-  return { contact, fundAccount, payout };
 }
 
 // ── Razorpay Transfer helpers ─────────────────────────────────────────────────
 async function transferNodalToMerchant(amount, reference) {
-  const rzp = getRazorpay();
-  return rzp.transfers.create({
+  return withRazorpay((rzp) => rzp.transfers.create({
     account:  process.env.RAZORPAY_MERCHANT_ACCOUNT_ID,
     amount:   Math.round(amount * 100),
     currency: 'INR',
     notes:    { reference, purpose: 'trade_settlement' },
-  });
+  }));
 }
 
 async function transferMerchantToNodal(amount, reference) {
-  const rzp = getRazorpay();
-  return rzp.transfers.create({
+  return withRazorpay((rzp) => rzp.transfers.create({
     account:  process.env.RAZORPAY_NODAL_ACCOUNT_ID || process.env.RAZORPAY_ACCOUNT_NUMBER,
     amount:   Math.round(amount * 100),
     currency: 'INR',
     notes:    { reference, purpose: 'trade_refund' },
-  });
+  }));
 }
 
 // ════════════════════════════════════════════════════════════════════════════

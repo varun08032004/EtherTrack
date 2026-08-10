@@ -41,6 +41,12 @@
 
 const { ethers } = require('ethers');
 const { safeQuery: query, withTransaction } = require('../db/pool');
+const { getBreaker } = require('../lib/circuitBreaker');
+const rpcBreaker = getBreaker('alchemy-rpc', {
+  failureThreshold: 5,
+  successThreshold: 2,
+  timeout: 60000
+});
 
 const MARKETPLACE_ABI = [
   'event CreditTraded(uint256 indexed tradeId, uint256 indexed listingId, uint256 indexed buyOrderId, address buyer, address seller, uint256 tokenId, uint256 amount, uint256 pricePerUnit, uint256 pricePerUnitINR, uint256 totalPrice, uint256 buyerFee, uint256 sellerFee, uint256 totalFee, bool isAMM)',
@@ -103,7 +109,7 @@ const queryFilterChunked = async (contract, filter, fromBlock, toBlock, abortSig
 
     const end = Math.min(start + CHUNK_SIZE - 1, toBlock);
     try {
-      const events = await contract.queryFilter(filter, start, end);
+      const events = await rpcBreaker.execute(() => contract.queryFilter(filter, start, end));
       allEvents.push(...events);
     } catch (e) {
       console.error(`  ↳ queryFilter chunk [${start}→${end}] failed:`, e.message);

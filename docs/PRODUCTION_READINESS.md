@@ -47,7 +47,7 @@
 |----|------|--------|----------|-------|
 | **ARC-001** | Database connection pooling & limits | ✅ **COMPLETE** | P1 | Pool size: 10 (Supabase free tier); pg Pool with health monitoring, retry logic, connection limits |
 | **ARC-002** | Read replicas / query optimization | 🔍 **OPEN** | P2 | N+1 query audit; consider read replicas for read-heavy workloads |
-| **ARC-003** | Circuit breakers for external APIs | 🔍 **OPEN** | P1 | Razorpay, Pinata, Alchemy, Firebase - need circuit breaker pattern |
+| **ARC-003** | Circuit breakers for external APIs | ✅ **COMPLETE** | P1 | Razorpay, Pinata, Alchemy/RPC - circuit breaker pattern implemented |
 | **ARC-004** | Graceful degradation (feature flags) | 🔍 **OPEN** | P2 | Blockchain down → INR-only mode; feature flag system needed |
 | **ARC-005** | Idempotency keys on all mutations | ✅ **COMPLETE** | P0 | DB UNIQUE constraints on trades, wallet_transactions, subscription_payments, kyc_idempotency_keys; routes updated |
 | **ARC-006** | Structured logging & correlation IDs | 🔍 **OPEN** | P1 | Request ID propagation via middleware |

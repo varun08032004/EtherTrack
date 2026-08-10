@@ -312,10 +312,28 @@ router.post('/delist-credit-ledger', authenticate, assetActionLimiter, async (re
 
 const Razorpay = require('razorpay');
 const crypto   = require('crypto');
+const { getBreaker } = require('../lib/circuitBreaker');
+const razorpayBreaker = getBreaker('razorpay', {
+  failureThreshold: 5,
+  successThreshold: 2,
+  timeout: 30000
+});
 
-const razorpayLedger = new Razorpay({
-  key_id:     process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
+let _razorpayLedger = null;
+const getRazorpayLedger = () => {
+  if (_razorpayLedger) return _razorpayLedger;
+  if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET)
+    throw new Error('Razorpay keys not configured');
+  _razorpayLedger = new Razorpay({
+    key_id:     process.env.RAZORPAY_KEY_ID,
+    key_secret: process.env.RAZORPAY_KEY_SECRET,
+  });
+  return _razorpayLedger;
+};
+
+const withRazorpay = (fn) => razorpayBreaker.execute(async () => {
+  const rzp = getRazorpayLedger();
+  return fn(rzp);
 });
 
 const PLATFORM_FEE_BPS = 100;
@@ -372,7 +390,7 @@ router.post('/ledger-checkout-order', authenticate, requireKYC, assetActionLimit
       });
     }
 
-    const order = await razorpayLedger.orders.create({
+    const order = await withRazorpay((rzp) => rzp.orders.create({
       amount: Math.round(fees.buyerPaysINR * 100),
       currency: 'INR',
       transfers,
@@ -381,7 +399,7 @@ router.post('/ledger-checkout-order', authenticate, requireKYC, assetActionLimit
         ledger_listing_id: ledgerListingId, quantity: String(quantity),
         token_id: String(listing.token_id),
       },
-    });
+    }));
 
     await query(
       `INSERT INTO razorpay_checkout_orders

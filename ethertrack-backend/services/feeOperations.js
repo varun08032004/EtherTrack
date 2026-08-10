@@ -33,10 +33,28 @@
 
 const Razorpay    = require('razorpay');
 const { safeQuery: query, withTransaction } = require('../db/pool');
+const { getBreaker } = require('../lib/circuitBreaker');
+const razorpayBreaker = getBreaker('razorpay', {
+  failureThreshold: 5,
+  successThreshold: 2,
+  timeout: 30000
+});
 
-const razorpay = new Razorpay({
-  key_id:     process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
+let _razorpay = null;
+const getRazorpay = () => {
+  if (_razorpay) return _razorpay;
+  if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET)
+    throw new Error('Razorpay keys not configured');
+  _razorpay = new Razorpay({
+    key_id:     process.env.RAZORPAY_KEY_ID,
+    key_secret: process.env.RAZORPAY_KEY_SECRET,
+  });
+  return _razorpay;
+};
+
+const withRazorpay = (fn) => razorpayBreaker.execute(async () => {
+  const rzp = getRazorpay();
+  return fn(rzp);
 });
 
 const COMPANY_USER_ID = process.env.COMPANY_USER_ID;
@@ -71,7 +89,7 @@ async function createSellerFundAccount(userId) {
   }
 
   // Create Razorpay Contact
-  const contact = await razorpay.contacts.create({
+  const contact = await withRazorpay((rzp) => rzp.contacts.create({
     name:         user.account_name || user.full_name,
     email:        user.email,
     contact:      user.phone || undefined,
@@ -81,10 +99,10 @@ async function createSellerFundAccount(userId) {
       platform: 'ethertrack',
       user_id:  String(userId),
     },
-  });
+  }));
 
   // Create Fund Account (bank linked to contact)
-  const fundAccount = await razorpay.fundAccount.create({
+  const fundAccount = await withRazorpay((rzp) => rzp.fundAccount.create({
     contact_id:   contact.id,
     account_type: 'bank_account',
     bank_account: {
@@ -92,7 +110,7 @@ async function createSellerFundAccount(userId) {
       ifsc:           user.ifsc,
       account_number: user.account_number,
     },
-  });
+  }));
 
   // Persist on user row
   await query(
