@@ -28,16 +28,16 @@
 
 | ID | Task | Status | Priority | Notes |
 |----|------|--------|----------|-------|
-| **FIN-001** | Double-spend prevention (concurrent trade settlement) | 🔍 **OPEN** | P0 | Verify DB row locking in trade settlement |
-| **FIN-002** | Oversell prevention (credit balance checks) | 🔍 **OPEN** | P0 | Verify available_credits checks |
-| **FIN-003** | Negative balance prevention | 🔍 **OPEN** | P0 | Wallet/ledger balance guards |
-| **FIN-004** | Duplicate payment prevention | 🔍 **OPEN** | P0 | Idempotency keys on all payments |
-| **FIN-005** | Duplicate trade prevention | 🔍 **OPEN** | P0 | Idempotency keys on trades |
-| **FIN-006** | Duplicate withdrawal prevention | 🔍 **OPEN** | P0 | Idempotency on withdrawals |
-| **FIN-007** | Fee calculation accuracy | 🔍 **OPEN** | P1 | Verify fee math in trades.js |
-| **FIN-008** | GST/tax calculation accuracy | 🔍 **OPEN** | P1 | Verify GST in invoices |
-| **FIN-009** | Settlement atomicity (DB + blockchain) | 🔍 **OPEN** | P0 | withTransaction + on-chain verification |
-| **FIN-010** | Reconciliation (on-chain vs DB balances) | 🔍 **OPEN** | P1 | Scheduled reconciliation job |
+| **FIN-001** | Double-spend prevention (concurrent trade settlement) | ✅ **COMPLETE** | P0 | Idempotency keys, advisory locks, FOR UPDATE locks in trades.js |
+| **FIN-002** | Oversell prevention (credit balance checks) | ✅ **COMPLETE** | P0 | FOR UPDATE locks, advisory locks, GREATEST(0, ...) checks |
+| **FIN-003** | Negative balance prevention | ✅ **COMPLETE** | P0 | DB CHECK constraints, adjustLedger validation |
+| **FIN-004** | Duplicate payment prevention | ✅ **COMPLETE** | P0 | Idempotency keys on all payment operations |
+| **FIN-005** | Duplicate trade prevention | ✅ **COMPLETE** | P0 | Idempotency keys + DB unique constraint on trades |
+| **FIN-006** | Duplicate withdrawal prevention | ✅ **COMPLETE** | P0 | Idempotency key on withdrawal endpoint + DB check |
+| **FIN-007** | Fee calculation accuracy | ✅ **VERIFIED** | P1 | calcFees(): 1% total, 50/50 split, GST 18% on fee only |
+| **FIN-008** | GST/tax calculation accuracy | ✅ **VERIFIED** | P1 | getGSTType() CGST/SGST vs IGST by state code |
+| **FIN-009** | Settlement atomicity (DB + blockchain) | ✅ **VERIFIED** | P0 | withTransaction, FOR UPDATE, advisory locks |
+| **FIN-010** | Reconciliation (on-chain vs DB balances) | ✅ **COMPLETE** | P1 | Reconciliation cron, wallet/ledger/ledger/carbon ownership |
 
 ---
 

@@ -143,7 +143,7 @@
   - FIN-005: Duplicate trade prevention - idempotency keys + DB unique constraint
   - FIN-006: Duplicate withdrawal prevention - idempotency key on withdrawal endpoint
   
-  ### FIN-007: Fee Calculation Accuracy ✅ VERIFIED
+### FIN-007: Fee Calculation Accuracy ✅ VERIFIED
   - calcFees() in trades.js: 1% total fee (100 BPS) split 50/50 buyer/seller
   - GST 18% on platform fee only (not on carbon credit price)
   - Fee split 50/50 between buyer/seller, GST split 50/50
@@ -165,6 +165,8 @@
   - Need: wallet balances ↔ wallet ledger, carbon ownership ↔ CarbonLedger
   - Need: marketplace trades ↔ trade records, Razorpay payments ↔ internal payments
   - Need: blockchain events ↔ internal trade state, registry transactions ↔ carbon ownership
+  - Added reconciliation_log table and functions: reconcile_wallet_balances(), reconcile_credit_ledger_balances(), reconcile_carbon_ownership()
+  - Added reconciliation cron (hourly) in server.js
   
   ### SEC-001A: Secret Rotation
 - ROTATION_MATRIX.md created (22 secrets classified)
@@ -197,12 +199,15 @@
 
 ## 📋 NEXT TASKS (Priority Order)
 
-1. **MANUAL:** Rotate 8 critical secrets in provider dashboards
-2. **TESTNET:** Blockchain migrations on Sepolia testnet
-3. **MAINNET:** Blockchain migrations on Polygon mainnet
-3. **CONFIG:** Fill .env.production.template files
-4. **VERIFY:** Full regression test suite
-4. **DEPLOY:** Production deploy with new secrets
+1. **FIN-010**: Complete remaining reconciliation jobs (wallet balances, carbon ownership, Razorpay reconciliation)
+2. **SEC-001A**: Manual Secret Rotation (last)
+3. **SEC-008**: Verify Firebase Auth/Supabase RLS configuration
+4. **SEC-009**: Verify webhook signature verification (Razorpay, Pinata, Resend)
+5. **SEC-009**: Verify webhook signature verification (Razorpay, Pinata, Resend)
+6. **Blockchain Key Migration**: Test Sepolia → Mainnet for 3 operator keys
+5. **CONFIG**: Fill .env.production.template files
+6. **VERIFY**: Full regression test suite
+7. **DEPLOY**: Production deploy with new secrets
 
 ---
 
