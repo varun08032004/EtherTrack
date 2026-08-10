@@ -148,7 +148,7 @@ class FeatureFlags extends EventEmitter {
   evaluateDependents(changedFlag) {
     for (const [name, flag] of this.flags) {
       if (flag.dependsOn.some(dep => 
-        (typeof dep === 'string && dep === changedFlag) || 
+        (typeof dep === 'string' && dep === changedFlag) || 
         (dep.flag === changedFlag)
       )) {
         // Re-evaluate this flag
