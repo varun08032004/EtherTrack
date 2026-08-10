@@ -49,7 +49,7 @@
 | **ARC-002** | Read replicas / query optimization | 🔍 **OPEN** | P2 | N+1 query audit; consider read replicas for read-heavy workloads |
 | **ARC-003** | Circuit breakers for external APIs | 🔍 **OPEN** | P1 | Razorpay, Pinata, Alchemy, Firebase - need circuit breaker pattern |
 | **ARC-004** | Graceful degradation (feature flags) | 🔍 **OPEN** | P2 | Blockchain down → INR-only mode; feature flag system needed |
-| **ARC-005** | Idempotency keys on all mutations | ⚠️ **PARTIAL** | P0 | **trades table has DB UNIQUE constraint**; wallet, org, subscription, kyc have app-level checks only — need DB constraints |
+| **ARC-005** | Idempotency keys on all mutations | ✅ **COMPLETE** | P0 | DB UNIQUE constraints on trades, wallet_transactions, subscription_payments, kyc_idempotency_keys; routes updated |
 | **ARC-006** | Structured logging & correlation IDs | 🔍 **OPEN** | P1 | Request ID propagation via middleware |
 | **ARC-007** | Health checks (DB, Redis, RPC, external APIs) | ✅ **COMPLETE** | P1 | `/health` endpoint with DB, pool, uptime checks |
 | **ARC-008** | Graceful shutdown / connection draining | ✅ **COMPLETE** | P1 | SIGTERM/SIGINT handling with 10s timeout, pool.end() |

@@ -351,6 +351,7 @@ CREATE TABLE wallet_transactions (
   notes               TEXT,
   trade_id            UUID REFERENCES trades(id),
   trade_type          VARCHAR(20),
+  idempotency_key     VARCHAR(100),
   created_at          TIMESTAMP DEFAULT NOW(),
   updated_at          TIMESTAMP DEFAULT NOW(),
 
@@ -364,6 +365,70 @@ CREATE INDEX idx_wallet_tx_razorpay_order ON wallet_transactions(razorpay_order_
 CREATE INDEX idx_wallet_tx_razorpay_payment ON wallet_transactions(razorpay_payment_id);
 CREATE INDEX idx_wallet_tx_razorpay_payout ON wallet_transactions(razorpay_payout_id);
 CREATE INDEX idx_wallet_tx_trade ON wallet_transactions(trade_id);
+CREATE INDEX idx_wallet_tx_idempotency ON wallet_transactions(idempotency_key) WHERE idempotency_key IS NOT NULL;
+
+-- ══════════════════════════════════════════════════════════════════
+-- FINANCIAL — SUBSCRIPTION PAYMENTS (idempotency-protected)
+-- ══════════════════════════════════════════════════════════════════
+
+CREATE TABLE subscription_payments (
+  id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  plan                VARCHAR(20) NOT NULL,
+  cycle               VARCHAR(10) NOT NULL,
+  amount_paise        BIGINT NOT NULL,
+  gst_amount_paise    BIGINT NOT NULL DEFAULT 0,
+  total_amount_paise  BIGINT NOT NULL,
+  pay_method          VARCHAR(20) NOT NULL,
+  status              VARCHAR(20) DEFAULT 'pending',
+  idempotency_key     VARCHAR(100),
+  razorpay_order_id   VARCHAR(100),
+  wallet_address      VARCHAR(42),
+  signature           TEXT,
+  metamask_address    VARCHAR(42),
+  metamask_message    TEXT,
+  gstin               VARCHAR(20),
+  pan                 VARCHAR(20),
+  renewal_date        DATE,
+  amount              NUMERIC(20, 2),
+  gst_type            VARCHAR(20) DEFAULT 'cgst_sgst',
+  buyer_state_code    VARCHAR(2),
+  cgst_paise          BIGINT DEFAULT 0,
+  sgst_paise          BIGINT DEFAULT 0,
+  igst_paise          BIGINT DEFAULT 0,
+  coupon_code         VARCHAR(50),
+  discount_paise      BIGINT DEFAULT 0,
+  invoice_number      VARCHAR(50),
+  invoice_url         TEXT,
+  invoice_pdf         BYTEA,
+  webhook_event_id    VARCHAR(100),
+  created_at          TIMESTAMP DEFAULT NOW(),
+  updated_at          TIMESTAMP DEFAULT NOW(),
+
+  CONSTRAINT chk_sub_payment_amount_positive CHECK (total_amount_paise > 0)
+);
+
+CREATE INDEX idx_sub_payments_user ON subscription_payments(user_id);
+CREATE INDEX idx_sub_payments_status ON subscription_payments(status);
+CREATE INDEX idx_sub_payments_razorpay_order ON subscription_payments(razorpay_order_id);
+CREATE INDEX idx_sub_payments_webhook_event ON subscription_payments(webhook_event_id);
+CREATE INDEX idx_sub_payments_idempotency ON subscription_payments(idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE UNIQUE INDEX unq_sub_payments_idempotency ON subscription_payments(idempotency_key, user_id) WHERE idempotency_key IS NOT NULL;
+
+-- ══════════════════════════════════════════════════════════════════
+-- KYC — IDEMPOTENCY KEYS (replay protection)
+-- ══════════════════════════════════════════════════════════════════
+
+CREATE TABLE kyc_idempotency_keys (
+  key         VARCHAR(128) NOT NULL,
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  response    JSONB NOT NULL,
+  expires_at  TIMESTAMP NOT NULL DEFAULT NOW() + INTERVAL '24 hours',
+  created_at  TIMESTAMP DEFAULT NOW(),
+  PRIMARY KEY (key, user_id)
+);
+
+CREATE INDEX idx_kyc_idempotency_expires ON kyc_idempotency_keys(expires_at);
 
 -- ══════════════════════════════════════════════════════════════════
 -- FINANCIAL — PLATFORM FEES

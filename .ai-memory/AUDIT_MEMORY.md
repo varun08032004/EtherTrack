@@ -196,11 +196,12 @@ Untracked (to commit):
 - Blockchain down → INR-only mode
 - Feature flag system needed
 
-### ARC-005: Idempotency Keys on All Mutations ⚠️ PARTIAL
-- **trades table**: DB UNIQUE constraint on idempotency_key (status='completed')
-- **wallet, org, subscription, kyc**: App-level checks only — NO DB constraints
-- Need to add idempotency_key columns + UNIQUE constraints to wallet_transactions, subscription_payments, kyc_idempotency_keys
-- Advisory locks (pg_advisory_xact_lock) not yet implemented
+### ARC-005: Idempotency Keys on All Mutations ✅ COMPLETE
+- **trades**: UNIQUE INDEX on (buyer_id, idempotency_key) WHERE status='completed' ✅
+- **wallet_transactions**: Added idempotency_key column + UNIQUE INDEX on (idempotency_key, user_id) WHERE not null ✅
+- **subscription_payments**: Fixed UNIQUE constraint to be on (idempotency_key, user_id) WHERE not null ✅
+- **kyc_idempotency_keys**: Fixed PRIMARY KEY to be (key, user_id) ✅
+- Routes updated to use idempotency_key column in wallet.js (withdraw, trade-deduct, trade-refund)
 
 ### ARC-006: Structured Logging & Correlation IDs 🔍 OPEN
 - Request ID propagation via middleware
@@ -293,5 +294,5 @@ Untracked (to commit):
 ---
 
 *Last Updated: 2026-08-10*
-*Context: FIN-001 to FIN-010 COMPLETE | SEC-001 to SEC-007 COMPLETE | ARC-001/007/008 COMPLETE | ARC-005 PARTIAL | ARC-002/003/004/006/009/010 OPEN*
+*Context: FIN-001 to FIN-010 COMPLETE | SEC-001 to SEC-007 COMPLETE | ARC-001/005/007/008 COMPLETE | ARC-002/003/004/006/009/010 OPEN*
 *Memory Persistence: This file survives context resets*

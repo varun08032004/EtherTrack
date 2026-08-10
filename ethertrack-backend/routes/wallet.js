@@ -663,7 +663,7 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
   // Check for duplicate withdrawal request
   const { rows: existing } = await query(
     `SELECT id, balance_after FROM wallet_transactions
-     WHERE user_id = $1 AND reference = $2 AND status = 'success'`,
+     WHERE user_id = $1 AND idempotency_key = $2 AND status = 'success'`,
     [req.user.id, idempotencyKey]
   );
   if (existing.length)
@@ -711,8 +711,8 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
     const { rows: txRows } = await client.query(
       `INSERT INTO wallet_transactions
          (user_id, type, method, amount, status, balance_before, balance_after,
-          bank_account_number, bank_ifsc, bank_account_name, reference, notes)
-       VALUES ($1, 'debit', 'bank', $2, 'pending', $3, $4, $5, $6, $7, $8, $9)
+          bank_account_number, bank_ifsc, bank_account_name, reference, idempotency_key, notes)
+       VALUES ($1, 'debit', 'bank', $2, 'pending', $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING id, reference`,
       [
         req.user.id, amount, balanceBefore, balanceAfter,
@@ -768,9 +768,10 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
           );
           await reverseClient.query(
             `INSERT INTO wallet_transactions
-               (user_id, type, method, amount, status, balance_before, balance_after, notes)
-             VALUES ($1, 'credit', 'system', $2, 'success', $3, $4, $5)`,
+               (user_id, type, method, amount, status, balance_before, balance_after, idempotency_key, notes)
+             VALUES ($1, 'credit', 'system', $2, 'success', $3, $4, $5, $6)`,
             [req.user.id, amount, reverseBefore, reverseAfter,
+             idempotencyKey,
              `Auto-reversal — payout initiation failed: ${idempotencyKey}`]
           );
           await reverseClient.query('COMMIT');
@@ -831,7 +832,7 @@ router.post('/trade-deduct', authenticate, walletActionLimiter, async (req, res)
   // Check for existing transaction with this idempotency key
   const { rows: existing } = await query(
     `SELECT id, balance_after FROM wallet_transactions
-     WHERE user_id = $1 AND reference = $2 AND status = 'success'`,
+     WHERE user_id = $1 AND idempotency_key = $2 AND status = 'success'`,
     [req.user.id, idempotencyKey]
   );
   if (existing.length)
@@ -851,11 +852,11 @@ router.post('/trade-deduct', authenticate, walletActionLimiter, async (req, res)
     const balanceAfter  = await adjustLedger(req.user.id, amount, 'debit', client);
     const { rows: txRows } = await client.query(
       `INSERT INTO wallet_transactions
-         (user_id, type, method, amount, status, balance_before, balance_after, reference, notes)
-       VALUES ($1, 'debit', 'system', $2, 'success', $3, $4, $5, $6)
+         (user_id, type, method, amount, status, balance_before, balance_after, reference, idempotency_key, notes)
+       VALUES ($1, 'debit', 'system', $2, 'success', $3, $4, $5, $6, $7)
        RETURNING reference`,
       [req.user.id, amount, balanceBefore, balanceAfter,
-       idempotencyKey,
+       idempotencyKey, idempotencyKey,
        `Trade: ${quantity} × ${sanitiseText(projectName || 'carbon credits', 60)} (Token #${tokenId})`]
     );
     await client.query('COMMIT');
@@ -889,15 +890,15 @@ router.post('/trade-deduct', authenticate, walletActionLimiter, async (req, res)
 
 // ── Trade refund ──────────────────────────────────────────────────────────────
 router.post('/trade-refund', authenticate, walletActionLimiter, async (req, res) => {
-  const { amount, reference } = req.body;
+  const { amount, idempotencyKey } = req.body;
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
-  if (!reference)             return res.status(400).json({ error: 'Idempotency reference required' });
+  if (!idempotencyKey)             return res.status(400).json({ error: 'Idempotency key required' });
 
-  // Check for existing refund with this reference
+  // Check for existing refund with this idempotency key
   const { rows: existing } = await query(
     `SELECT id, balance_after FROM wallet_transactions
-     WHERE user_id = $1 AND reference = $2 AND status = 'success'`,
-    [req.user.id, reference]
+     WHERE user_id = $1 AND idempotency_key = $2 AND status = 'success'`,
+    [req.user.id, idempotencyKey]
   );
   if (existing.length)
     return res.json({ success: true, balance: existing[0].balance_after, idempotent: true });
@@ -912,11 +913,11 @@ router.post('/trade-refund', authenticate, walletActionLimiter, async (req, res)
     const balanceAfter  = await adjustLedger(req.user.id, amount, 'credit', client);
     await client.query(
       `INSERT INTO wallet_transactions
-         (user_id, type, method, amount, status, balance_before, balance_after, reference, notes)
-       VALUES ($1, 'credit', 'system', $2, 'success', $3, $4, $5, $6)`,
+         (user_id, type, method, amount, status, balance_before, balance_after, reference, idempotency_key, notes)
+       VALUES ($1, 'credit', 'system', $2, 'success', $3, $4, $5, $6, $7)`,
       [req.user.id, amount, balanceBefore, balanceAfter,
-       reference,
-       `Refund — MetaMask rejected: ${sanitiseText(reference, 40)}`]
+       idempotencyKey, idempotencyKey,
+       `Refund — MetaMask rejected: ${sanitiseText(idempotencyKey, 40)}`]
     );
     await client.query('COMMIT');
 
