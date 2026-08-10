@@ -19,7 +19,6 @@ const { ethers } = require('ethers');
 const Razorpay   = require('razorpay');
 const crypto     = require('crypto');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
-const pino       = require('pino');
 
 const { safeQuery: query, pool }       = require('../db/pool');
 const { authenticate, invalidateUserCache } = require('../middleware/auth');
@@ -27,6 +26,18 @@ const { walletActionLimiter } = require('../middleware/rateLimit');
 const { createNotification }           = require('./notifications');
 const { sendWalletConnectedEmail, sendDepositConfirmedEmail, sendWithdrawalProcessedEmail, sendWithdrawalFailedEmail, sendBankAccountAddedEmail, sendBankAccountRemovedEmail } = require('../services/email');
 const { verifyKYCOnChain } = require('../services/minter');
+const logger = require('../services/logger');
+
+// ── Request logger middleware with correlation ID ───────────────────────────────
+router.use((req, _res, next) => {
+  req.log = logger.child({
+    requestId: req.requestId,
+    userId: req.user?.id,
+    path: req.path,
+    method: req.method,
+  });
+  next();
+});
 
 // ── Audit log helper (mirrors routes/admin.js's auditLog) ────────────────────
 const auditLog = async (adminId, action, targetUserId, details) => {
@@ -36,7 +47,7 @@ const auditLog = async (adminId, action, targetUserId, details) => {
        VALUES ($1,$2,$3,$4)`,
       [adminId, action, targetUserId || null, details || null]
     );
-  } catch (e) { console.warn('[auditLog] failed:', e.message); }
+  } catch (e) { req.req.log.warn({ err: e.message }, '[auditLog] failed'); }
 };
 
 // ── Compliance stubs ──────────────────────────────────────────────────────────
@@ -49,20 +60,6 @@ const runComplianceChecks = async (userId, amount, type) => ({
 });
 const updateAMLCounter = async () => {};
 const recordTDS        = async () => {};
-
-// ── Structured logger ─────────────────────────────────────────────────────────
-const log = pino({
-  level: process.env.LOG_LEVEL || 'info',
-  redact: {
-    paths: [
-      '*.accountNumber', '*.account_number',
-      '*.walletAddress', '*.wallet_address',
-      '*.signature',     '*.razorpay_signature',
-      '*.fund_account',
-    ],
-    censor: '[REDACTED]',
-  },
-});
 
 const mask = str =>
   typeof str === 'string' && str.length > 4
@@ -249,9 +246,9 @@ router.get('/eth-inr-rate', async (req, res) => {
     _cgFailCount++;
     if (_cgFailCount >= CG_FAIL_MAX) {
       _cgOpenUntil = Date.now() + CG_COOLDOWN;
-      log.warn({ failCount: _cgFailCount }, 'CoinGecko circuit breaker opened');
+      req.log.warn({ failCount: _cgFailCount }, 'CoinGecko circuit breaker opened');
     }
-    log.warn({ err: err?.message }, 'CoinGecko fetch failed — serving stale cache');
+    req.log.warn({ err: err?.message }, 'CoinGecko fetch failed — serving stale cache');
   }
   res.json({ inr: _rateCache.inr, cached: _rateCache.fetchedAt > 0 });
 });
@@ -274,7 +271,7 @@ router.get('/limits', authenticate, walletReadLimiter, async (req, res) => {
     const remaining = Math.max(0, DAILY_WITHDRAWAL_LIMIT - used);
     res.json({ dailyLimit: DAILY_WITHDRAWAL_LIMIT, used, remaining });
   } catch (err) {
-    log.error({ err: err?.message, userId: req.user.id }, 'Limits fetch error');
+    req.log.error({ err: err?.message, userId: req.user.id }, 'Limits fetch error');
     res.status(500).json({ error: 'Failed to fetch withdrawal limits' });
   }
 });
@@ -303,7 +300,7 @@ router.get('/balance', authenticate, walletReadLimiter, async (req, res) => {
       transactions:  txRows,
     });
   } catch (err) {
-    log.error({ err: err?.message, userId: req.user.id }, 'Balance fetch error');
+    req.log.error({ err: err?.message, userId: req.user.id }, 'Balance fetch error');
     res.status(500).json({ error: 'Failed to fetch balance' });
   }
 });
@@ -331,7 +328,7 @@ router.get('/transactions', authenticate, walletReadLimiter, async (req, res) =>
 
     res.json({ transactions: txRows, nextCursor, hasMore });
   } catch (err) {
-    log.error({ err: err?.message, userId: req.user.id }, 'Transactions fetch error');
+    req.log.error({ err: err?.message, userId: req.user.id }, 'Transactions fetch error');
     res.status(500).json({ error: 'Failed to fetch transactions' });
   }
 });
@@ -373,7 +370,7 @@ router.post('/deposit/create-order', authenticate, walletWriteLimiter, async (re
       email:    req.user.email,
     });
   } catch (err) {
-    log.error({ err: err?.message, userId: req.user.id }, 'Create order error');
+    req.log.error({ err: err?.message, userId: req.user.id }, 'Create order error');
     res.status(500).json({ error: 'Failed to create payment order' });
   }
 });
@@ -425,7 +422,7 @@ router.post('/deposit/verify', authenticate, walletActionLimiter, async (req, re
       .digest('hex');
     if (expectedSig !== razorpay_signature) {
       await client.query('ROLLBACK');
-      log.warn({ userId: req.user.id, orderId: razorpay_order_id }, 'Signature mismatch on deposit verify');
+      req.log.warn({ userId: req.user.id, orderId: razorpay_order_id }, 'Signature mismatch on deposit verify');
       return res.status(400).json({ error: 'Payment signature verification failed', code: 'SIG_MISMATCH' });
     }
 
@@ -455,7 +452,7 @@ router.post('/deposit/verify', authenticate, walletActionLimiter, async (req, re
       );
     } catch {}
 
-    log.info({ userId: req.user.id, amount: tx.amount }, 'Deposit ledger credited — nodal model');
+    req.log.info({ userId: req.user.id, amount: tx.amount }, 'Deposit ledger credited — nodal model');
 
     sendDepositConfirmedEmail(req.user.email, {
       name: req.user.full_name, amount: parseFloat(tx.amount).toLocaleString('en-IN'),
@@ -474,7 +471,7 @@ router.post('/deposit/verify', authenticate, walletActionLimiter, async (req, re
     });
   } catch (err) {
     await client.query('ROLLBACK');
-    log.error({ err: err?.message, userId: req.user.id }, 'Deposit verify error');
+    req.log.error({ err: err?.message, userId: req.user.id }, 'Deposit verify error');
     res.status(500).json({ error: 'Payment verification failed' });
   } finally {
     client.release();
@@ -491,7 +488,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     .digest('hex');
 
   if (expectedSig !== sig) {
-    log.warn('Webhook signature mismatch — rejecting');
+    req.log.warn('Webhook signature mismatch — rejecting');
     return res.status(400).json({ error: 'Invalid webhook signature' });
   }
 
@@ -527,7 +524,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
           [payment.id, balanceBefore, balanceAfter, invoiceNo, tx.id]
         );
         await client.query('COMMIT');
-        log.info({ userId: tx.user_id, amount: tx.amount }, 'Deposit via webhook — ledger credited');
+        req.log.info({ userId: tx.user_id, amount: tx.amount }, 'Deposit via webhook — ledger credited');
         try { await updateAMLCounter(tx.user_id, parseFloat(tx.amount), 'credit'); } catch {}
         try {
           await createNotification(
@@ -573,7 +570,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
          WHERE razorpay_payout_id = $1`,
         [payout.id]
       );
-      log.info({ payoutId: payout.id }, 'Payout processed via webhook');
+      req.log.info({ payoutId: payout.id }, 'Payout processed via webhook');
 
       try {
         const { rows: [tx] } = await query(
@@ -638,7 +635,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
               });
             }
           } catch (e) { console.warn('[wallet/webhook] withdrawal-failed email failed:', e.message); }
-          log.warn({ userId: tx.user_id, amount: tx.amount, payoutId: payout.id }, 'Payout failed — ledger reversed');
+          req.log.warn({ userId: tx.user_id, amount: tx.amount, payoutId: payout.id }, 'Payout failed — ledger reversed');
         } else {
           await client.query('ROLLBACK');
         }
@@ -652,7 +649,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 
     res.json({ status: 'ok' });
   } catch (err) {
-    log.error({ err: err?.message }, 'Webhook processing error');
+    req.log.error({ err: err?.message }, 'Webhook processing error');
     res.status(500).json({ error: 'Webhook processing failed' });
   }
 });
@@ -754,9 +751,9 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
         `UPDATE wallet_transactions SET razorpay_payout_id = $1, status = 'processing', updated_at = NOW() WHERE id = $2`,
         [payoutId, txId]
       );
-      log.info({ userId: req.user.id, amount, txRef, payoutId }, 'Razorpay payout initiated');
+      req.log.info({ userId: req.user.id, amount, txRef, payoutId }, 'Razorpay payout initiated');
     } catch (payoutErr) {
-      log.error({ err: payoutErr?.message, userId: req.user.id, idempotencyKey }, 'Payout initiation failed — marking withdrawal as failed');
+      req.log.error({ err: payoutErr?.message, userId: req.user.id, idempotencyKey }, 'Payout initiation failed — marking withdrawal as failed');
       // Mark as failed and reverse ledger in a new transaction with status check
       const reverseClient = await pool.connect();
       try {
@@ -767,7 +764,7 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
         );
         if (!txRows.length || txRows[0].status !== 'pending') {
           await reverseClient.query('ROLLBACK');
-          log.warn({ txId }, 'Withdrawal status changed during reversal attempt');
+          req.log.warn({ txId }, 'Withdrawal status changed during reversal attempt');
         } else {
           const { rows: currentUser } = await reverseClient.query(
             'SELECT inr_balance FROM users WHERE id = $1 FOR UPDATE', [req.user.id]
@@ -787,11 +784,11 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
              `Auto-reversal — payout initiation failed: ${idempotencyKey}`]
           );
           await reverseClient.query('COMMIT');
-          log.info({ userId: req.user.id, amount, idempotencyKey }, 'Withdrawal reversed due to payout failure');
+          req.log.info({ userId: req.user.id, amount, idempotencyKey }, 'Withdrawal reversed due to payout failure');
         }
       } catch (reverseErr) {
         await reverseClient.query('ROLLBACK');
-        log.error({ err: reverseErr?.message, userId: req.user.id }, 'CRITICAL: Ledger reversal failed — manual intervention required');
+        req.log.error({ err: reverseErr?.message, userId: req.user.id }, 'CRITICAL: Ledger reversal failed — manual intervention required');
       } finally {
         reverseClient.release();
       }
@@ -826,7 +823,7 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
     });
   } catch (err) {
     await client.query('ROLLBACK');
-    log.error({ err: err?.message, userId: req.user.id }, 'Withdrawal error');
+    req.log.error({ err: err?.message, userId: req.user.id }, 'Withdrawal error');
     res.status(500).json({ error: 'Withdrawal failed. Please try again.' });
   } finally {
     client.release();
@@ -876,9 +873,9 @@ router.post('/trade-deduct', authenticate, walletActionLimiter, async (req, res)
     const txRef = txRows[0].reference;
     try {
       await transferNodalToMerchant(amount, txRef);
-      log.info({ userId: req.user.id, amount, tokenId }, 'Trade settled — nodal → merchant transfer done');
+      req.log.info({ userId: req.user.id, amount, tokenId }, 'Trade settled — nodal → merchant transfer done');
     } catch (transferErr) {
-      log.error({ err: transferErr?.message, userId: req.user.id, txRef },
+      req.log.error({ err: transferErr?.message, userId: req.user.id, txRef },
         'Nodal→merchant transfer failed — schedule reconciliation');
     }
 
@@ -889,11 +886,11 @@ router.post('/trade-deduct', authenticate, walletActionLimiter, async (req, res)
         '/portfolio', { amount, quantity, projectName, tokenId }
       );
     } catch {}
-    log.info({ userId: req.user.id, amount, tokenId }, 'Trade deducted');
+    req.log.info({ userId: req.user.id, amount, tokenId }, 'Trade deducted');
     res.json({ success: true, balance: balanceAfter });
   } catch (err) {
     await client.query('ROLLBACK');
-    log.error({ err: err?.message, userId: req.user.id }, 'Trade deduct error');
+    req.log.error({ err: err?.message, userId: req.user.id }, 'Trade deduct error');
     res.status(500).json({ error: 'Payment failed' });
   } finally {
     client.release();
@@ -935,9 +932,9 @@ router.post('/trade-refund', authenticate, walletActionLimiter, async (req, res)
 
     try {
       await transferMerchantToNodal(amount, reference);
-      log.info({ userId: req.user.id, amount, reference }, 'Refund settled — merchant → nodal transfer done');
+      req.log.info({ userId: req.user.id, amount, reference }, 'Refund settled — merchant → nodal transfer done');
     } catch (transferErr) {
-      log.error({ err: transferErr?.message, userId: req.user.id, reference },
+      req.log.error({ err: transferErr?.message, userId: req.user.id, reference },
         'Merchant→nodal transfer failed on refund — schedule reconciliation');
     }
 
@@ -948,11 +945,11 @@ router.post('/trade-refund', authenticate, walletActionLimiter, async (req, res)
         '/wallet', { amount }
       );
     } catch {}
-    log.info({ userId: req.user.id, amount, reference }, 'Trade refunded');
+    req.log.info({ userId: req.user.id, amount, reference }, 'Trade refunded');
     res.json({ success: true, balance: balanceAfter, refunded: amount });
   } catch (err) {
     await client.query('ROLLBACK');
-    log.error({ err: err?.message, userId: req.user.id }, 'Trade refund error');
+    req.log.error({ err: err?.message, userId: req.user.id }, 'Trade refund error');
     res.status(500).json({ error: 'Refund failed' });
   } finally {
     client.release();
@@ -995,7 +992,7 @@ router.post('/bind', authenticate, walletWriteLimiter, async (req, res) => {
       [msgHash]
     );
   } catch {
-    log.warn('used_challenge_hashes table missing — replay protection degraded');
+    req.log.warn('used_challenge_hashes table missing — replay protection degraded');
   }
 
   try {
@@ -1032,7 +1029,7 @@ router.post('/bind', authenticate, walletWriteLimiter, async (req, res) => {
     // [FIX-3] Invalidate Redis cache so next request picks up the new wallet_address
     await invalidateUserCache(req.user.id);
 
-    log.info({ userId: req.user.id, wallet: mask(walletAddress) }, 'Wallet bound');
+    req.log.info({ userId: req.user.id, wallet: mask(walletAddress) }, 'Wallet bound');
 
     // [FIX-4] Backfill on-chain KYC registration for users who verified KYC
     // BEFORE binding a wallet. routes/admin.js's `/kyc/:id/approve` only
@@ -1052,17 +1049,17 @@ router.post('/bind', authenticate, walletWriteLimiter, async (req, res) => {
           try {
             const r = await verifyKYCOnChain(walletAddress.toLowerCase(), kycRows[0].kyc_data_hash);
             if (!r.skipped) {
-              log.info({ userId: req.user.id, txHash: r.txHash }, 'KYC on-chain registered after wallet bind');
+              req.log.info({ userId: req.user.id, txHash: r.txHash }, 'KYC on-chain registered after wallet bind');
               await auditLog(req.user.id, 'KYC_ONCHAIN_REGISTERED_ON_BIND', req.user.id, `TX: ${r.txHash}`);
             }
           } catch (e) {
-            log.warn({ userId: req.user.id, err: e.message }, 'KYC on-chain registration on wallet bind failed');
+            req.log.warn({ userId: req.user.id, err: e.message }, 'KYC on-chain registration on wallet bind failed');
             await auditLog(req.user.id, 'KYC_ONCHAIN_FAILED_ON_BIND', req.user.id, e.message);
           }
         });
       }
     } catch (e) {
-      log.warn({ userId: req.user.id, err: e.message }, 'KYC on-chain sync check failed');
+      req.log.warn({ userId: req.user.id, err: e.message }, 'KYC on-chain sync check failed');
     }
 
     sendWalletConnectedEmail(req.user.email, {
@@ -1072,7 +1069,7 @@ router.post('/bind', authenticate, walletWriteLimiter, async (req, res) => {
 
     res.json({ message: 'Wallet bound successfully', walletAddress: walletAddress.toLowerCase() });
   } catch (err) {
-    log.error({ err: err?.message, userId: req.user.id }, 'Wallet bind error');
+    req.log.error({ err: err?.message, userId: req.user.id }, 'Wallet bind error');
     res.status(500).json({ error: 'Failed to bind wallet' });
   }
 });
@@ -1097,7 +1094,7 @@ router.get('/status', authenticate, walletReadLimiter, async (req, res) => {
       nodalModel:       true,
     });
   } catch (err) {
-    log.error({ err: err?.message, userId: req.user.id }, 'Status fetch error');
+    req.log.error({ err: err?.message, userId: req.user.id }, 'Status fetch error');
     res.status(500).json({ error: 'Failed to fetch wallet status' });
   }
 });
@@ -1157,12 +1154,12 @@ router.post('/kyc', authenticate, walletActionLimiter, async (req, res) => {
       );
     } catch {}
 
-    log.info({ userId: req.user.id }, 'KYC submitted');
+    req.log.info({ userId: req.user.id }, 'KYC submitted');
     res.json({ message: 'KYC submitted for review.', kycStatus: 'pending', kycVerified: false });
   } catch (err) {
     if (err.code === '23505')
       return res.status(409).json({ error: 'duplicate_kyc', code: 'DUPLICATE_KYC' });
-    log.error({ err: err?.message, userId: req.user.id }, 'KYC sync error');
+    req.log.error({ err: err?.message, userId: req.user.id }, 'KYC sync error');
     res.status(500).json({ error: 'KYC sync failed' });
   }
 });
@@ -1179,7 +1176,7 @@ router.get('/bank-accounts', authenticate, walletReadLimiter, async (req, res) =
     );
     res.json({ accounts: rows });
   } catch (err) {
-    log.error({ err: err?.message, userId: req.user.id }, 'Bank accounts fetch error');
+    req.log.error({ err: err?.message, userId: req.user.id }, 'Bank accounts fetch error');
     res.status(500).json({ error: 'Failed to fetch bank accounts' });
   }
 });
@@ -1209,7 +1206,7 @@ router.post('/bank-accounts', authenticate, walletActionLimiter, async (req, res
       [req.user.id, sanitiseText(accountName, 60), accountNumber.trim(),
        ifsc.toUpperCase(), sanitiseText(bankName, 60), isFirst]
     );
-    log.info({ userId: req.user.id, account: mask(accountNumber) }, 'Bank account added');
+    req.log.info({ userId: req.user.id, account: mask(accountNumber) }, 'Bank account added');
 
     sendBankAccountAddedEmail(req.user.email, {
       name: req.user.full_name, bankName: sanitiseText(bankName, 60), accountNumberMasked: mask(accountNumber),
@@ -1220,7 +1217,7 @@ router.post('/bank-accounts', authenticate, walletActionLimiter, async (req, res
   } catch (err) {
     if (err.code === '23505')
       return res.status(409).json({ error: 'This bank account is already saved' });
-    log.error({ err: err?.message, userId: req.user.id }, 'Bank account add error');
+    req.log.error({ err: err?.message, userId: req.user.id }, 'Bank account add error');
     res.status(500).json({ error: 'Failed to save bank account' });
   }
 });
@@ -1246,7 +1243,7 @@ router.put('/bank-accounts/:id/default', authenticate, walletActionLimiter, asyn
     res.json({ success: true, account: rows[0] });
   } catch (err) {
     await client.query('ROLLBACK');
-    log.error({ err: err?.message, userId: req.user.id }, 'Set default account error');
+    req.log.error({ err: err?.message, userId: req.user.id }, 'Set default account error');
     res.status(500).json({ error: 'Failed to update default account' });
   } finally {
     client.release();
@@ -1278,7 +1275,7 @@ router.delete('/bank-accounts/:id', authenticate, walletActionLimiter, async (re
       );
     }
     await client.query('COMMIT');
-    log.info({ userId: req.user.id }, 'Bank account deleted');
+    req.log.info({ userId: req.user.id }, 'Bank account deleted');
 
     sendBankAccountRemovedEmail(req.user.email, {
       name: req.user.full_name, bankName: rows[0].bank_name, accountNumberMasked: mask(rows[0].account_number),
@@ -1288,7 +1285,7 @@ router.delete('/bank-accounts/:id', authenticate, walletActionLimiter, async (re
     res.json({ success: true });
   } catch (err) {
     await client.query('ROLLBACK');
-    log.error({ err: err?.message, userId: req.user.id }, 'Bank account delete error');
+    req.log.error({ err: err?.message, userId: req.user.id }, 'Bank account delete error');
     res.status(500).json({ error: 'Failed to delete bank account' });
   } finally {
     client.release();

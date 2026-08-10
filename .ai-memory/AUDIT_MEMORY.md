@@ -210,9 +210,13 @@ Untracked (to commit):
 - **kyc_idempotency_keys**: Fixed PRIMARY KEY to be (key, user_id) ✅
 - Routes updated to use idempotency_key column in wallet.js (withdraw, trade-deduct, trade-refund)
 
-### ARC-006: Structured Logging & Correlation IDs 🔍 OPEN
-- Request ID propagation via middleware
-- Structured JSON logging needed
+### ARC-006: Structured Logging & Correlation IDs ✅ COMPLETE
+- Request ID middleware in server.js (generates UUIDv4, propagates via X-Request-ID header)
+- Request/response logging middleware with duration, status, userId, IP
+- Shared logger in services/logger.js (Pino with PII redaction, ISO timestamps, pino-pretty in dev)
+- req.log pattern in all major routes: wallet.js, subscription.js, org.js, trades.js, operator-trading.js, kyc.js
+- Background services (ipfs.js, blockchain.js) use shared logger
+- Correlation IDs available for distributed tracing
 
 ### ARC-007: Health Checks ✅ COMPLETE
 - /health endpoint with DB, pool, uptime checks
@@ -301,5 +305,5 @@ Untracked (to commit):
 ---
 
 *Last Updated: 2026-08-10*
-*Context: FIN-001 to FIN-010 COMPLETE | SEC-001 to SEC-007 COMPLETE | ARC-001/003/005/007/008 COMPLETE | ARC-002/004/006/009/010 OPEN*
+*Context: FIN-001 to FIN-010 COMPLETE | SEC-001 to SEC-007 COMPLETE | ARC-001/003/005/006/007/008 COMPLETE | ARC-002/004/009/010 OPEN*
 *Memory Persistence: This file survives context resets*

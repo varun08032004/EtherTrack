@@ -42,6 +42,8 @@
 const { ethers } = require('ethers');
 const { safeQuery: query, withTransaction } = require('../db/pool');
 const { getBreaker } = require('../lib/circuitBreaker');
+const logger = require('./logger');
+
 const rpcBreaker = getBreaker('alchemy-rpc', {
   failureThreshold: 5,
   successThreshold: 2,
@@ -112,7 +114,7 @@ const queryFilterChunked = async (contract, filter, fromBlock, toBlock, abortSig
       const events = await rpcBreaker.execute(() => contract.queryFilter(filter, start, end));
       allEvents.push(...events);
     } catch (e) {
-      console.error(`  ↳ queryFilter chunk [${start}→${end}] failed:`, e.message);
+      logger.error(`  ↳ queryFilter chunk [${start}→${end}] failed:`, e.message);
     }
 
     if (end < toBlock) {
@@ -137,27 +139,27 @@ const init = () => {
         e?.shortMessage?.includes('filter not found') ||
         e?.code === 'UNKNOWN_ERROR'
       ) return;
-      console.error('Provider error:', e.message);
+      logger.error('Provider error:', e.message);
     });
 
     // [B2] Start polling immediately — don't wait for sync
     provider.getBlockNumber().then(async (currentBlock) => {
       lastPolledBlock = currentBlock;
       startPolling();
-      console.log('✅ Blockchain polling started (block:', currentBlock, ')');
+      logger.info('✅ Blockchain polling started (block:', currentBlock, ')');
 
       // [B2] Sync runs in background — won't block or kill server
       runBackgroundSync(currentBlock).catch(e =>
-        console.warn('[blockchain] Background sync error:', e.message)
+        logger.warn('[blockchain] Background sync error:', e.message)
       );
     }).catch(async (e) => {
-      console.error('Blockchain init failed to get block number:', e.message);
+      logger.error('Blockchain init failed to get block number:', e.message);
       lastPolledBlock = 0;
       startPolling();
     });
 
   } catch (e) {
-    console.error('Blockchain listener init failed:', e.message);
+    logger.error('Blockchain listener init failed:', e.message);
   }
 };
 
@@ -167,7 +169,7 @@ const runBackgroundSync = async (currentBlock) => {
   const controller = new AbortController();
   const timeoutId  = setTimeout(() => {
     controller.abort();
-    console.warn(`[blockchain] Startup sync timed out after ${SYNC_TIMEOUT_MS / 1000}s — will resume on next poll`);
+    logger.warn(`[blockchain] Startup sync timed out after ${SYNC_TIMEOUT_MS / 1000}s — will resume on next poll`);
   }, SYNC_TIMEOUT_MS);
 
   try {
@@ -185,7 +187,7 @@ const startPolling = () => {
     try {
       await pollEvents();
     } catch (e) {
-      console.error('Poll cycle error:', e.message);
+      logger.error('Poll cycle error:', e.message);
     }
   }, POLL_INTERVAL_MS);
 };
@@ -197,7 +199,7 @@ const stop = () => {
     clearInterval(pollTimer);
     pollTimer = null;
   }
-  console.log('[blockchain] Polling stopped');
+  logger.info('[blockchain] Polling stopped');
 };
 
 const pollEvents = async () => {
@@ -254,13 +256,13 @@ const syncMissedEvents = async (currentBlock, abortSignal) => {
       : Math.max(0, currentBlock - SYNC_WINDOW);
 
     if (fromBlock >= currentBlock) {
-      console.log('[blockchain] No missed blocks to sync');
+      logger.info('[blockchain] No missed blocks to sync');
       return;
     }
 
     const totalChunks = Math.ceil((currentBlock - fromBlock) / CHUNK_SIZE);
-    console.log(`🔄 Syncing missed events from block ${fromBlock} to ${currentBlock}...`);
-    console.log(`   (${totalChunks} chunks × ${CHUNK_SIZE} blocks — timeout: ${SYNC_TIMEOUT_MS / 1000}s)`);
+    logger.info(`🔄 Syncing missed events from block ${fromBlock} to ${currentBlock}...`);
+    logger.info(`   (${totalChunks} chunks × ${CHUNK_SIZE} blocks — timeout: ${SYNC_TIMEOUT_MS / 1000}s)`);
 
     // ── Sync CreditListed ─────────────────────────────────────
     // [FIX-LISTED-QTY] now also writes listed_quantity = amount
@@ -268,7 +270,7 @@ const syncMissedEvents = async (currentBlock, abortSignal) => {
       const listedEvents = await queryFilterChunked(
         marketplace, marketplace.filters.CreditListed(), fromBlock, currentBlock, abortSignal
       );
-      console.log(`   Found ${listedEvents.length} CreditListed events`);
+      logger.info(`   Found ${listedEvents.length} CreditListed events`);
       for (const ev of listedEvents) {
         if (abortSignal?.aborted) break;
         const [listingId, seller, tokenId, amount, pricePerUnit, pricePerUnitINR] = ev.args;
@@ -287,7 +289,7 @@ const syncMissedEvents = async (currentBlock, abortSignal) => {
             [priceINR, Number(listingId), Number(amount), batch.id]
           );
         } catch (e) {
-          console.error(`  ↳ CreditListed sync error (listingId:${listingId}):`, e.message);
+          logger.error(`  ↳ CreditListed sync error (listingId:${listingId}):`, e.message);
         }
       }
     }
@@ -299,7 +301,7 @@ const syncMissedEvents = async (currentBlock, abortSignal) => {
       const cancelledEvents = await queryFilterChunked(
         marketplace, marketplace.filters.ListingCancelled(), fromBlock, currentBlock, abortSignal
       );
-      console.log(`   Found ${cancelledEvents.length} ListingCancelled events`);
+      logger.info(`   Found ${cancelledEvents.length} ListingCancelled events`);
       for (const ev of cancelledEvents) {
         if (abortSignal?.aborted) break;
         const [listingId] = ev.args;
@@ -311,7 +313,7 @@ const syncMissedEvents = async (currentBlock, abortSignal) => {
             [Number(listingId)]
           );
         } catch (e) {
-          console.error(`  ↳ ListingCancelled sync error:`, e.message);
+          logger.error(`  ↳ ListingCancelled sync error:`, e.message);
         }
       }
     }
@@ -321,7 +323,7 @@ const syncMissedEvents = async (currentBlock, abortSignal) => {
       const mintedEvents = await queryFilterChunked(
         token, token.filters.CreditMinted(), fromBlock, currentBlock, abortSignal
       );
-      console.log(`   Found ${mintedEvents.length} CreditMinted events`);
+      logger.info(`   Found ${mintedEvents.length} CreditMinted events`);
       for (const ev of mintedEvents) {
         if (abortSignal?.aborted) break;
         const [tokenId, to, amount, projectName, standard, serialNumber] = ev.args;
@@ -339,7 +341,7 @@ const syncMissedEvents = async (currentBlock, abortSignal) => {
             );
           }
         } catch (e) {
-          console.error(`  ↳ CreditMinted sync error (tokenId:${tokenId}):`, e.message);
+          logger.error(`  ↳ CreditMinted sync error (tokenId:${tokenId}):`, e.message);
         }
       }
     }
@@ -353,26 +355,26 @@ const syncMissedEvents = async (currentBlock, abortSignal) => {
       const tradedEvents = await queryFilterChunked(
         marketplace, marketplace.filters.CreditTraded(), fromBlock, currentBlock, abortSignal
       );
-      console.log(`   Found ${tradedEvents.length} CreditTraded events`);
+      logger.info(`   Found ${tradedEvents.length} CreditTraded events`);
       for (const ev of tradedEvents) {
         if (abortSignal?.aborted) break;
         const [tradeId, listingId, buyOrderId, buyer, seller, tokenId, amount, pricePerUnit, pricePerUnitINR, totalPrice, buyerFee, sellerFee, totalFee, isAMM] = ev.args;
         try {
           await handleCreditTraded(tradeId, listingId, buyOrderId, buyer, seller, tokenId, amount, pricePerUnit, pricePerUnitINR, totalPrice, buyerFee, sellerFee, totalFee, isAMM, ev);
         } catch (e) {
-          console.error(`  ↳ CreditTraded sync error (tradeId:${tradeId}):`, e.message);
+          logger.error(`  ↳ CreditTraded sync error (tradeId:${tradeId}):`, e.message);
         }
       }
     }
 
     if (!abortSignal?.aborted) {
       await saveLastSyncedBlock(currentBlock); // [B3] mark sync complete
-      console.log('✅ Historical event sync complete');
+      logger.info('✅ Historical event sync complete');
     } else {
-      console.warn('[blockchain] Sync aborted — partial progress saved');
+      logger.warn('[blockchain] Sync aborted — partial progress saved');
     }
   } catch (e) {
-    console.error('syncMissedEvents error:', e.message);
+    logger.error('syncMissedEvents error:', e.message);
     throw e;
   }
 };
@@ -398,9 +400,9 @@ const handleCreditMinted = async (tokenId, to, amount, projectName, standard, se
        VALUES ('MINT', $1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING`,
       [Number(tokenId), batch?.id, batch?.project_id, to, users[0]?.id, Number(amount)]
     );
-    console.log(`📦 MINT — tokenId:${tokenId} amount:${amount} to:${to}`);
+    logger.info(`📦 MINT — tokenId:${tokenId} amount:${amount} to:${to}`);
   } catch (e) {
-    console.error('CreditMinted handler error:', e.message);
+    logger.error('CreditMinted handler error:', e.message);
   }
 };
 
@@ -432,9 +434,9 @@ const handleCreditListed = async (listingId, seller, tokenId, amount, pricePerUn
         [priceINR, Number(listingId), qty, batch.id]
       );
     }
-    console.log(`📋 LIST — listingId:${listingId} tokenId:${tokenId} qty:${qty} priceINR:₹${priceINR}`);
+    logger.info(`📋 LIST — listingId:${listingId} tokenId:${tokenId} qty:${qty} priceINR:₹${priceINR}`);
   } catch (e) {
-    console.error('CreditListed handler error:', e.message);
+    logger.error('CreditListed handler error:', e.message);
   }
 };
 
@@ -464,7 +466,7 @@ const handleCreditTraded = async (tradeId, listingId, buyOrderId, buyer, seller,
     if (txHash) {
       const { rows: existing } = await query(`SELECT id FROM trades WHERE tx_hash = $1 LIMIT 1`, [txHash]);
       if (existing.length) {
-        console.log(`⏭️  TRADE already settled — skipping (tradeId:${tradeId})`);
+        logger.info(`⏭️  TRADE already settled — skipping (tradeId:${tradeId})`);
         return;
       }
     }
@@ -495,9 +497,9 @@ const handleCreditTraded = async (tradeId, listingId, buyOrderId, buyer, seller,
         }
       }
     });
-    console.log(`💱 TRADE — tradeId:${tradeId} amount:${qty} priceINR:₹${priceINR}`);
+    logger.info(`💱 TRADE — tradeId:${tradeId} amount:${qty} priceINR:₹${priceINR}`);
   } catch (e) {
-    console.error('CreditTraded handler error:', e.message);
+    logger.error('CreditTraded handler error:', e.message);
   }
 };
 
@@ -516,9 +518,9 @@ const handleListingCancelled = async (listingId, seller, ev) => {
        WHERE listing_id_onchain = $1`,
       [Number(listingId)]
     );
-    console.log(`❌ DELIST — listingId:${listingId}`);
+    logger.info(`❌ DELIST — listingId:${listingId}`);
   } catch (e) {
-    console.error('ListingCancelled handler error:', e.message);
+    logger.error('ListingCancelled handler error:', e.message);
   }
 };
 
@@ -541,9 +543,9 @@ const handleCreditRetired = async (tokenId, retiredBy, amount, projectName, ev) 
         }
       }
     });
-    console.log(`🔥 RETIRE — tokenId:${tokenId} amount:${amount}`);
+    logger.info(`🔥 RETIRE — tokenId:${tokenId} amount:${amount}`);
   } catch (e) {
-    console.error('CreditRetired handler error:', e.message);
+    logger.error('CreditRetired handler error:', e.message);
   }
 };
 

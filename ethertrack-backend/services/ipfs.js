@@ -5,6 +5,7 @@
 const axios    = require('axios');
 const FormData = require('form-data');
 const { getBreaker } = require('../lib/circuitBreaker');
+const logger = require('./logger');
 
 const PINATA_URL = 'https://api.pinata.cloud';
 const GATEWAY    = process.env.PINATA_GATEWAY || 'https://gateway.pinata.cloud/ipfs';
@@ -18,7 +19,7 @@ const pinataBreaker = getBreaker('pinata', {
 
 // ── Startup validation ────────────────────────────────────────────
 if (!process.env.PINATA_API_KEY || !process.env.PINATA_SECRET_KEY) {
-  console.error('[IPFS] FATAL: PINATA_API_KEY or PINATA_SECRET_KEY environment variable is missing.');
+  logger.error('[IPFS] FATAL: PINATA_API_KEY or PINATA_SECRET_KEY environment variable is missing.');
   if (process.env.NODE_ENV === 'production') {
     process.exit(1);
   }

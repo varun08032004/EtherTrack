@@ -21,6 +21,19 @@ const { generateTradeInvoice, generateTradeBill, serveTradeInvoice, getGSTType }
 const { sendCreditsSoldEmail } = require('../services/email');
 const { issueOwnershipCertificate } = require('../services/certificates');
 
+const logger = require('../services/logger');
+
+// ── Request logger middleware with correlation ID ───────────────────────────────
+router.use((req, _res, next) => {
+  req.log = logger.child({
+    requestId: req.requestId,
+    userId: req.user?.id,
+    path: req.path,
+    method: req.method,
+  });
+  next();
+});
+
 // ── Razorpay with circuit breaker ────────────────────────────────────
 const { getBreaker } = require('../lib/circuitBreaker');
 const razorpayBreaker = getBreaker('razorpay', {
@@ -130,7 +143,7 @@ async function fireTradeInvoice({ tradeId, buyerId, projectName, standard, regis
       paymentMode,
     });
   } catch (err) {
-    console.error('[trades/fireTradeInvoice] failed (trade unaffected):', err.message);
+    req.log.error('[trades/fireTradeInvoice] failed (trade unaffected):', err.message);
   }
 }
 
@@ -156,7 +169,7 @@ async function fireTradeBill({ tradeId, buyerId, projectName, standard, registry
       totalETH,
     });
   } catch (err) {
-    console.error('[trades/fireTradeBill] failed (trade unaffected):', err.message);
+    req.log.error('[trades/fireTradeBill] failed (trade unaffected):', err.message);
   }
 }
 
@@ -442,7 +455,7 @@ const batchLockKey = parseInt(batchId.replace(/-/g, ''), 16) % 2147483647;
         custodyModel: 'wallet',
       });
     } catch (certErr) {
-      console.error('[trades/record] certificate issuance failed (trade unaffected):', certErr.message);
+      req.log.error('[trades/record] certificate issuance failed (trade unaffected):', certErr.message);
     }
 
     if (paymentMode === 'inr') {
@@ -455,7 +468,7 @@ const batchLockKey = parseInt(batchId.replace(/-/g, ''), 16) % 2147483647;
         buyerWallet:       req.user.wallet_address || null,
         sellerWallet:      batches[0].seller_wallet,
         settledAt:         new Date(),
-      }).catch(err => console.error('[trades/record] chain log error:', err.message));
+      }).catch(err => req.log.error('[trades/record] chain log error:', err.message));
 
       fireTradeInvoice({
         tradeId,
@@ -499,7 +512,7 @@ const batchLockKey = parseInt(batchId.replace(/-/g, ''), 16) % 2147483647;
         name: batch.seller_name, projectName: batch.project_name, quantity: qty,
         amountINR: fees.sellerGetsINR.toLocaleString('en-IN'), pending: paymentMode !== 'inr',
         walletUrl: `${process.env.FRONTEND_URL}/wallet`,
-      }).catch(e => console.warn('[trades/record] seller email failed:', e.message));
+      }).catch(e => req.log.warn('[trades/record] seller email failed:', e.message));
     }
 
     const { rows: updatedBuyer }  = await query('SELECT inr_balance FROM users WHERE id = $1', [req.user.id]);
@@ -517,7 +530,7 @@ const batchLockKey = parseInt(batchId.replace(/-/g, ''), 16) % 2147483647;
     });
 
   } catch (e) {
-    console.error('[trades/record]', e.message);
+    req.log.error('[trades/record]', e.message);
     if (e.statusCode !== 400 && txHash) {
       query(
         `INSERT INTO failed_trade_records (tx_hash, buyer_id, batch_id, quantity, error)
@@ -608,7 +621,7 @@ router.post('/checkout-order', authenticate, requireKYC, tradeLimiter, async (re
       totalFeeINR: fees.totalFeeINR, gstINR: fees.gstINR,
     });
   } catch (e) {
-    console.error('[trades/checkout-order]', e.message);
+    req.log.error('[trades/checkout-order]', e.message);
     return res.status(500).json({ error: e.message || 'Failed to create order' });
   }
 });
@@ -762,7 +775,7 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
           [result.txHash, result.blockNumber, tradeId]
         );
         chainTxHash = result.txHash; chainBlockNumber = result.blockNumber; custodyModel = 'wallet';
-        console.log(`[checkout-verify] Trade ${tradeId} settled on-chain (wallet) -- TX: ${result.txHash}`);
+        req.log.info(`[checkout-verify] Trade ${tradeId} settled on-chain (wallet) -- TX: ${result.txHash}`);
       } else {
         const { logOwnershipChangeOnChain } = require('../services/creditLedger');
         const result = await logOwnershipChangeOnChain({
@@ -780,7 +793,7 @@ router.post('/checkout-verify', authenticate, requireKYC, tradeLimiter, async (r
           [result.txHash, result.blockNumber, tradeId]
         );
         chainTxHash = result.txHash; chainBlockNumber = result.blockNumber; custodyModel = 'pooled';
-console.log(`[checkout-verify] Trade ${tradeId} logged on-chain (ledger, no wallet) -- TX: ${result.txHash}`);
+req.log.info(`[checkout-verify] Trade ${tradeId} logged on-chain (ledger, no wallet) -- TX: ${result.txHash}`);
       }
     } catch (chainErr) {
       await query(
@@ -793,7 +806,7 @@ console.log(`[checkout-verify] Trade ${tradeId} logged on-chain (ledger, no wall
         [req.user.id, 'INR_TRADE_ONCHAIN_SETTLEMENT_FAILED', req.user.id,
          `Trade ${tradeId} -- payment captured but on-chain settlement failed: ${chainErr.message}`]
       ).catch(() => {});
-      console.error(`[checkout-verify] [WARNING] On-chain settlement FAILED for trade ${tradeId} -- payment already captured. Needs manual remediation:`, chainErr.message);
+      req.log.error(`[checkout-verify] [WARNING] On-chain settlement FAILED for trade ${tradeId} -- payment already captured. Needs manual remediation:`, chainErr.message);
     }
 
     // [CERT-OWNERSHIP] Issue Certificate of Ownership regardless of which
@@ -810,7 +823,7 @@ console.log(`[checkout-verify] Trade ${tradeId} logged on-chain (ledger, no wall
         custodyModel,
       });
     } catch (certErr) {
-      console.error('[checkout-verify] certificate issuance failed (trade unaffected):', certErr.message);
+      req.log.error('[checkout-verify] certificate issuance failed (trade unaffected):', certErr.message);
     }
 
     fireTradeInvoice({
@@ -839,7 +852,7 @@ console.log(`[checkout-verify] Trade ${tradeId} logged on-chain (ledger, no wall
         name: batch.seller_name, projectName: batch.project_name, quantity: qty,
         amountINR: fees.sellerGetsINR.toLocaleString('en-IN'), pending: false,
         walletUrl: `${process.env.FRONTEND_URL}/wallet`,
-      }).catch(e => console.warn('[trades/checkout-verify] seller email failed:', e.message));
+      }).catch(e => req.log.warn('[trades/checkout-verify] seller email failed:', e.message));
     }
 
     return res.json({
@@ -888,7 +901,7 @@ router.get('/:id/verify', readLimiter, async (req, res) => {
       verifiedAt:  new Date().toISOString(),
     });
   } catch (e) {
-    console.error('[trades/verify]', e.message);
+    req.log.error('[trades/verify]', e.message);
     return res.status(500).json({ error: 'Verification failed', detail: e.message });
   }
 });
@@ -985,9 +998,9 @@ const creditSellerFromChain = async ({ txHash, sellerId, sellerGetsINR, tradeId 
         [tradeId]
       ).catch(() => {});
     });
-    console.log(`[trades] Seller ${sellerId} credited Rs.${sellerGetsINR} for ETH trade ${tradeId}`);
+    req.log.info(`[trades] Seller ${sellerId} credited Rs.${sellerGetsINR} for ETH trade ${tradeId}`);
   } catch (e) {
-    console.error('[creditSellerFromChain]', e.message, { txHash, tradeId });
+    req.log.error('[creditSellerFromChain]', e.message, { txHash, tradeId });
   }
 };
 

@@ -288,6 +288,47 @@ if (Sentry?.Handlers) app.use(Sentry.Handlers.requestHandler());
 
 app.use(compression());
 
+// ── Request ID correlation middleware ────────────────────────────────────────
+const { v4: uuidv4 } = require('uuid');
+app.use((req, res, next) => {
+  const requestId = req.headers['x-request-id'] || uuidv4();
+  req.requestId = requestId;
+  res.setHeader('X-Request-ID', requestId);
+  next();
+});
+
+// ── Request/Response structured logging ──────────────────────────────────────
+const logger = require('./services/logger');
+app.use((req, res, next) => {
+  const start = process.hrtime.bigint();
+  
+  // Capture response finish
+  res.on('finish', () => {
+    const durationMs = Number(process.hrtime.bigint() - start) / 1_000_000;
+    const logData = {
+      requestId: req.requestId,
+      method: req.method,
+      path: req.path,
+      query: req.query,
+      statusCode: res.statusCode,
+      durationMs: Math.round(durationMs),
+      userAgent: req.get('user-agent'),
+      ip: req.ip,
+      userId: req.user?.id,
+    };
+    
+    if (res.statusCode >= 500) {
+      logger.error(logData, 'Request completed with server error');
+    } else if (res.statusCode >= 400) {
+      logger.warn(logData, 'Request completed with client error');
+    } else {
+      logger.info(logData, 'Request completed');
+    }
+  });
+  
+  next();
+});
+
 app.use((req, res, next) => {
   res.locals.cspNonce = crypto.randomBytes(16).toString('base64');
   next();

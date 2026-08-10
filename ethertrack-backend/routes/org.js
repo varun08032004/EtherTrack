@@ -29,6 +29,19 @@ const { sendOrgInviteEmail, sendSubscriptionExpiringSoonEmail, sendSubscriptionE
 const { createNotification } = require('./notifications');
 const { generateGSTInvoice, serveInvoice } = require('../services/invoice');
 
+const logger = require('../services/logger');
+
+// ── Request logger middleware with correlation ID ───────────────────────────────
+router.use((req, _res, next) => {
+  req.log = logger.child({
+    requestId: req.requestId,
+    userId: req.user?.id,
+    path: req.path,
+    method: req.method,
+  });
+  next();
+});
+
 // ── Razorpay with circuit breaker ────────────────────────────────────
 const { getBreaker } = require('../lib/circuitBreaker');
 const razorpayBreaker = getBreaker('razorpay', {
@@ -180,7 +193,7 @@ async function issueInvoice(userId, paymentId, plan, cycle, amount, extraMeta = 
 
     return invoiceUrl;
   } catch (e) {
-    console.error('[org/issueInvoice] failed:', e.message);
+    req.log.error('[org/issueInvoice] failed:', e.message);
     return null;
   }
 }
@@ -221,7 +234,7 @@ router.post('/create', authenticate, orgActionLimiter, async (req, res) => {
     );
     res.status(201).json({ message: 'Organisation created', org });
   } catch (e) {
-    console.error('[org/create]', e.message);
+    req.log.error('[org/create]', e.message);
     res.status(500).json({ error: 'Failed to create organisation', detail: e.message });
   }
 });
@@ -301,10 +314,10 @@ router.post('/:orgId/invite', authenticate, requireRole('owner', 'admin'), orgAc
       inviterName: req.user.full_name,
       roleDescription,
       inviteUrl,
-    }).catch(e => console.warn('[org/invite] email failed:', e.message));
+    }).catch(e => req.log.warn('[org/invite] email failed:', e.message));
     res.json({ message: `Invite sent to ${email}`, inviteUrl });
   } catch (e) {
-    console.error('[org/invite]', e.message);
+    req.log.error('[org/invite]', e.message);
     res.status(500).json({ error: 'Failed to send invite', detail: e.message });
   }
 });
@@ -361,7 +374,7 @@ router.post('/accept-invite', authenticate, orgActionLimiter, async (req, res) =
     }
     res.json({ message: `Joined ${org[0]?.name} as ${inv.team_role}`, teamRole: inv.team_role });
   } catch (e) {
-    console.error('[org/accept-invite]', e.message);
+    req.log.error('[org/accept-invite]', e.message);
     res.status(500).json({ error: 'Failed to accept invite' });
   }
 });
@@ -485,7 +498,7 @@ router.get('/:orgId/retirement-queue', authenticate, requireRole('owner', 'admin
     res.json({ queue: rows });
   } catch (e) {
     if (e.statusCode === 403) return res.status(403).json({ error: e.message });
-    console.error('[org/retirement-queue/get]', e.message);
+    req.log.error('[org/retirement-queue/get]', e.message);
     res.status(500).json({ error: 'Failed to fetch retirement queue' });
   }
 });
@@ -536,12 +549,12 @@ router.post('/:orgId/retirement-queue', authenticate, requireRole('owner', 'admi
     const { rows: [org] } = await query('SELECT name FROM organisations WHERE id=$1', [req.params.orgId]).catch(() => ({ rows: [{}] }));
     sendOrgRetirementRequestedEmail(req.user.email, {
       name: req.user.full_name, projectName, quantity: qty, orgName: org?.name,
-    }).catch(e => console.warn('[retirement-queue/post] email failed:', e.message));
+    }).catch(e => req.log.warn('[retirement-queue/post] email failed:', e.message));
 
     res.status(201).json({ message: 'Retirement request submitted', id: rows[0].id });
   } catch (e) {
     if (e.statusCode === 403) return res.status(403).json({ error: e.message });
-    console.error('[org/retirement-queue/post]', e.message);
+    req.log.error('[org/retirement-queue/post]', e.message);
     res.status(500).json({ error: 'Failed to submit retirement request', detail: e.message });
   }
 });
@@ -610,14 +623,14 @@ router.post('/:orgId/retirement-queue/:itemId/approve', authenticate, requireRol
         name: item.requester_full_name, amount: item.qty, certificateId: certId,
         projectName: item.project_name, beneficiary: item.beneficiary_name || 'Self',
         certUrl: `${process.env.FRONTEND_URL}/verify/${certId}`,
-      }).catch(e => console.warn('[retirement-queue/approve] certificate email failed:', e.message));
+      }).catch(e => req.log.warn('[retirement-queue/approve] certificate email failed:', e.message));
     }
 
     res.json({ success: true, certId, message: `Retirement approved — ${item.qty} tCO₂` });
   } catch (e) {
     await client.query('ROLLBACK');
     if (e.code === '23505') return res.status(409).json({ error: 'This credit has already been retired' });
-    console.error('[org/retirement-queue/approve]', e.message);
+    req.log.error('[org/retirement-queue/approve]', e.message);
     res.status(500).json({ error: 'Approval failed', detail: e.message });
   } finally {
     client.release();
@@ -655,11 +668,11 @@ router.post('/:orgId/retirement-queue/:itemId/reject', authenticate, requireRole
           orgName: ctx.org_name, reason: reason.trim(),
         });
       }
-    } catch (e) { console.warn('[retirement-queue/reject] email failed:', e.message); }
+    } catch (e) { req.log.warn('[retirement-queue/reject] email failed:', e.message); }
 
     res.json({ success: true, message: 'Retirement request rejected' });
   } catch (e) {
-    console.error('[org/retirement-queue/reject]', e.message);
+    req.log.error('[org/retirement-queue/reject]', e.message);
     res.status(500).json({ error: 'Rejection failed', detail: e.message });
   }
 });
@@ -724,7 +737,7 @@ router.post('/plan/create-order', authenticate, orgActionLimiter, async (req, re
     }
     res.json({ orderId: order.id, keyId: process.env.RAZORPAY_KEY_ID, amount: amount * 100, planKey, cycle });
   } catch (e) {
-    console.error('[org/plan/create-order]', e.message);
+    req.log.error('[org/plan/create-order]', e.message);
     res.status(500).json({ error: 'Could not create payment order', detail: e.message });
   }
 });
@@ -858,7 +871,7 @@ router.post('/plan/select', authenticate, orgActionLimiter, async (req, res) => 
     return res.status(400).json({ error: 'Unknown payMethod', valid: ['free','wallet','razorpay','metamask'] });
 
   } catch (e) {
-    console.error('[org/plan/select]', e.message);
+    req.log.error('[org/plan/select]', e.message);
     res.status(500).json({ error: 'Plan activation failed', detail: e.message });
   }
 });
@@ -890,7 +903,7 @@ router.get('/plan', authenticate, async (req, res) => {
       inr_balance:    (u.inr_balance || '0').toString(),
     });
   } catch (e) {
-    console.error('[org/plan]', e.message);
+    req.log.error('[org/plan]', e.message);
     res.status(500).json({ error: 'Failed to fetch plan' });
   }
 });
@@ -904,7 +917,7 @@ router.get('/plan/history', authenticate, async (req, res) => {
     );
     res.json({ history: rows });
   } catch (e) {
-    console.error('[org/plan/history]', e.message);
+    req.log.error('[org/plan/history]', e.message);
     res.status(500).json({ error: 'Failed to fetch payment history' });
   }
 });
@@ -962,19 +975,19 @@ async function checkSubscriptionExpiries() {
           await sendSubscriptionExpiredEmail(user.email, {
             name: user.full_name, plan: planLabel, downgradeTo: 'Free',
             renewUrl: `${process.env.FRONTEND_URL}/billing`,
-          }).catch(e => console.warn('[checkSubscriptionExpiries] expired email failed:', e.message));
+          }).catch(e => req.log.warn('[checkSubscriptionExpiries] expired email failed:', e.message));
         } else if (days === 1) {
           await createNotification(user.id, 'SYSTEM', '⚠️ Subscription Expires Tomorrow', `Your ${planLabel} plan expires tomorrow.`,                                '/billing', { plan: user.subscription_plan });
           await sendSubscriptionExpiringSoonEmail(user.email, {
             name: user.full_name, plan: planLabel, expiryDate: dateStr, daysLeft: 1,
             renewUrl: `${process.env.FRONTEND_URL}/billing`,
-          }).catch(e => console.warn('[checkSubscriptionExpiries] expiring email failed:', e.message));
+          }).catch(e => req.log.warn('[checkSubscriptionExpiries] expiring email failed:', e.message));
         } else if (days === 7) {
           await createNotification(user.id, 'SYSTEM', '⏰ Expiring in 7 Days',             `Your ${planLabel} plan expires on ${dateStr}.`,                         '/billing', { plan: user.subscription_plan });
           await sendSubscriptionExpiringSoonEmail(user.email, {
             name: user.full_name, plan: planLabel, expiryDate: dateStr, daysLeft: 7,
             renewUrl: `${process.env.FRONTEND_URL}/billing`,
-          }).catch(e => console.warn('[checkSubscriptionExpiries] expiring email failed:', e.message));
+          }).catch(e => req.log.warn('[checkSubscriptionExpiries] expiring email failed:', e.message));
         } else if (days === 30) {
           await createNotification(user.id, 'SYSTEM', '📅 Renewal Reminder',              `Your ${planLabel} plan renews on ${dateStr} (30 days away).`,           '/billing', { plan: user.subscription_plan });
           // no email at 30 days — 7/1/0 day emails are enough, avoid over-mailing
@@ -1014,12 +1027,12 @@ async function checkSubscriptionExpiries() {
           [user.id, user.subscription_plan, user.subscription_cycle]
         );
  
-        console.log(
+        req.log.info(
           `[org/cron] Downgraded expired user ${user.id} ` +
           `from ${user.subscription_plan} → free`
         );
       } catch (e) {
-        console.warn('[checkSubscriptionExpiries] downgrade failed:', e.message);
+        req.log.warn('[checkSubscriptionExpiries] downgrade failed:', e.message);
       }
     }
  
@@ -1036,7 +1049,7 @@ async function checkSubscriptionExpiries() {
     `);
  
     if (corpExpired.length > 0) {
-      console.warn(
+      req.log.warn(
         `[org/cron] ⚠️  ${corpExpired.length} corporate account(s) past renewal date — ` +
         `NOT auto-downgraded. Sales team follow-up required:\n` +
         corpExpired.map(u => `  · ${u.email} (expired ${new Date(u.subscription_renewal_date).toLocaleDateString('en-IN')})`).join('\n')
@@ -1044,7 +1057,7 @@ async function checkSubscriptionExpiries() {
       // Optionally: fire an alert to your internal Slack/webhook here.
     }
  
-    console.log(
+    req.log.info(
       `[org/cron] Expiry check — ` +
       `${expiring.length} notified, ` +
       `${expired.length} downgraded, ` +
@@ -1052,7 +1065,7 @@ async function checkSubscriptionExpiries() {
     );
  
   } catch (e) {
-    console.error('[org/checkSubscriptionExpiries]', e.message);
+    req.log.error('[org/checkSubscriptionExpiries]', e.message);
   }
 }
 // Alias — TeamManagement.js calls POST /:orgId/verifiers (no /request suffix)
@@ -1071,7 +1084,7 @@ router.post('/:orgId/verifiers', authenticate, requireRole('owner', 'admin'), or
     );
     res.json({ message: `Request submitted for ${verifierName}.`, verifier: rows[0] });
   } catch (e) {
-    console.error('[org/verifiers/post]', e.message);
+    req.log.error('[org/verifiers/post]', e.message);
     res.status(500).json({ error: 'Failed to submit verifier request', detail: e.message });
   }
 });

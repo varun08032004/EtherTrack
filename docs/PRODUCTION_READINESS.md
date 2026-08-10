@@ -50,7 +50,7 @@
 | **ARC-003** | Circuit breakers for external APIs | ✅ **COMPLETE** | P1 | Razorpay, Pinata, Alchemy/RPC - circuit breaker pattern implemented |
 | **ARC-004** | Graceful degradation (feature flags) | 🔍 **OPEN** | P2 | Blockchain down → INR-only mode; feature flag system needed |
 | **ARC-005** | Idempotency keys on all mutations | ✅ **COMPLETE** | P0 | DB UNIQUE constraints on trades, wallet_transactions, subscription_payments, kyc_idempotency_keys; routes updated |
-| **ARC-006** | Structured logging & correlation IDs | 🔍 **OPEN** | P1 | Request ID propagation via middleware |
+| **ARC-006** | Structured logging & correlation IDs | ✅ **COMPLETE** | P1 | Request ID middleware, shared logger, req.log pattern in all routes, background services |
 | **ARC-007** | Health checks (DB, Redis, RPC, external APIs) | ✅ **COMPLETE** | P1 | `/health` endpoint with DB, pool, uptime checks |
 | **ARC-008** | Graceful shutdown / connection draining | ✅ **COMPLETE** | P1 | SIGTERM/SIGINT handling with 10s timeout, pool.end() |
 | **ARC-009** | Backup / PITR strategy | 🔍 **OPEN** | P1 | Supabase PITR enabled; need custom backup scripts |

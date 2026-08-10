@@ -23,6 +23,19 @@ const { rateLimit, ipKeyGenerator }        = require('express-rate-limit');
 const { getEffectivePricePaise, getAllEffectivePrices } = require('../services/pricing');
 const { validateCoupon, computeDiscount, recordRedemption } = require('../services/coupons');
 
+const logger = require('../services/logger');
+
+// ── Request logger middleware with correlation ID ───────────────────────────────
+router.use((req, _res, next) => {
+  req.log = logger.child({
+    requestId: req.requestId,
+    userId: req.user?.id,
+    path: req.path,
+    method: req.method,
+  });
+  next();
+});
+
 const router = express.Router();
 
 const { getBreaker } = require('../lib/circuitBreaker');
@@ -274,7 +287,7 @@ const issueInvoice = async ({ paymentId, plan, cycle, amountPaise, gstin, pan, u
     }
     return invoiceUrl;
   } catch (e) {
-    console.error('[subscription/issueInvoice] non-critical:', e.message);
+    req.log.error('[subscription/issueInvoice] non-critical:', e.message);
     return null;
   }
 };
@@ -288,7 +301,7 @@ router.get('/prices', priceLimiter, async (req, res) => {
     const prices = await getAllEffectivePrices(PLAN_CONFIG);
     return res.json({ prices });
   } catch (e) {
-    console.error('[GET /subscription/prices]', e.message);
+    req.log.error('[GET /subscription/prices]', e.message);
     // Fall back to the hardcoded defaults rather than fail the pricing page outright
     const prices = {};
     for (const [key, cfg] of Object.entries(PLAN_CONFIG)) {
@@ -332,7 +345,7 @@ router.post('/coupon/validate', authenticate,
         discountLabel: result.coupon.discount_type === 'percent' ? `${result.coupon.discount_value}% off` : `₹${(discountPaise/100).toFixed(0)} off`,
       });
     } catch (e) {
-      console.error('[POST /subscription/coupon/validate]', e.message);
+      req.log.error('[POST /subscription/coupon/validate]', e.message);
       return res.status(500).json({ valid: false, reason: 'Could not validate coupon right now.' });
     }
   }
@@ -396,7 +409,7 @@ router.post('/order',
         ...(appliedCoupon ? { couponApplied: appliedCoupon, discountPaise, basePaise } : {}),
       });
     } catch (err) {
-      console.error('[POST /subscription/order]', err.message);
+      req.log.error('[POST /subscription/order]', err.message);
       return res.status(500).json({ error: 'Could not create payment order.' });
     }
   }
@@ -496,7 +509,7 @@ router.post('/verify',
             });
           }
         } catch (e) {
-          console.warn('[subscription/verify] coupon redemption record failed (non-fatal):', e.message);
+          req.log.warn('[subscription/verify] coupon redemption record failed (non-fatal):', e.message);
         }
       }
 
@@ -508,7 +521,7 @@ router.post('/verify',
 
       return res.json({ ok: true, plan, cycle, renewalDate: renewalDate.toISOString(), invoiceUrl: invoiceUrl || null });
     } catch (err) {
-      console.error('[POST /subscription/verify]', err.message);
+      req.log.error('[POST /subscription/verify]', err.message);
       return res.status(500).json({ error: 'Activation failed after payment. Contact support@ethertrack.in.', code: 'ACTIVATION_FAILED' });
     }
   }
@@ -652,7 +665,7 @@ router.post('/wallet-pay',
 
       if (appliedCoupon && couponRowId) {
         await recordRedemption({ couponId: couponRowId, userId, subscriptionPaymentId: paymentId, discountPaise })
-          .catch(e => console.warn('[wallet-pay] coupon redemption record failed (non-fatal):', e.message));
+          .catch(e => req.log.warn('[wallet-pay] coupon redemption record failed (non-fatal):', e.message));
       }
 
       await createNotification(userId, 'WALLET',
@@ -663,7 +676,7 @@ router.post('/wallet-pay',
 
       return res.json({ ok: true, plan, cycle, renewalDate: renewalDate.toISOString(), invoiceUrl: invoiceUrl || null });
     } catch (err) {
-      console.error('[POST /subscription/wallet-pay]', err.message);
+      req.log.error('[POST /subscription/wallet-pay]', err.message);
       const msg = err.message?.includes('Insufficient') ? err.message : 'Wallet payment failed.';
       return res.status(400).json({ error: msg });
     }
@@ -758,7 +771,7 @@ router.post('/metamask-pay',
 
       if (appliedCoupon && couponRowId) {
         await recordRedemption({ couponId: couponRowId, userId, subscriptionPaymentId: paymentId, discountPaise })
-          .catch(e => console.warn('[metamask-pay] coupon redemption record failed (non-fatal):', e.message));
+          .catch(e => req.log.warn('[metamask-pay] coupon redemption record failed (non-fatal):', e.message));
       }
 
       await createNotification(userId, 'WALLET',
@@ -769,7 +782,7 @@ router.post('/metamask-pay',
 
       return res.json({ ok: true, plan, cycle, renewalDate: renewalDate.toISOString(), invoiceUrl: invoiceUrl || null });
     } catch (err) {
-      console.error('[POST /subscription/metamask-pay]', err.message);
+      req.log.error('[POST /subscription/metamask-pay]', err.message);
       return res.status(400).json({ error: err.message || 'MetaMask payment failed.' });
     }
   }
@@ -815,16 +828,16 @@ router.post('/free', authenticate, async (req, res) => {
       sendSubscriptionCancelledEmail(req.user.email, {
         name: req.user.full_name, fromPlan: fromPlanLabel, downgradeTo: 'Free', effectiveNow: true,
         renewUrl: `${process.env.FRONTEND_URL}/billing`,
-      }).catch(e => console.warn('[subscription/free] cancelled email failed:', e.message));
+      }).catch(e => req.log.warn('[subscription/free] cancelled email failed:', e.message));
     } else {
       sendPlanSelectedEmail(req.user.email, {
         name: req.user.full_name, dashboardUrl: `${process.env.FRONTEND_URL}/dashboard`,
-      }).catch(e => console.warn('[subscription/free] plan-selected email failed:', e.message));
+      }).catch(e => req.log.warn('[subscription/free] plan-selected email failed:', e.message));
     }
 
     return res.json({ ok: true, plan: 'free', renewalDate: null });
   } catch (err) {
-    console.error('[POST /subscription/free]', err.message);
+    req.log.error('[POST /subscription/free]', err.message);
     return res.status(500).json({ error: 'Free plan activation failed. Please retry.' });
   }
 });
@@ -865,7 +878,7 @@ router.get('/history',
       const nextCursor = hasMore ? history[history.length-1].created_at : null;
       return res.json({ history, nextCursor, hasMore });
     } catch (err) {
-      console.error('[GET /subscription/history]', err.message);
+      req.log.error('[GET /subscription/history]', err.message);
       return res.status(500).json({ error: 'Failed to load payment history.' });
     }
   }
@@ -931,7 +944,7 @@ router.post('/webhook/razorpay',
             sendPaymentFailedEmail(user.email, {
               name: user.full_name, plan: planLabel, amount: failedPayment.amount,
               retryUrl: `${process.env.FRONTEND_URL}/billing`,
-            }).catch(e => console.warn('[webhook/razorpay] payment-failed email failed:', e.message));
+            }).catch(e => req.log.warn('[webhook/razorpay] payment-failed email failed:', e.message));
           }
         }
       } else if (eventType === 'refund.processed') {
@@ -946,7 +959,7 @@ router.post('/webhook/razorpay',
       }
       return res.json({ received: true });
     } catch (err) {
-      console.error('[webhook/razorpay]', err.message);
+      req.log.error('[webhook/razorpay]', err.message);
       return res.status(500).json({ error: 'Webhook processing failed.' });
     }
   }

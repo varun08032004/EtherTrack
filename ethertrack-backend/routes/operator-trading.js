@@ -28,6 +28,18 @@ const {
   listCreditForOnChain,
   cancelListingForOnChain,
 } = require('../services/minter');
+const logger = require('../services/logger');
+
+// ── Request logger middleware with correlation ID ───────────────────────────────
+router.use((req, _res, next) => {
+  req.log = logger.child({
+    requestId: req.requestId,
+    userId: req.user?.id,
+    path: req.path,
+    method: req.method,
+  });
+  next();
+});
 
 const auditLog = async (adminId, action, targetUserId, details) => {
   try {
@@ -36,7 +48,7 @@ const auditLog = async (adminId, action, targetUserId, details) => {
        VALUES ($1,$2,$3,$4)`,
       [adminId, action, targetUserId || null, details || null]
     );
-  } catch (e) { console.warn('[operator-trading][auditLog] failed:', e.message); }
+  } catch (e) { req.log.warn({ err: e.message }, '[operator-trading][auditLog] failed'); }
 };
 
 // ══════════════════════════════════════════════════════════════════
@@ -81,7 +93,7 @@ router.post('/list-credit', authenticate, requireKYC, assetActionLimiter, async 
       blockNumber: result.blockNumber,
     });
   } catch (e) {
-    console.error('[list-credit][operator]', e.message);
+    req.log.error('[list-credit][operator]', e.message);
 
     if (/not KYC verified/i.test(e.message)) {
       return res.status(403).json({ error: 'Your wallet is not yet KYC verified on-chain. Try again in a moment, or contact support.' });
@@ -130,7 +142,7 @@ router.post('/delist-credit', authenticate, assetActionLimiter, async (req, res)
       blockNumber: result.blockNumber,
     });
   } catch (e) {
-    console.error('[delist-credit][operator]', e.message);
+    req.log.error('[delist-credit][operator]', e.message);
 
     if (/seller mismatch/i.test(e.message)) {
       return res.status(403).json({ error: 'This listing does not belong to your wallet.' });
@@ -202,7 +214,7 @@ router.post('/retire-credit-ledger', authenticate, requireKYC, assetActionLimite
         custodyModel: 'pooled',
       });
     } catch (certErr) {
-      console.error('[retire-credit-ledger] certificate issuance failed (retirement unaffected):', certErr.message);
+      req.log.error('[retire-credit-ledger] certificate issuance failed (retirement unaffected):', certErr.message);
     }
 
     return res.json({
@@ -212,7 +224,7 @@ router.post('/retire-credit-ledger', authenticate, requireKYC, assetActionLimite
       certId,
     });
   } catch (e) {
-    console.error('[retire-credit-ledger]', e.message);
+    req.log.error('[retire-credit-ledger]', e.message);
     return res.status(500).json({ error: 'Retirement failed. Please try again.' });
   }
 });
@@ -268,7 +280,7 @@ router.post('/list-credit-ledger', authenticate, requireKYC, assetActionLimiter,
 
     return res.json({ message: 'Credit listed successfully', listingId: rows[0].id });
   } catch (e) {
-    console.error('[list-credit-ledger]', e.message);
+    req.log.error('[list-credit-ledger]', e.message);
     return res.status(500).json({ error: 'Listing failed. Please try again.' });
   }
 });
@@ -296,7 +308,7 @@ router.post('/delist-credit-ledger', authenticate, assetActionLimiter, async (re
     await auditLog(req.user.id, 'CREDIT_DELISTED_LEDGER', req.user.id, `listingId=${listingId}`);
     return res.json({ message: 'Listing cancelled successfully' });
   } catch (e) {
-    console.error('[delist-credit-ledger]', e.message);
+    req.log.error('[delist-credit-ledger]', e.message);
     return res.status(500).json({ error: 'Delisting failed. Please try again.' });
   }
 });
@@ -426,7 +438,7 @@ router.post('/ledger-checkout-order', authenticate, requireKYC, assetActionLimit
       totalFeeINR: fees.totalFeeINR, gstINR: fees.gstINR,
     });
   } catch (e) {
-    console.error('[ledger-checkout-order]', e.message);
+    req.log.error('[ledger-checkout-order]', e.message);
     return res.status(500).json({ error: e.message || 'Failed to create order' });
   }
 });
@@ -509,7 +521,7 @@ router.post('/ledger-checkout-verify', authenticate, requireKYC, assetActionLimi
         `UPDATE trades SET chain_status = 'confirmed', chain_tx_hash = $1, chain_block = $2 WHERE id = $3`,
         [result.buyerResult.txHash, result.buyerResult.blockNumber, tradeId]
       );
-      console.log(`[ledger-checkout-verify] Trade ${tradeId} settled — seller TX: ${result.sellerResult.txHash}, buyer TX: ${result.buyerResult.txHash}`);
+      req.log.info(`[ledger-checkout-verify] Trade ${tradeId} settled — seller TX: ${result.sellerResult.txHash}, buyer TX: ${result.buyerResult.txHash}`);
 
       // [CERT-OWNERSHIP] Issue Certificate of Ownership for the buyer —
       // "upon transfer of credits" certificate generation. Uses the buyer's
@@ -526,18 +538,18 @@ router.post('/ledger-checkout-verify', authenticate, requireKYC, assetActionLimi
           custodyModel: 'pooled',
         });
       } catch (certErr) {
-        console.error('[ledger-checkout-verify] certificate issuance failed (trade unaffected):', certErr.message);
+        req.log.error('[ledger-checkout-verify] certificate issuance failed (trade unaffected):', certErr.message);
       }
     } catch (chainErr) {
       await query(`UPDATE trades SET chain_status = 'failed' WHERE id = $1`, [tradeId]).catch(() => {});
       await auditLog(req.user.id, 'LEDGER_TRADE_ONCHAIN_SETTLEMENT_FAILED', req.user.id,
         `Trade ${tradeId} — payment captured but ledger settlement failed: ${chainErr.message}`);
-      console.error(`[ledger-checkout-verify] ⚠️ Settlement FAILED for trade ${tradeId} — payment already captured:`, chainErr.message);
+      req.log.error(`[ledger-checkout-verify] ⚠️ Settlement FAILED for trade ${tradeId} — payment already captured:`, chainErr.message);
     }
 
     return res.json({ message: 'Purchase completed', tradeId, ownershipCertId });
   } catch (e) {
-    console.error('[ledger-checkout-verify]', e.message);
+    req.log.error('[ledger-checkout-verify]', e.message);
     return res.status(500).json({ error: 'Purchase verification failed. Please contact support.' });
   }
 });
@@ -599,7 +611,7 @@ router.get('/ledger-certificate/:entryId', authenticate, async (req, res) => {
       verifyUrl: entry.tx_hash ? `https://sepolia.etherscan.io/tx/${entry.tx_hash}` : null,
     });
   } catch (e) {
-    console.error('[ledger-certificate]', e.message);
+    req.log.error('[ledger-certificate]', e.message);
     return res.status(500).json({ error: 'Failed to load certificate.' });
   }
 });
@@ -659,7 +671,7 @@ router.get('/my-ledger-credits', authenticate, async (req, res) => {
 
     return res.json({ credits });
   } catch (e) {
-    console.error('[my-ledger-credits]', e.message);
+    req.log.error('[my-ledger-credits]', e.message);
     return res.status(500).json({ error: 'Failed to load ledger credits.' });
   }
 });
