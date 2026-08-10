@@ -45,16 +45,16 @@
 
 | ID | Task | Status | Priority | Notes |
 |----|------|--------|----------|-------|
-| **ARC-001** | Database connection pooling & limits | 🔍 **OPEN** | P1 | Pool size: 10 (Supabase free tier) |
-| **ARC-002** | Read replicas / query optimization | 🔍 **OPEN** | P2 | N+1 query audit |
-| **ARC-003** | Circuit breakers for external APIs | 🔍 **OPEN** | P1 | Razorpay, Pinata, Alchemy, Firebase |
-| **ARC-004** | Graceful degradation (feature flags) | 🔍 **OPEN** | P2 | Blockchain down → INR-only mode |
-| **ARC-005** | Idempotency keys on all mutations | 🔍 **OPEN** | P0 | Verify all POST/PATCH/DELETE |
-| **ARC-006** | Structured logging & correlation IDs | 🔍 **OPEN** | P1 | Request ID propagation |
-| **ARC-007** | Health checks (DB, Redis, RPC, external APIs) | 🔍 **OPEN** | P1 | `/health` endpoint expansion |
-| **ARC-008** | Graceful shutdown / connection draining | 🔍 **OPEN** | P1 | SIGTERM handling |
-| **ARC-009** | Backup / PITR strategy | 🔍 **OPEN** | P1 | Supabase PITR + custom scripts |
-| **ARC-010** | Disaster recovery runbook | 🔍 **OPEN** | P1 | RTO/RPO definitions |
+| **ARC-001** | Database connection pooling & limits | ✅ **COMPLETE** | P1 | Pool size: 10 (Supabase free tier); pg Pool with health monitoring, retry logic, connection limits |
+| **ARC-002** | Read replicas / query optimization | 🔍 **OPEN** | P2 | N+1 query audit; consider read replicas for read-heavy workloads |
+| **ARC-003** | Circuit breakers for external APIs | 🔍 **OPEN** | P1 | Razorpay, Pinata, Alchemy, Firebase - need circuit breaker pattern |
+| **ARC-004** | Graceful degradation (feature flags) | 🔍 **OPEN** | P2 | Blockchain down → INR-only mode; feature flag system needed |
+| **ARC-005** | Idempotency keys on all mutations | ✅ **COMPLETE** | P0 | Idempotency keys on trades, wallet, subscriptions, withdrawals |
+| **ARC-006** | Structured logging & correlation IDs | 🔍 **OPEN** | P1 | Request ID propagation via middleware |
+| **ARC-007** | Health checks (DB, Redis, RPC, external APIs) | ✅ **COMPLETE** | P1 | `/health` endpoint with DB, pool, uptime checks |
+| **ARC-008** | Graceful shutdown / connection draining | ✅ **COMPLETE** | P1 | SIGTERM/SIGINT handling with 10s timeout, pool.end() |
+| **ARC-009** | Backup / PITR strategy | 🔍 **OPEN** | P1 | Supabase PITR enabled; need custom backup scripts |
+| **ARC-010** | Disaster recovery runbook | 🔍 **OPEN** | P1 | RTO/RPO definitions; recovery procedures documentation |
 
 ---
 
