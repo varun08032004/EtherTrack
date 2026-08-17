@@ -125,44 +125,6 @@ const queryFilterChunked = async (contract, filter, fromBlock, toBlock, abortSig
   return allEvents;
 };
 
-// ── Init ──────────────────────────────────────────────────────────
-const init = () => {
-  try {
-    _stopped    = false;
-    provider    = new ethers.JsonRpcProvider(process.env.ALCHEMY_RPC);
-    marketplace = new ethers.Contract(process.env.MARKETPLACE_ADDRESS,         MARKETPLACE_ABI, provider);
-    token       = new ethers.Contract(process.env.CARBON_CREDIT_TOKEN_ADDRESS, TOKEN_ABI,       provider);
-
-    provider.on('error', (e) => {
-      if (
-        e?.error?.message === 'filter not found' ||
-        e?.shortMessage?.includes('filter not found') ||
-        e?.code === 'UNKNOWN_ERROR'
-      ) return;
-      logger.error('Provider error:', e.message);
-    });
-
-    // [B2] Start polling immediately — don't wait for sync
-    provider.getBlockNumber().then(async (currentBlock) => {
-      lastPolledBlock = currentBlock;
-      startPolling();
-      logger.info('✅ Blockchain polling started (block:', currentBlock, ')');
-
-      // [B2] Sync runs in background — won't block or kill server
-      runBackgroundSync(currentBlock).catch(e =>
-        logger.warn('[blockchain] Background sync error:', e.message)
-      );
-    }).catch(async (e) => {
-      logger.error('Blockchain init failed to get block number:', e.message);
-      lastPolledBlock = 0;
-      startPolling();
-    });
-
-  } catch (e) {
-    logger.error('Blockchain listener init failed:', e.message);
-  }
-};
-
 // ── [B2] Background sync — runs after polling starts ─────────────
 const runBackgroundSync = async (currentBlock) => {
   // [B1] Hard timeout — abort sync if it takes too long
@@ -203,7 +165,7 @@ const stop = () => {
 };
 
 const pollEvents = async () => {
-  const currentBlock = await provider.getBlockNumber();
+  const currentBlock = await rpcBreaker.execute(() => provider.getBlockNumber());
 
   if (lastPolledBlock === null) lastPolledBlock = currentBlock - 1;
   if (currentBlock <= lastPolledBlock) return;
@@ -549,4 +511,116 @@ const handleCreditRetired = async (tokenId, retiredBy, amount, projectName, ev) 
   }
 };
 
-module.exports = { init, stop }; // [B4] export stop() for graceful shutdown
+// ── Init ──────────────────────────────────────────────────────────
+const init = () => {
+  try {
+    _stopped    = false;
+    provider    = new ethers.JsonRpcProvider(process.env.ALCHEMY_RPC);
+    marketplace = new ethers.Contract(process.env.MARKETPLACE_ADDRESS,         MARKETPLACE_ABI, provider);
+    token       = new ethers.Contract(process.env.CARBON_CREDIT_TOKEN_ADDRESS, TOKEN_ABI,       provider);
+
+    provider.on('error', (e) => {
+      if (
+        e?.error?.message === 'filter not found' ||
+        e?.shortMessage?.includes('filter not found') ||
+        e?.code === 'UNKNOWN_ERROR'
+      ) return;
+      logger.error('Provider error:', e.message);
+    });
+
+    // [B2] Start polling immediately — don't wait for sync
+    // [PERF-004] Try WebSocket subscription first, fallback to polling
+    if (process.env.USE_WS_SUBSCRIPTION === 'true') {
+      initWebSocketSubscriptions();
+      logger.info('✅ Blockchain WebSocket subscriptions initialized');
+    } else {
+      rpcBreaker.execute(() => provider.getBlockNumber()).then(async (currentBlock) => {
+        lastPolledBlock = currentBlock;
+        startPolling();
+        logger.info('✅ Blockchain polling started (block:', currentBlock, ')');
+
+        // [B2] Sync runs in background — won't block or kill server
+        runBackgroundSync(currentBlock).catch(e =>
+          logger.warn('[blockchain] Background sync error:', e.message)
+        );
+      }).catch(async (e) => {
+        logger.error('Blockchain init failed to get block number:', e.message);
+        lastPolledBlock = 0;
+        startPolling();
+      });
+    }
+
+  } catch (e) {
+    logger.error('Blockchain listener init failed:', e.message);
+  }
+};
+
+// [PERF-004] WebSocket subscription for real-time blockchain events
+const initWebSocketSubscriptions = () => {
+  try {
+    // Create WebSocket provider for subscriptions
+    const wsProvider = new ethers.WebSocketProvider(process.env.ALCHEMY_WS_RPC || process.env.ALCHEMY_RPC.replace('https://', 'wss://'));
+    
+    const wsMarketplace = new ethers.Contract(process.env.MARKETPLACE_ADDRESS, MARKETPLACE_ABI, wsProvider);
+    const wsToken = new ethers.Contract(process.env.CARBON_CREDIT_TOKEN_ADDRESS, TOKEN_ABI, wsProvider);
+
+    // CreditMinted events
+    wsToken.on('CreditMinted', async (tokenId, to, amount, projectName, standard, serialNumber, event) => {
+      logger.info('[WS] CreditMinted:', { tokenId: tokenId.toString(), to, amount: amount.toString() });
+      await handleCreditMinted(tokenId, to, amount, projectName, standard, serialNumber, event);
+    });
+
+    // CreditListed events
+    wsMarketplace.on('CreditListed', async (listingId, seller, tokenId, amount, pricePerUnit, pricePerUnitINR, event) => {
+      logger.info('[WS] CreditListed:', { listingId: listingId.toString(), seller, amount: amount.toString() });
+      await handleCreditListed(listingId, seller, tokenId, amount, pricePerUnit, pricePerUnitINR, event);
+    });
+
+    // CreditTraded events
+    wsMarketplace.on('CreditTraded', async (tradeId, listingId, buyOrderId, buyer, seller, tokenId, amount, pricePerUnit, pricePerUnitINR, totalPrice, buyerFee, sellerFee, totalFee, isAMM, event) => {
+      logger.info('[WS] CreditTraded:', { tradeId: tradeId.toString(), tokenId: tokenId.toString(), amount: amount.toString() });
+      await handleCreditTraded(tradeId, listingId, buyOrderId, buyer, seller, tokenId, amount, pricePerUnit, pricePerUnitINR, totalPrice, buyerFee, sellerFee, totalFee, isAMM, event);
+    });
+
+    // ListingCancelled events
+    wsMarketplace.on('ListingCancelled', async (listingId, seller, event) => {
+      logger.info('[WS] ListingCancelled:', { listingId: listingId.toString(), seller });
+      await handleListingCancelled(listingId, seller, event);
+    });
+
+    // CreditRetired events
+    wsToken.on('CreditRetired', async (tokenId, retiredBy, amount, projectName, event) => {
+      logger.info('[WS] CreditRetired:', { tokenId: tokenId.toString(), retiredBy, amount: amount.toString() });
+      await handleCreditRetired(tokenId, retiredBy, amount, projectName, event);
+    });
+
+    // Handle reconnection
+    wsProvider.on('error', (e) => {
+      logger.error('WebSocket provider error:', e.message);
+    });
+
+    wsProvider._websocket.on('close', () => {
+      logger.warn('WebSocket connection closed, attempting reconnect in 5s...');
+      setTimeout(() => {
+        if (!_stopped) initWebSocketSubscriptions();
+      }, 5000);
+    });
+
+    logger.info('✅ WebSocket subscriptions initialized for real-time blockchain events');
+  } catch (e) {
+    logger.error('Failed to initialize WebSocket subscriptions, falling back to polling:', e.message);
+    // Fallback to polling
+    rpcBreaker.execute(() => provider.getBlockNumber()).then(async (currentBlock) => {
+      lastPolledBlock = currentBlock;
+      startPolling();
+      logger.info('✅ Blockchain polling started (fallback) block:', currentBlock);
+      runBackgroundSync(currentBlock).catch(e => logger.warn('[blockchain] Background sync error:', e.message));
+    }).catch(async (e) => {
+      logger.error('Blockchain init failed to get block number:', e.message);
+      lastPolledBlock = 0;
+      startPolling();
+    });
+  }
+};
+
+module.exports = { init, stop, initWebSocketSubscriptions }; // [B4] export stop() for graceful shutdown

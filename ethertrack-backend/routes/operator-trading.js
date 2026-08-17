@@ -52,6 +52,47 @@ const auditLog = async (adminId, action, targetUserId, details) => {
 };
 
 // ══════════════════════════════════════════════════════════════════
+// Helper: Resolve the actual on-chain token holder for a user + tokenId
+// Returns the address that holds the tokens on-chain (custody wallet or user wallet)
+const getTokenHolderAddress = async (userId, tokenId) => {
+  // 1. Check if user has credits in pooled custody (CreditLedger)
+  const { rows: ledger } = await query(
+    `SELECT balance FROM credit_ledger_balances WHERE user_id = $1 AND token_id = $2`,
+    [userId, tokenId]
+  );
+  if (ledger.length && ledger[0].balance > 0) {
+    // Walletless user — tokens held in pooled custody
+    const { custodyWalletAddress } = require('../services/minter').getContracts();
+    return custodyWalletAddress;
+  }
+
+  // 2. Check carbon_batches for self-custody (user's own wallet)
+  const { rows: batch } = await query(
+    `SELECT cb.custody_model, u.wallet_address
+     FROM carbon_batches cb
+     JOIN users u ON u.id = cb.developer_id
+     WHERE cb.developer_id = $1 AND cb.token_id = $2 AND cb.admin_status = 'approved'
+     LIMIT 1`,
+    [userId, tokenId]
+  );
+  if (batch.length) {
+    if (batch[0].custody_model === 'pooled') {
+      const { custodyWalletAddress } = require('../services/minter').getContracts();
+      return custodyWalletAddress;
+    }
+    if (batch[0].wallet_address) {
+      return batch[0].wallet_address; // self-custody user
+    }
+  }
+
+  // 3. Fallback to bound wallet (should not happen for valid listings)
+  const { rows: user } = await query(
+    'SELECT wallet_address FROM users WHERE id = $1', [userId]
+  );
+  return user[0]?.wallet_address;
+};
+
+// ═══════════════════════════════════════════════════════════════════
 // POST /api/portfolio/list-credit
 // Operator-executed listing — no MetaMask required. Seller must have
 // already granted setApprovalForAll(marketplace, true) ONCE (checked
@@ -68,13 +109,10 @@ router.post('/list-credit', authenticate, requireKYC, assetActionLimiter, async 
   }
 
   try {
-    const { rows } = await query(
-      'SELECT wallet_address FROM users WHERE id = $1',
-      [req.user.id]
-    );
-    const sellerWallet = rows[0]?.wallet_address;
+    // Resolve the actual on-chain token holder (custody wallet or user wallet)
+    const sellerWallet = await getTokenHolderAddress(req.user.id, tokenId);
     if (!sellerWallet) {
-      return res.status(400).json({ error: 'No wallet linked to your account. Bind a wallet first.' });
+      return res.status(400).json({ error: 'No custody wallet found for this credit.' });
     }
 
     const result = await listCreditForOnChain(
@@ -113,7 +151,7 @@ router.post('/list-credit', authenticate, requireKYC, assetActionLimiter, async 
 // POST /api/portfolio/delist-credit
 // Operator-executed delisting — zero approval needed, Marketplace
 // already holds the escrowed tokens itself.
-// ══════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 router.post('/delist-credit', authenticate, assetActionLimiter, async (req, res) => {
   const { listingIdOnchain } = req.body;
 
@@ -122,13 +160,20 @@ router.post('/delist-credit', authenticate, assetActionLimiter, async (req, res)
   }
 
   try {
-    const { rows } = await query(
-      'SELECT wallet_address FROM users WHERE id = $1',
-      [req.user.id]
+    // Resolve tokenId from the listing, then get the correct seller wallet
+    const { rows: batchRows } = await query(
+      `SELECT cb.token_id FROM carbon_batches cb
+       WHERE cb.listing_id_onchain = $1`,
+      [listingIdOnchain]
     );
-    const sellerWallet = rows[0]?.wallet_address;
+    if (!batchRows.length) {
+      return res.status(404).json({ error: 'Listing not found or not associated with a batch.' });
+    }
+    const tokenId = batchRows[0].token_id;
+
+    const sellerWallet = await getTokenHolderAddress(req.user.id, tokenId);
     if (!sellerWallet) {
-      return res.status(400).json({ error: 'No wallet linked to your account.' });
+      return res.status(400).json({ error: 'No custody wallet found for this credit.' });
     }
 
     const result = await cancelListingForOnChain(sellerWallet, listingIdOnchain);
@@ -267,7 +312,7 @@ router.post('/list-credit-ledger', authenticate, requireKYC, assetActionLimiter,
       });
     }
 
-    const { rows } = await query(
+const { rows } = await query(
       `INSERT INTO ledger_listings
          (seller_id, token_id, batch_id, amount, amount_remaining, price_per_credit_inr, expires_at)
        VALUES ($1,$2,$3,$4,$4,$5, NOW() + ($6 || ' days')::INTERVAL)
@@ -277,6 +322,9 @@ router.post('/list-credit-ledger', authenticate, requireKYC, assetActionLimiter,
 
     await auditLog(req.user.id, 'CREDIT_LISTED_LEDGER', req.user.id,
       `tokenId=${tokenId} amount=${amount} listingId=${rows[0].id}`);
+
+    // Invalidate portfolio cache for the seller
+    require('../services/cacheStrategy').invalidate(require('../services/cacheStrategy').KEYS.portfolioCredits(req.user.id));
 
     return res.json({ message: 'Credit listed successfully', listingId: rows[0].id });
   } catch (e) {
@@ -306,6 +354,10 @@ router.post('/delist-credit-ledger', authenticate, assetActionLimiter, async (re
     }
 
     await auditLog(req.user.id, 'CREDIT_DELISTED_LEDGER', req.user.id, `listingId=${listingId}`);
+
+    // Invalidate portfolio cache for the seller
+    require('../services/cacheStrategy').invalidate(require('../services/cacheStrategy').KEYS.portfolioCredits(req.user.id));
+
     return res.json({ message: 'Listing cancelled successfully' });
   } catch (e) {
     req.log.error('[delist-credit-ledger]', e.message);
@@ -546,6 +598,13 @@ router.post('/ledger-checkout-verify', authenticate, requireKYC, assetActionLimi
         `Trade ${tradeId} — payment captured but ledger settlement failed: ${chainErr.message}`);
       req.log.error(`[ledger-checkout-verify] ⚠️ Settlement FAILED for trade ${tradeId} — payment already captured:`, chainErr.message);
     }
+
+    // Invalidate portfolio cache for both buyer and seller
+    const cacheStrategy = require('../services/cacheStrategy');
+    cacheStrategy.invalidate(cacheStrategy.KEYS.portfolioCredits(req.user.id));
+    cacheStrategy.invalidate(cacheStrategy.KEYS.portfolioBought(req.user.id));
+    cacheStrategy.invalidate(cacheStrategy.KEYS.portfolioCredits(listing.seller_id));
+    cacheStrategy.invalidate(cacheStrategy.KEYS.portfolioBought(listing.seller_id));
 
     return res.json({ message: 'Purchase completed', tradeId, ownershipCertId });
   } catch (e) {

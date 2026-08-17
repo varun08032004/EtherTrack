@@ -1,0 +1,5 @@
+[
+  { "type": "event", "name": "ExecutionSuccess", "inputs": [ { "name": "txId", "type": "uint256", "indexed": true } ], "anonymous": false },
+  { "type": "event", "name": "ExecutionFailure", "inputs": [ { "name": "txId", "type": "uint256", "indexed": true } ], "anonymous": false },
+  { "type": "event", "name": "Confirmation", "inputs": [ { "name": "txId", "type": "uint256", "indexed": true }, { "name": "owner", "type": "address", "indexed": true } ], "anonymous": false }
+]

@@ -1,6 +1,6 @@
 // scripts/restore-from-backup.js — EtherTrack
 // Restores critical data from backup files (disaster recovery)
-// Usage: node restore-from-backup.js --file backup-wallet_transactions-2024-01-15T10-30-00.json.gz
+// Usage: node restore-from-backup.js --file backup-wallet_transactions-2024-01-15T10-30-00.json.gz.enc --table wallet_transactions
 //        node restore-from-backup.js --manifest backup-manifest-2024-01-15T10-30-00.json --tables wallet_transactions,trades
 'use strict';
 
@@ -9,15 +9,43 @@ const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
+const crypto = require('crypto');
 const logger = require('../services/logger');
 
 const BACKUP_DIR = process.env.BACKUP_DIR || path.join(__dirname, '../backups');
 
+// Encryption key from environment (base64 encoded 32-byte key)
+const ENCRYPTION_KEY_B64 = process.env.BACKUP_ENCRYPTION_KEY;
+const ENCRYPTION_KEY = ENCRYPTION_KEY_B64 ? Buffer.from(ENCRYPTION_KEY_B64, 'base64') : null;
+
+function decrypt(encryptedData) {
+  if (!ENCRYPTION_KEY) {
+    // Assume unencrypted if no key provided
+    return encryptedData;
+  }
+  // Format: IV (12 bytes) + AuthTag (16 bytes) + Encrypted Data
+  if (encryptedData.length < 28) {
+    throw new Error('Invalid encrypted data format');
+  }
+  const iv = encryptedData.subarray(0, 12);
+  const authTag = encryptedData.subarray(12, 28);
+  const encrypted = encryptedData.subarray(28);
+  
+  const decipher = crypto.createDecipheriv('aes-256-gcm', ENCRYPTION_KEY, iv);
+  decipher.setAuthTag(authTag);
+  const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+  return decrypted;
+}
+
 async function restoreTable(pool, tableName, filepath, options = {}) {
   logger.info({ table: tableName, file: path.basename(filepath) }, 'Starting restore');
 
-  // Decompress and parse
-  const decompressed = execSync(`gunzip -c "${filepath}"`, { maxBuffer: 100 * 1024 * 1024 });
+  // Read and decrypt
+  const encryptedData = fs.readFileSync(filepath);
+  const decrypted = decrypt(encryptedData);
+  
+  // Decompress
+  const decompressed = execSync(`gunzip -c`, { input: decrypted, maxBuffer: 100 * 1024 * 1024 });
   const backup = JSON.parse(decompressed.toString());
 
   if (backup.table !== tableName) {
@@ -30,8 +58,8 @@ async function restoreTable(pool, tableName, filepath, options = {}) {
     return { table: tableName, restored: 0 };
   }
 
-  // Get column names from first record
-  const columns = Object.keys(records[0]);
+  // Get column names from backup metadata or first record
+  const columns = backup.columns || Object.keys(records[0]);
   const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ');
   const columnNames = columns.join(', ');
 
@@ -148,6 +176,10 @@ Options:
   if (!process.env.DATABASE_URL) {
     logger.error('DATABASE_URL not configured');
     process.exit(1);
+  }
+
+  if (!process.env.BACKUP_ENCRYPTION_KEY) {
+    logger.warn('BACKUP_ENCRYPTION_KEY not set — assuming unencrypted backups');
   }
 
   const pool = new Pool({

@@ -147,6 +147,7 @@ const cookieParser = require('cookie-parser');
 const compression  = require('compression');
 const crypto       = require('crypto');
 const path         = require('path');
+const context      = require('@opentelemetry/api').context;
 
 const authRoutes        = require('./routes/auth');
 const walletRoutes      = require('./routes/wallet');
@@ -191,21 +192,30 @@ const alertRoutes       = require('./routes/alerts');
 const newsRoutes        = require('./routes/news');
 const supportRoutes     = require('./routes/support');
 const orgRoutes                     = require('./routes/org');
-const { checkSubscriptionExpiries } = require('./routes/org');
+const { DataRetentionService } = require('./services/dataRetention');
+const dataRetention = new DataRetentionService(require('./db/pool'));
 const { router: notificationRoutes }= require('./routes/notifications');
+const { checkSubscriptionExpiries } = require('./routes/org');
 const cctsCFORoutes   = require('./routes/compliance');
 const priceFeedRoutes = require('./routes/priceFeed');
 const supplierRoutes  = require('./routes/suppliers');
 const subscriptionRoutes = require('./routes/subscription');
 const { kycSubmitLimiter, adminActionLimiter } = require('./middleware/rateLimit');
 const reportRoutes = require('./routes/reports');
+const dsarRoutes = require('./routes/compliance/dsar');
 // [FIX-ERP-ROUTE v15] ERP Connect — all 6 ERPs + cron scheduler
 const { router: erpRoutes, initErpCron } = require('./routes/erp');
 
 const { startPolling: startPriceFeed, stopPolling: stopPriceFeed } =
   require('./services/priceFeedService');
 
+const { metricsMiddleware, collectDbMetrics } = require('./lib/metrics');
+const { initTracing } = require('./lib/tracing');
+
 let scheduler = null;
+
+// Initialize distributed tracing
+initTracing();
 try {
   scheduler = require('./services/scheduler');
 } catch (e) {
@@ -342,6 +352,62 @@ app.use((req, res, next) => {
   });
   
   next();
+});
+
+app.use(metricsMiddleware());
+
+// Trace context propagation middleware
+const { injectTraceContext, extractTraceContext } = require('./lib/tracing');
+const { trace, SpanKind } = require('@opentelemetry/api');
+const apiContext = require('@opentelemetry/api').context;
+app.use((req, res, next) => {
+  const tr = trace.getTracer('ethertrack-api');
+  // Don't pass extracted context as parent - let SDK use current context's span
+  const span = tr.startSpan(`${req.method} ${req.route?.path || req.path}`, {
+    kind: SpanKind.SERVER,
+    attributes: {
+      'http.method': req.method,
+      'http.url': req.url,
+      'http.target': req.route?.path || req.path,
+      'http.route': req.route?.path,
+      'http.flavor': req.protocol,
+      'http.scheme': req.protocol,
+      'net.host.name': req.hostname,
+      'net.peer.ip': req.ip,
+      'user_agent.original': req.get('user-agent') || '',
+    }
+  });
+
+  const ctxWithSpan = trace.setSpan(apiContext.active(), span);
+  
+  // Add trace headers to response for debugging
+  res.setHeader('X-Trace-ID', span.spanContext().traceId);
+  res.setHeader('X-Span-ID', span.spanContext().spanId);
+
+  // Propagate trace context to response headers
+  const carrier = injectTraceContext({});
+  Object.entries(carrier).forEach(([key, value]) => {
+    res.setHeader(key, value);
+  });
+
+  // Run middleware chain in trace context
+  apiContext.with(ctxWithSpan, () => {
+    const originalSend = res.send;
+    res.send = function(body) {
+      const currentSpan = require('@opentelemetry/api').trace.getSpan(apiContext.active());
+      if (currentSpan) {
+        currentSpan.setAttribute('http.status_code', res.statusCode);
+        if (res.statusCode >= 400) {
+          currentSpan.setStatus({ code: require('@opentelemetry/api').SpanStatusCode.ERROR, message: `HTTP ${res.statusCode}` });
+        } else {
+          currentSpan.setStatus({ code: require('@opentelemetry/api').SpanStatusCode.OK });
+        }
+        currentSpan.end();
+      }
+      return originalSend.call(this, body);
+    };
+    next();
+  });
 });
 
 app.use((req, res, next) => {
@@ -505,6 +571,18 @@ app.get('/health', async (req, res) => {
 });
 app.get('/api/health', (req, res) => res.redirect('/health'));
 
+// ── Metrics endpoint (Prometheus) ────────────────────────────────────────────────
+const { register } = require('./lib/metrics');
+app.get('/metrics', async (req, res) => {
+  try {
+    await collectDbMetrics();
+    res.set('Content-Type', register.contentType);
+    res.send(await register.metrics());
+  } catch (e) {
+    res.status(500).send(e.message);
+  }
+});
+
 // ── Feature flags API (admin) ──────────────────────────────────────────────────
 const { authenticate, requireRole } = require('./middleware/auth');
 app.get('/api/admin/feature-flags', authenticate, requireRole('admin'), (req, res) => {
@@ -588,6 +666,7 @@ app.use('/api/admin',         adminRoutes);
 app.use('/api/suppliers',     supplierRoutes);
 app.use('/api/subscription',  subscriptionRoutes);
 app.use('/api/erp',           erpRoutes); // [FIX-ERP-ROUTE v15]
+app.use('/api/compliance/dsar', dsarRoutes);
 
 if (Sentry?.Handlers) app.use(Sentry.Handlers.errorHandler());
 
@@ -628,22 +707,64 @@ process.on('uncaughtException', (err) => {
   setTimeout(() => process.exit(1), 1000);
 });
 
-const shutdown = (signal) => {
+let isShuttingDown = false;
+
+const shutdown = async (signal) => {
+  if (isShuttingDown) {
+    console.log(`[${signal}] Shutdown already in progress, ignoring duplicate signal`);
+    return;
+  }
+  isShuttingDown = true;
+
   console.log(`\n[${signal}] Graceful shutdown initiated…`);
+  
+  // 1. Stop accepting new connections
   stopPriceFeed();
   if (scheduler) scheduler.stop();
-  server.close(() => {
-    console.log('HTTP server closed');
-    const { pool } = require('./db/pool');
-    pool.end(() => {
-      console.log('DB pool closed');
+  
+  // 2. Stop background crons
+  try {
+    const nodeCron = require('node-cron');
+    nodeCron.getTasks().forEach(task => task.destroy());
+    console.log('Background crons stopped');
+  } catch (e) {
+    console.warn('Could not stop node-cron tasks:', e.message);
+  }
+
+  // 3. Stop accepting new HTTP connections
+  server.close(async () => {
+    console.log('HTTP server closed (no new connections accepted)');
+    
+    try {
+      // 4. Wait a bit for in-flight requests to complete
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // 5. Close DB pools
+      const { pool, readPool, shutdown: dbShutdown } = require('./db/pool');
+      await dbShutdown();
+      
+      // 6. Close socket.io
+      try {
+        const { close: closeSocket } = require('./services/socketServer');
+        await closeSocket();
+        console.log('Socket.io closed');
+      } catch (e) {
+        console.warn('Could not close socket.io:', e.message);
+      }
+      
+      console.log('Graceful shutdown completed');
       process.exit(0);
-    });
+    } catch (err) {
+      console.error('Error during shutdown:', err);
+      process.exit(1);
+    }
   });
+  
+  // Force exit after timeout
   setTimeout(() => {
     console.error('Graceful shutdown timed out — forcing exit');
     process.exit(1);
-  }, 10_000);
+  }, 15_000);
 };
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT',  () => shutdown('SIGINT'));
@@ -794,6 +915,23 @@ server.listen(PORT, () => {
     console.log('💾 Critical data backup cron scheduled (daily 2:30 AM IST)');
   } catch (e) {
     console.warn('⚠️  Backup cron not started:', e.message);
+  }
+
+  // ── Data Retention & GDPR/DPDP Compliance cron (daily at 3:00 AM IST = 21:30 UTC) ──────
+  try {
+    const nodeCron = require('node-cron');
+    nodeCron.schedule('30 21 * * *', async () => {
+      try {
+        console.log('[DataRetention] Starting scheduled deletions...');
+        const results = await dataRetention.processScheduledDeletions();
+        console.log('[DataRetention] Completed:', results);
+      } catch (e) {
+        console.error('[DataRetention] Cron error:', e.message);
+      }
+    }, { timezone: 'Asia/Kolkata' });
+    console.log('🗑️  Data retention cron scheduled (daily 3:00 AM IST)');
+  } catch (e) {
+    console.warn('⚠️  Data retention cron not started:', e.message);
   }
 
   try {

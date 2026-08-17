@@ -1,0 +1,50 @@
+[
+  {
+    "type": "event",
+    "name": "CreditMinted",
+    "inputs": [
+      { "name": "tokenId", "type": "uint256", "indexed": true },
+      { "name": "to", "type": "address", "indexed": true },
+      { "name": "amount", "type": "uint256" },
+      { "name": "projectName", "type": "string" },
+      { "name": "standard", "type": "uint8" },
+      { "name": "serialNumber", "type": "string" }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "CreditRetired",
+    "inputs": [
+      { "name": "tokenId", "type": "uint256", "indexed": true },
+      { "name": "retiredBy", "type": "address", "indexed": true },
+      { "name": "amount", "type": "uint256" },
+      { "name": "projectName", "type": "string" }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "TransferSingle",
+    "inputs": [
+      { "name": "operator", "type": "address", "indexed": true },
+      { "name": "from", "type": "address", "indexed": true },
+      { "name": "to", "type": "address", "indexed": true },
+      { "name": "id", "type": "uint256", "indexed": true },
+      { "name": "value", "type": "uint256" }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "TransferBatch",
+    "inputs": [
+      { "name": "operator", "type": "address", "indexed": true },
+      { "name": "from", "type": "address", "indexed": true },
+      { "name": "to", "type": "address", "indexed": true },
+      { "name": "ids", "type": "uint256[]" },
+      { "name": "values", "type": "uint256[]" }
+    ],
+    "anonymous": false
+  }
+]

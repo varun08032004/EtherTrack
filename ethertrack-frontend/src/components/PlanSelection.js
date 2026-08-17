@@ -36,8 +36,9 @@ const checkMobile = () => /android|iphone|ipad|ipod/i.test(navigator.userAgent);
 const Portal = ({ children }) => {
   const el = useRef(document.createElement('div'));
   useEffect(() => {
-    document.body.appendChild(el.current);
-    return () => document.body.removeChild(el.current);
+    const elRef = el.current;
+    document.body.appendChild(elRef);
+    return () => document.body.removeChild(elRef);
   }, []);
   return createPortal(children, el.current);
 };
@@ -94,9 +95,10 @@ export default function PlanSelection({ onPlanSelected, userName = 'there' }) {
   // ✅ Focus trap: inert applied to inner content, modal in Portal
   useEffect(() => {
     if (!showGstModal) return;
-    innerRef.current?.setAttribute('inert', '');
+    const innerEl = innerRef.current;
+    innerEl?.setAttribute('inert', '');
     setTimeout(() => modalRef.current?.querySelector('input')?.focus(), 60);
-    return () => innerRef.current?.removeAttribute('inert');
+    return () => innerEl?.removeAttribute('inert');
   }, [showGstModal]);
 
   // ── Price helpers ──────────────────────────────────────────────

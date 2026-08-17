@@ -1,0 +1,58 @@
+# EtherTrack - Base Kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ethertrack
+
+resources:
+  - namespaces.yaml
+  - configmap.yaml
+  - secrets.yaml.template
+  - rbac.yaml
+  - backend-deployment.yaml
+  - frontend-deployment.yaml
+  - ingress.yaml
+
+commonLabels:
+  app: ethertrack
+  managed-by: kustomize
+
+commonAnnotations:
+  managed-by: kustomize
+  version: "{{VERSION}}"
+
+images:
+  - name: ethertrack-backend
+    newName: ghcr.io/ethertrack/ethertrack-backend
+    newTag: "{{VERSION}}"
+  - name: ethertrack-frontend
+    newName: ghcr.io/ethertrack/ethertrack-frontend
+    newTag: "{{VERSION}}"
+
+configMapGenerator:
+  - name: ethertrack-config
+    behavior: merge
+    files:
+      - configmap.yaml
+
+secretGenerator:
+  - name: ethertrack-secrets
+    behavior: merge
+    envs:
+      - secrets.env
+
+replacements:
+  - source:
+      kind: Deployment
+      name: ethertrack-backend
+    targets:
+      - selector: app=ethertrack-backend
+        fieldPaths:
+          - spec.template.spec.containers[0].image
+  - source:
+      kind: Deployment
+      name: ethertrack-frontend
+    targets:
+      - selector: app=ethertrack-frontend
+        fieldPaths:
+          - spec.template.spec.containers[0].image

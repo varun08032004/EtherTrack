@@ -321,7 +321,7 @@ export default function CCTSCompliance({ profile }) {
         entity_gstin: sanitise(profile.company_gstin  || '', 15),
       }));
     }
-  }, [profile]);
+  }, [profile, form]);
 
   // ── GEI calculations ───────────────────────────────────────────────
   // Monthly array takes precedence if ANY month has data.

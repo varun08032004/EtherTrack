@@ -1,0 +1,133 @@
+# EtherTrack - Staging Overlay
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ethertrack-staging
+
+resources:
+  - ../../base
+
+commonLabels:
+  environment: staging
+
+images:
+  - name: ethertrack-backend
+    newTag: staging-latest
+  - name: ethertrack-frontend
+    newTag: staging-latest
+
+replicas:
+  - name: ethertrack-backend
+    count: 2
+  - name: ethertrack-frontend
+    count: 2
+
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ethertrack-backend
+        namespace: ethertrack-staging
+      spec:
+        template:
+          spec:
+            containers:
+              - name: backend
+                env:
+                  - name: NODE_ENV
+                    value: "staging"
+                  - name: FEATURE_FLAGS_DEBUG
+                    value: "true"
+                  - name: LOG_LEVEL
+                    value: "debug"
+                  - name: SENTRY_ENVIRONMENT
+                    value: "staging"
+    target:
+      kind: Deployment
+      name: ethertrack-backend
+      namespace: ethertrack-staging
+
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ethertrack-frontend
+        namespace: ethertrack-staging
+      spec:
+        template:
+          spec:
+            containers:
+              - name: frontend
+                env:
+                  - name: REACT_APP_ENVIRONMENT
+                    value: "staging"
+                  - name: REACT_APP_API_URL
+                    value: "https://staging-api.ethertrack.in"
+    target:
+      kind: Deployment
+      name: ethertrack-frontend
+      namespace: ethertrack-staging
+
+  - patch: |-
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: ethertrack-api
+        namespace: ethertrack-staging
+      spec:
+        rules:
+          - host: staging-api.ethertrack.in
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: ethertrack-backend
+                      port:
+                        number: 80
+      tls:
+        - hosts:
+            - staging-api.ethertrack.in
+          secretName: ethertrack-staging-api-tls
+    target:
+      kind: Ingress
+      name: ethertrack-api
+      namespace: ethertrack-staging
+
+  - patch: |-
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: ethertrack-frontend
+        namespace: ethertrack-staging
+      spec:
+        rules:
+          - host: staging.ethertrack.in
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: ethertrack-frontend
+                      port:
+                        number: 80
+        tls:
+          - hosts:
+              - staging.ethertrack.in
+            secretName: ethertrack-staging-frontend-tls
+    target:
+      kind: Ingress
+      name: ethertrack-frontend
+      namespace: ethertrack-staging
+
+configMapGenerator:
+  - name: ethertrack-config
+    behavior: merge
+    literals:
+      - NODE_ENV=staging
+      - LOG_LEVEL=debug
+      - SENTRY_ENVIRONMENT=staging
+      - FEATURE_FLAGS_DEBUG=true

@@ -1,0 +1,10 @@
+⚠️  Optional env var not set: ETH_INR_FALLBACK
+⚠️  Optional env var not set: GCI_API_KEY
+⚠️  Optional env var not set: GCI_ENTITY_CODE
+⚠️  Optional env var not set: IEX_API_KEY
+⚠️  Optional env var not set: IEX_CLIENT_ID
+⚠️  Optional env var not set: PXIL_API_KEY
+⚠️  Optional env var not set: PXIL_CLIENT_ID
+⚠️  Optional env var not set: BASE_URL
+⚠️  Optional env var not set: POLYGON_RPC_URL
+⚠️  Optional env var not set: POLYGON_NETWORK

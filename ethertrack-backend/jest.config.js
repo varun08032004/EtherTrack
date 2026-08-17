@@ -1,0 +1,25 @@
+module.exports = {
+  testEnvironment: 'node',
+  roots: ['<rootDir>'],
+  testMatch: ['**/__tests__/**/*.js', '**/?(*.)+(spec|test).js'],
+  collectCoverageFrom: [
+    'routes/**/*.js',
+    'services/**/*.js',
+    'lib/**/*.js',
+    'middleware/**/*.js',
+    '!**/node_modules/**',
+  ],
+  coverageDirectory: 'coverage',
+  coverageReporters: ['text', 'lcov', 'html'],
+  setupFilesAfterEnv: ['./jest.setup.js'],
+  testTimeout: 30000,
+  verbose: true,
+  moduleDirectories: ['node_modules', '<rootDir>'],
+  moduleNameMapper: {
+    '^../services/email$': '<rootDir>/__mocks__/email.js',
+    '^../services/ipfs$': '<rootDir>/__mocks__/ipfs.js',
+    '^../services/blockchain$': '<rootDir>/__mocks__/blockchain.js',
+    '^../db/pool$': '<rootDir>/__mocks__/pool.js',
+    '^../../db/pool$': '<rootDir>/__mocks__/pool.js',
+  },
+};

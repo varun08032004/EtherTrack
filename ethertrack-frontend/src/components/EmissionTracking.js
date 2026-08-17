@@ -551,7 +551,7 @@ export default function EmissionTracking() {
     } finally {
       if (!ctl.signal.aborted) setLoading(false);
     }
-  }, [year]);
+  }, [year, toast]);
 
   useEffect(() => { loadAll(); return () => { abortRef.current?.abort(); }; }, [loadAll]);
 

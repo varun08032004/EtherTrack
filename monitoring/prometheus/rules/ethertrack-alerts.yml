@@ -1,0 +1,456 @@
+groups:
+  - name: ethertrack-infrastructure
+    interval: 30s
+    rules:
+      - alert: BackendDown
+        expr: up{job="ethertrack-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "EtherTrack API backend is down"
+          description: "EtherTrack API has been down for more than 1 minute"
+          runbook_url: "https://docs.ethertrack.in/runbooks/backend-down"
+
+      - alert: HighCPUUsage
+        expr: (rate(ethertrack_process_cpu_seconds_total[5m]) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "High CPU usage on EtherTrack API"
+          description: "CPU usage is above 80% for 5 minutes"
+          runbook_url: "https://docs.ethertrack.in/runbooks/high-cpu"
+
+      - alert: HighMemoryUsage
+        expr: (ethertrack_process_resident_memory_bytes / 1024 / 1024) > 1024
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "High memory usage on EtherTrack API"
+          description: "Memory usage is above 1GB for 5 minutes"
+          runbook_url: "https://docs.ethertrack.in/runbooks/high-memory"
+
+      - alert: EventLoopLagHigh
+        expr: ethertrack_nodejs_eventloop_lag_seconds > 0.1
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Event loop lag is high"
+          description: "Event loop lag exceeds 100ms, indicating blocked event loop"
+          runbook_url: "https://docs.ethertrack.in/runbooks/event-loop-lag"
+
+      - alert: HighGCActivity
+        expr: rate(ethertrack_nodejs_gc_duration_seconds_sum[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "High garbage collection activity"
+          description: "GC is consuming more than 10% of CPU time"
+          runbook_url: "https://docs.ethertrack.in/runbooks/high-gc"
+
+  - name: ethertrack-database
+    interval: 30s
+    rules:
+      - alert: DatabaseUnavailable
+        expr: ethertrack_db_pool_total == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Database pool is empty"
+          description: "No database connections available"
+          runbook_url: "https://docs.ethertrack.in/runbooks/database-unavailable"
+
+      - alert: DatabaseConnectionPoolExhausted
+        expr: (ethertrack_db_pool_active / ethertrack_db_pool_total) > 0.9
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Database connection pool nearly exhausted"
+          description: "More than 90% of database connections are in use"
+          runbook_url: "https://docs.ethertrack.in/runbooks/db-pool-exhausted"
+
+      - alert: HighDBQueryLatency
+        expr: histogram_quantile(0.99, sum(rate(ethertrack_db_query_duration_seconds_bucket[5m])) by (le, operation)) > 1
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "High database query latency (P99)"
+          description: "P99 database query latency exceeds 1 second"
+          runbook_url: "https://docs.ethertrack.in/runbooks/high-db-latency"
+
+      - alert: HighDBErrorRate
+        expr: sum(rate(ethertrack_db_queries_total{result="error"}[5m])) / sum(rate(ethertrack_db_queries_total[5m])) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "High database error rate"
+          description: "More than 5% of database queries are failing"
+          runbook_url: "https://docs.ethertrack.in/runbooks/high-db-errors"
+
+  - name: ethertrack-application
+    interval: 30s
+    rules:
+      - alert: High5xxRate
+        expr: sum(rate(ethertrack_http_request_errors_total[5m])) / sum(rate(ethertrack_http_requests_total[5m])) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "High 5xx error rate"
+          description: "More than 5% of HTTP requests are returning 5xx errors"
+          runbook_url: "https://docs.ethertrack.in/runbooks/high-5xx-rate"
+
+      - alert: High4xxRate
+        expr: sum(rate(ethertrack_http_requests_total{status_code=~"4.."}[5m])) / sum(rate(ethertrack_http_requests_total[5m])) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "High 4xx error rate"
+          description: "More than 20% of HTTP requests are returning 4xx errors"
+          runbook_url: "https://docs.ethertrack.in/runbooks/high-4xx-rate"
+
+      - alert: HighRequestLatency
+        expr: histogram_quantile(0.99, sum(rate(ethertrack_http_request_duration_seconds_bucket[5m])) by (le, route)) > 2
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "High P99 request latency"
+          description: "P99 request latency exceeds 2 seconds"
+          runbook_url: "https://docs.ethertrack.in/runbooks/high-latency"
+
+      - alert: HighP99Latency
+        expr: histogram_quantile(0.99, sum(rate(ethertrack_http_request_duration_seconds_bucket[5m])) by (le, route)) > 5
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Critical P99 request latency"
+          description: "P99 request latency exceeds 5 seconds"
+          runbook_url: "https://docs.ethertrack.in/runbooks/critical-latency"
+
+      - alert: ActiveRequestsHigh
+        expr: sum(ethertrack_active_requests) > 500
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "High number of active requests"
+          description: "More than 500 concurrent requests being processed"
+          runbook_url: "https://docs.ethertrack.in/runbooks/high-active-requests"
+
+  - name: ethertrack-financial
+    interval: 30s
+    rules:
+      - alert: TradeSettlementFailure
+        expr: rate(ethertrack_trade_settlement_total{result="failed"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          team: finance
+        annotations:
+          summary: "Trade settlement failures detected"
+          description: "One or more trade settlements have failed in the last 5 minutes"
+          runbook_url: "https://docs.ethertrack.in/runbooks/trade-settlement-failure"
+
+      - alert: TradeSettlementFailureRate
+        expr: sum(rate(ethertrack_trade_settlement_total{result="failed"}[5m])) / sum(rate(ethertrack_trade_settlement_total[5m])) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          team: finance
+        annotations:
+          summary: "High trade settlement failure rate"
+          description: "More than 10% of trade settlements are failing"
+          runbook_url: "https://docs.ethertrack.in/runbooks/trade-settlement-failure-rate"
+
+      - alert: WalletTransactionFailure
+        expr: rate(ethertrack_wallet_transaction_total{result="failed"}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          team: finance
+        annotations:
+          summary: "High wallet transaction failure rate"
+          description: "Wallet transaction failures exceed 10%"
+          runbook_url: "https://docs.ethertrack.in/runbooks/wallet-transaction-failure"
+
+      - alert: ReconciliationMismatch
+        expr: rate(ethertrack_reconciliation_total{result="mismatch"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          team: finance
+        annotations:
+          summary: "Financial reconciliation mismatch detected"
+          description: "On-chain vs database balance reconciliation found mismatches"
+          runbook_url: "https://docs.ethertrack.in/runbooks/reconciliation-mismatch"
+
+      - alert: PaymentWebhookFailure
+        expr: rate(ethertrack_webhook_total{provider="razorpay",result="failed"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          team: finance
+        annotations:
+          summary: "Razorpay webhook failures"
+          description: "Razorpay payment webhook processing failed"
+          runbook_url: "https://docs.ethertrack.in/runbooks/payment-webhook-failure"
+
+      - alert: KYCFailure
+        expr: rate(ethertrack_kyc_total{result="failed"}[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          team: compliance
+        annotations:
+          summary: "High KYC failure rate"
+          description: "KYC verification failures exceed 10%"
+          runbook_url: "https://docs.ethertrack.in/runbooks/kyc-failure"
+
+  - name: ethertrack-blockchain
+    interval: 30s
+    rules:
+      - alert: RPCFailure
+        expr: rate(ethertrack_blockchain_rpc_total{result="failed"}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          team: blockchain
+        annotations:
+          summary: "Blockchain RPC failures"
+          description: "Blockchain RPC calls failing at high rate"
+          runbook_url: "https://docs.ethertrack.in/runbooks/rpc-failure"
+
+      - alert: HighRPCLatency
+        expr: histogram_quantile(0.99, sum(rate(ethertrack_blockchain_rpc_duration_seconds_bucket[5m])) by (le, method)) > 5
+        for: 5m
+        labels:
+          severity: warning
+          team: blockchain
+        annotations:
+          summary: "High blockchain RPC latency (P99)"
+          description: "P99 blockchain RPC latency exceeds 5 seconds"
+          runbook_url: "https://docs.ethertrack.in/runbooks/high-rpc-latency"
+
+      - alert: BlockchainCircuitBreakerOpen
+        expr: ethertrack_circuit_breaker_state{service="alchemy"} == 2
+        for: 1m
+        labels:
+          severity: critical
+          team: blockchain
+        annotations:
+          summary: "Blockchain circuit breaker is open"
+          description: "Alchemy RPC circuit breaker has been tripped"
+          runbook_url: "https://docs.ethertrack.in/runbooks/circuit-breaker-open"
+
+      - alert: BlockchainQueueBacklog
+        expr: ethertrack_blockchain_queue_depth > 100
+        for: 5m
+        labels:
+          severity: warning
+          team: blockchain
+        annotations:
+          summary: "Blockchain transaction queue backlog"
+          description: "More than 100 transactions queued for blockchain processing"
+          runbook_url: "https://docs.ethertrack.in/runbooks/blockchain-queue-backlog"
+
+      - alert: TransactionFailureRate
+        expr: rate(ethertrack_blockchain_rpc_total{method="eth_sendRawTransaction",result="failed"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          team: blockchain
+        annotations:
+          summary: "Blockchain transaction submission failures"
+          description: "Raw transaction submissions are failing"
+          runbook_url: "https://docs.ethertrack.in/runbooks/transaction-failure"
+
+  - name: ethertrack-operations
+    interval: 30s
+    rules:
+      - alert: BackupFailure
+        expr: rate(ethertrack_backup_total{result="failed"}[1h]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Backup job failed"
+          description: "Critical data backup job has failed"
+          runbook_url: "https://docs.ethertrack.in/runbooks/backup-failure"
+
+      - alert: JobFailure
+        expr: rate(ethertrack_job_total{result="failed"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Background job failure"
+          description: "One or more background jobs have failed"
+          runbook_url: "https://docs.ethertrack.in/runbooks/job-failure"
+
+      - alert: ERPIntegrationFailure
+        expr: rate(ethertrack_erp_sync_total{result="failed"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "ERP integration sync failure"
+          description: "ERP data synchronization has failed"
+          runbook_url: "https://docs.ethertrack.in/runbooks/erp-sync-failure"
+
+      - alert: HighJobDuration
+        expr: histogram_quantile(0.99, sum(rate(ethertrack_job_duration_seconds_bucket[5m])) by (le, job)) > 1800
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Background job running too long"
+          description: "P99 job duration exceeds 30 minutes"
+          runbook_url: "https://docs.ethertrack.in/runbooks/high-job-duration"
+
+  - name: ethertrack-security
+    interval: 30s
+    rules:
+      - alert: AuthenticationFailureSpike
+        expr: rate(ethertrack_auth_total{action="login",result="failed"}[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "Authentication failure spike"
+          description: "More than 10 failed login attempts per minute"
+          runbook_url: "https://docs.ethertrack.in/runbooks/auth-failure-spike"
+
+      - alert: RateLimitSpike
+        expr: rate(ethertrack_rate_limit_total[5m]) > 100
+        for: 2m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "Rate limit spike detected"
+          description: "More than 100 rate limit hits per minute"
+          runbook_url: "https://docs.ethertrack.in/runbooks/rate-limit-spike"
+
+      - alert: SuspiciousAdminActivity
+        expr: rate(ethertrack_admin_action_total{result="failed"}[5m]) > 5
+        for: 2m
+        labels:
+          severity: critical
+          team: security
+        annotations:
+          summary: "Suspicious admin activity"
+          description: "Multiple failed admin actions detected"
+          runbook_url: "https://docs.ethertrack.in/runbooks/suspicious-admin-activity"
+
+      - alert: WebhookVerificationFailureSpike
+        expr: rate(ethertrack_webhook_total{result="signature_failed"}[5m]) > 5
+        for: 2m
+        labels:
+          severity: critical
+          team: security
+        annotations:
+          summary: "Webhook signature verification failures"
+          description: "Multiple webhook signature verification failures"
+          runbook_url: "https://docs.ethertrack.in/runbooks/webhook-verification-failures"
+
+  - name: ethertrack-cache
+    interval: 30s
+    rules:
+      - alert: RedisUnavailable
+        expr: rate(ethertrack_redis_errors_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Redis errors spike"
+          description: "Redis error rate exceeds 10 errors per minute"
+          runbook_url: "https://docs.ethertrack.in/runbooks/redis-errors"
+
+      - alert: LowCacheHitRate
+        expr: sum(rate(ethertrack_redis_hits_total[5m])) / (sum(rate(ethertrack_redis_hits_total[5m])) + sum(rate(ethertrack_redis_misses_total[5m]))) < 0.5
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Low Redis cache hit rate"
+          description: "Cache hit rate below 50%"
+          runbook_url: "https://docs.ethertrack.in/runbooks/low-cache-hit-rate"
+
+  - name: ethertrack-external-services
+    interval: 60s
+    rules:
+      - alert: RazorpayAPIFailure
+        expr: rate(ethertrack_external_api_total{service="razorpay",result="failed"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+          team: finance
+        annotations:
+          summary: "Razorpay API failures"
+          description: "Razorpay API calls failing"
+          runbook_url: "https://docs.ethertrack.in/runbooks/razorpay-api-failure"
+
+      - alert: PinataAPIFailure
+        expr: rate(ethertrack_external_api_total{service="pinata",result="failed"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Pinata API failures"
+          description: "Pinata IPFS API calls failing"
+          runbook_url: "https://docs.ethertrack.in/runbooks/pinata-api-failure"
+
+      - alert: AlchemyRPCFailure
+        expr: rate(ethertrack_external_api_total{service="alchemy",result="failed"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+          team: blockchain
+        annotations:
+          summary: "Alchemy RPC failures"
+          description: "Alchemy blockchain RPC calls failing"
+          runbook_url: "https://docs.ethertrack.in/runbooks/alchemy-rpc-failure"
+
+      - alert: HighExternalAPILatency
+        expr: histogram_quantile(0.99, sum(rate(ethertrack_external_api_duration_seconds_bucket[5m])) by (le, service, operation)) > 10
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "High external API latency (P99)"
+          description: "P99 external API latency exceeds 10 seconds"
+          runbook_url: "https://docs.ethertrack.in/runbooks/high-external-api-latency"

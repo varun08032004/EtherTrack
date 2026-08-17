@@ -3,7 +3,7 @@
 // [FEAT-LEDGER-CHAIN]   auditAPI.getChain() / auditAPI.writeChain()
 // All v14 code retained unchanged.
 
-'use strict';
+
 
 const BASE            = process.env.REACT_APP_API_URL || '';
 const REQUEST_TIMEOUT = 60_000;

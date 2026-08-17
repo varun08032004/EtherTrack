@@ -1,0 +1,68 @@
+{
+  "dashboard": {
+    "title": "EtherTrack - Blockchain & RPC",
+    "uid": "ethertrack-blockchain",
+    "tags": ["ethertrack", "blockchain", "rpc", "web3"],
+    "timezone": "browser",
+    "refresh": "10s",
+    "panels": [
+      {
+        "title": "RPC Call Rate",
+        "type": "graph",
+        "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+        "targets": [
+          {"expr": "sum(rate(ethertrack_blockchain_rpc_total[5m])) by (method, result)", "legendFormat": "{{method}} - {{result}}"}
+        ]
+      },
+      {
+        "title": "P99 RPC Latency",
+        "type": "graph",
+        "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+        "targets": [
+          {"expr": "histogram_quantile(0.99, sum(rate(ethertrack_blockchain_rpc_duration_seconds_bucket[5m])) by (le, method))", "legendFormat": "{{method}}"}
+        ]
+      },
+      {
+        "title": "Circuit Breaker State",
+        "type": "stat",
+        "gridPos": {"x": 0, "y": 8, "w": 6, "h": 4},
+        "targets": [
+          {"expr": "ethertrack_circuit_breaker_state{service=\"alchemy\"}", "legendFormat": "Alchemy"}
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {"options": {"0": {"text": "CLOSED", "color": "green"}}, "type": "value"},
+              {"options": {"1": {"text": "HALF_OPEN", "color": "yellow"}}, "type": "value"},
+              {"options": {"2": {"text": "OPEN", "color": "red"}}, "type": "value"}
+            ]
+          }
+        }
+      },
+      {
+        "title": "Blockchain Queue Depth",
+        "type": "graph",
+        "gridPos": {"x": 6, "y": 8, "w": 12, "h": 8},
+        "targets": [
+          {"expr": "ethertrack_blockchain_queue_depth", "legendFormat": "Queue Depth"}
+        ]
+      },
+      {
+        "title": "Transaction Submission Failures",
+        "type": "graph",
+        "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+        "targets": [
+          {"expr": "rate(ethertrack_blockchain_rpc_total{method=\"eth_sendRawTransaction\",result=\"failed\"}[5m])", "legendFormat": "Failed Submissions"}
+        ]
+      },
+      {
+        "title": "RPC Error Rate by Method",
+        "type": "graph",
+        "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8},
+        "targets": [
+          {"expr": "sum(rate(ethertrack_blockchain_rpc_total{result=\"failed\"}[5m])) by (method)", "legendFormat": "{{method}}"}
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+[
+  { "type": "event", "name": "SafeRegistered", "inputs": [ { "name": "safeAddress", "type": "address", "indexed": true }, { "name": "label", "type": "string" }, { "name": "threshold", "type": "uint256" }, { "name": "owners", "type": "address[]" } ], "anonymous": false },
+  { "type": "event", "name": "SafeUpdated", "inputs": [ { "name": "safeAddress", "type": "address", "indexed": true }, { "name": "label", "type": "string" }, { "name": "active", "type": "bool" } ], "anonymous": false },
+  { "type": "event", "name": "TransactionQueued", "inputs": [ { "name": "txId", "type": "uint256", "indexed": true }, { "name": "safeAddress", "type": "address", "indexed": true }, { "name": "to", "type": "address" }, { "name": "value", "type": "uint256" } ], "anonymous": false },
+  { "type": "event", "name": "TransactionExecuted", "inputs": [ { "name": "txId", "type": "uint256", "indexed": true }, { "name": "executor", "type": "address", "indexed": true } ], "anonymous": false },
+  { "type": "event", "name": "TransactionConfirmed", "inputs": [ { "name": "txId", "type": "uint256", "indexed": true }, { "name": "confirmer", "type": "address", "indexed": true } ], "anonymous": false }
+]

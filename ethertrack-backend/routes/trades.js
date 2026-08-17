@@ -18,8 +18,10 @@ const { authenticate, requireKYC }          = require('../middleware/auth');
 const { createNotification }                = require('./notifications');
 const chainLogger                           = require('../services/chainLogger');
 const { generateTradeInvoice, generateTradeBill, serveTradeInvoice, getGSTType } = require('../services/invoice');
+const { pdfQueue } = require('../services/pdfQueue');
 const { sendCreditsSoldEmail } = require('../services/email');
 const { issueOwnershipCertificate } = require('../services/certificates');
+const { generateIdempotencyLockKey, acquireAdvisoryLockInt } = require('../lib/advisoryLock');
 
 const logger = require('../services/logger');
 
@@ -112,9 +114,10 @@ function calcFees(subtotalINR) {
   return { buyerFeeINR, sellerFeeINR, totalFeeINR, gstINR, buyerPaysINR, sellerGetsINR, platformNetINR };
 }
 
-async function checkIdempotency(userId, key) {
+async function checkIdempotency(userId, key, client) {
   if (!key) return null;
-  const { rows } = await query(
+  const target = client || query;
+  const { rows } = await target(
     `SELECT id, buyer_pays_inr FROM trades
      WHERE buyer_id = $1 AND idempotency_key = $2 AND status = 'completed' LIMIT 1`,
     [userId, key]
@@ -128,7 +131,7 @@ async function fireTradeInvoice({ tradeId, buyerId, projectName, standard, regis
       `SELECT full_name, email FROM users WHERE id = $1`, [buyerId]
     );
     const user = userRows[0] || {};
-    await generateTradeInvoice({
+    await pdfQueue.generateTradeInvoice({
       tradeId,
       buyerName:   user.full_name || '',
       buyerEmail:  user.email     || '',
@@ -153,7 +156,7 @@ async function fireTradeBill({ tradeId, buyerId, projectName, standard, registry
       `SELECT full_name, email FROM users WHERE id = $1`, [buyerId]
     );
     const user = userRows[0] || {};
-    await generateTradeBill({
+    await pdfQueue.generateTradeBill({
       tradeId,
       buyerName:   user.full_name || '',
       buyerEmail:  user.email     || '',
@@ -210,16 +213,15 @@ router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) 
       });
   }
 
-  const existing = await checkIdempotency(req.user.id, idempotencyKey);
-  if (existing) {
-    const { rows: b } = await query('SELECT inr_balance FROM users WHERE id = $1', [req.user.id]);
-    return res.json({ success: true, tradeId: existing.id, idempotent: true,
-      buyerBalance: b[0]?.inr_balance?.toString() });
-  }
-
   if (paymentMode === 'eth' && txHash) {
     const { rows: dup } = await query(`SELECT id FROM trades WHERE tx_hash = $1 LIMIT 1`, [txHash]);
     if (dup.length) return res.json({ success: true, tradeId: dup[0].id, idempotent: true });
+  }
+
+  // Use advisory lock on idempotency key to prevent concurrent duplicate trades
+  if (idempotencyKey) {
+    const idemLockKey = generateIdempotencyLockKey(req.user.id, idempotencyKey);
+    await query(`SELECT pg_advisory_xact_lock($1)`, [idemLockKey]);
   }
 
   // Use advisory lock to prevent concurrent trades on the same batch
@@ -344,6 +346,20 @@ const batchLockKey = parseInt(batchId.replace(/-/g, ''), 16) % 2147483647;
             [COMPANY_USER_ID, fees.totalFeeINR,
              `Platform fee: trade ${batchId} qty ${qty}`]
           );
+        }
+      }
+
+      // Check idempotency inside transaction (advisory lock already held)
+      if (idempotencyKey) {
+        const existing = await checkIdempotency(req.user.id, idempotencyKey, client);
+        if (existing) {
+          // Return existing trade info instead of throwing
+          throw Object.assign(new Error('Idempotent replay'), {
+            statusCode: 200,
+            idempotent: true,
+            tradeId: existing.id,
+            buyerBalance: req.user.inr_balance
+          });
         }
       }
 
@@ -530,6 +546,12 @@ const batchLockKey = parseInt(batchId.replace(/-/g, ''), 16) % 2147483647;
     });
 
   } catch (e) {
+    // Handle idempotent replay
+    if (e.idempotent) {
+      const { rows: b } = await query('SELECT inr_balance FROM users WHERE id = $1', [req.user.id]);
+      return res.json({ success: true, tradeId: e.tradeId, idempotent: true,
+        buyerBalance: b[0]?.inr_balance?.toString() });
+    }
     req.log.error('[trades/record]', e.message);
     if (e.statusCode !== 400 && txHash) {
       query(
@@ -854,6 +876,13 @@ req.log.info(`[checkout-verify] Trade ${tradeId} logged on-chain (ledger, no wal
         walletUrl: `${process.env.FRONTEND_URL}/wallet`,
       }).catch(e => req.log.warn('[trades/checkout-verify] seller email failed:', e.message));
     }
+
+    // Invalidate portfolio cache for both buyer and seller
+    const cacheStrategy = require('../services/cacheStrategy');
+    cacheStrategy.invalidate(cacheStrategy.KEYS.portfolioCredits(req.user.id));
+    cacheStrategy.invalidate(cacheStrategy.KEYS.portfolioBought(req.user.id));
+    cacheStrategy.invalidate(cacheStrategy.KEYS.portfolioCredits(sellerId));
+    cacheStrategy.invalidate(cacheStrategy.KEYS.portfolioBought(sellerId));
 
     return res.json({
       success: true, tradeId, quantity: qty,

@@ -1,0 +1,109 @@
+config:
+  target: "http://localhost:5000"
+  phases:
+    - duration: 60
+      arrivalRate: 10
+      name: "Warm up"
+    - duration: 120
+      arrivalRate: 50
+      name: "Sustained load"
+    - duration: 60
+      arrivalRate: 100
+      name: "Peak load"
+    - duration: 60
+      arrivalRate: 200
+      name: "Stress test"
+  defaults:
+    headers:
+      Content-Type: "application/json"
+      Accept: "application/json"
+  processor: "./load-test-processor.js"
+
+scenarios:
+  - name: "Authentication"
+    weight: 15
+    flow:
+      - post:
+          url: "/api/auth/login"
+          json:
+            email: "load-test-{{ $randomString(8) }}@example.com"
+            password: "LoadTest123!"
+          capture:
+            - json: "$.token"
+              as: "authToken"
+
+  - name: "Portfolio Read"
+    weight: 25
+    flow:
+      - get:
+          url: "/api/portfolio"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+          capture:
+            - json: "$.credits"
+              as: "credits"
+
+  - name: "Marketplace Listings"
+    weight: 20
+    flow:
+      - get:
+          url: "/api/marketplace/listings"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+          capture:
+            - json: "$.listings[0].listing_id"
+              as: "listingId"
+
+  - name: "Trade Creation"
+    weight: 15
+    flow:
+      - post:
+          url: "/api/trades/buy"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+            Content-Type: "application/json"
+          json:
+            listing_id: "{{ listingId }}"
+            quantity: 10
+            price_per_credit: 1500
+            payment_mode: "inr"
+            idempotency_key: "load-test-{{ $randomString(16) }}"
+
+  - name: "Wallet Operations"
+    weight: 10
+    flow:
+      - get:
+          url: "/api/wallet/balance"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+
+      - post:
+          url: "/api/wallet/deposit"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+            Content-Type: "application/json"
+          json:
+            amount: 1000
+            payment_method: "wallet"
+
+  - name: "Emission Logging"
+    weight: 10
+    flow:
+      - post:
+          url: "/api/emissions/log"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+            Content-Type: "application/json"
+          json:
+            activity_type: "electricity"
+            quantity: 100
+            unit: "kwh"
+            emission_factor: 0.82
+
+  - name: "Subscription"
+    weight: 5
+    flow:
+      - get:
+          url: "/api/subscription/plans"
+          headers:
+            Authorization: "Bearer {{ authToken }}"

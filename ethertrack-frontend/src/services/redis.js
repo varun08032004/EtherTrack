@@ -1,7 +1,7 @@
 // services/redis.js — EtherTrack · Redis client with fallback - 08/06/2026
 // Uses ioredis with auto-reconnect and a graceful no-op fallback
 // so the app degrades (no caching) rather than crashes if Redis is down.
-'use strict';
+
 
 const Redis  = require('ioredis');
 const logger = require('./logger');

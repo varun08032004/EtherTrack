@@ -1,5 +1,6 @@
 require('@nomicfoundation/hardhat-toolbox');
 require('@nomicfoundation/hardhat-verify');
+require('@typechain/hardhat');
 require('dotenv').config();
 
 const PRIVATE_KEY        = process.env.PRIVATE_KEY           || '0x' + '0'.repeat(64);
@@ -90,5 +91,10 @@ module.exports = {
     tests:     './test',
     cache:     './cache',
     artifacts: './artifacts',
+  },
+
+  typechain: {
+    outDir: './typechain-types',
+    target: 'ethers-v6',
   },
 };

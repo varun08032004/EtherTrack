@@ -26,7 +26,7 @@ const express  = require('express');
 const crypto   = require('crypto');
 const { PDFDocument }    = require('pdf-lib');
 const { authenticate }   = require('../middleware/auth');
-const { generateReport } = require('../services/pdfGenerator');
+const { pdfQueue } = require('../services/pdfQueue');
 const { safeQuery }      = require('../db/pool');
 const { assembleBrsrPayload } = require('../services/brsrPdfAdapter');
 
@@ -299,7 +299,9 @@ router.post('/generate', authenticate, async (req, res) => {
     }
 
     console.log(`[reports] generating ${reportType} for ${reportData.orgName} FY ${year}`);
-    const rawPdf = await generateReport(reportType, reportData);
+    
+    // Use PDF queue for async generation
+    const rawPdf = await pdfQueue.generateReport(reportType, reportData);
 
     const finalPdf = await injectMetadata(rawPdf, {
       type:      reportType,

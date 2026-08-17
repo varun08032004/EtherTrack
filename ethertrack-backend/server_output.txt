@@ -1,0 +1,140 @@
+[totpEncryption] ✅ TOTP encryption key validated
+✅ Sentry error monitoring active
+[DB] Read replica not configured (set DATABASE_READ_URL to enable)
+[auth] ✅ Firebase Admin initialised
+[invoice] logo resolved at: C:\Users\ASUS\Desktop\EtherTrack\ethertrack-backend\Images\et_logo_bg.png
+[pdfGenerator] ✅ Logo loaded
+[Audit] Chain ready — sepolia | relayer: 0xE53a1AAdf474f7f7870f2df6B03Bb3074aD410BD
+[AuditorVerification] Chain ready
+✅ CSRF protection active (stable double-submit cookie)
+
+🌿 EtherTrack API running on port 5000
+   Environment : development
+   Health      : http://localhost:5000/health
+
+🔌 Socket.io real-time sync ready
+✅ Socket.io initialised
+✅ Blockchain listeners started
+ℹ️  POLYGON_RPC_URL set from ALCHEMY_RPC
+⛓  Chain logger crons started (retry/5min, batch/1hr, sweep/weekly)
+⏰ EtherTrack cron jobs starting...
+✅ All cron jobs registered:
+   ⛓ Auto-retry failed mints    — every 15 minutes
+   🔍 KYC expiry enforcement     — every hour at :00
+   📋 Listing expiry cleanup     — every hour at :30
+   🧹 Activity log TTL cleanup   — daily at 03:00 IST
+   ⛓ On-chain KYC sync self-heal — every 30 minutes
+   📒 Credit ledger reconciliation — every hour at :15
+⏰ Cron jobs loaded
+⏰ Scheduler started
+[priceFeed] Started polling IEX, PXIL, EtherTrack AMM
+📈 CCC price feed started
+📅 Subscription expiry cron started (first run in 30 s)
+🔍 CreditLedger reconciliation cron started (first run in 60 s, then hourly)
+💾 Critical data backup cron scheduled (daily 2:30 AM IST)
+📧 Email queue worker started
+[08:35:09.736] [33mWARN[39m: [36mUPSTASH_REDIS_REST_URL / TOKEN not set — Redis caching disabled, using no-op fallback[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+[08:35:09.737] [33mWARN[39m: [36mrateLimit.using_memory_store[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+    [35mprefix[39m: "public"
+[08:35:09.740] [33mWARN[39m: [36mrateLimit.using_memory_store[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+    [35mprefix[39m: "api"
+[08:35:09.740] [33mWARN[39m: [36mrateLimit.using_memory_store[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+    [35mprefix[39m: "kyc-submit"
+[08:35:09.740] [33mWARN[39m: [36mrateLimit.using_memory_store[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+    [35mprefix[39m: "admin-action"
+[08:35:09.741] [33mWARN[39m: [36mrateLimit.using_memory_store[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+    [35mprefix[39m: "asset-action"
+[08:35:09.741] [33mWARN[39m: [36mrateLimit.using_memory_store[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+    [35mprefix[39m: "wallet-action"
+[08:35:09.741] [33mWARN[39m: [36mrateLimit.using_memory_store[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+    [35mprefix[39m: "org-action"
+[08:35:09.741] [33mWARN[39m: [36mrateLimit.using_memory_store[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+    [35mprefix[39m: "entity-action"
+[08:35:09.742] [33mWARN[39m: [36mrateLimit.using_memory_store[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+    [35mprefix[39m: "write-action"
+[08:35:09.742] [33mWARN[39m: [36mrateLimit.using_memory_store[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+    [35mprefix[39m: "two-factor"
+[08:35:09.742] [33mWARN[39m: [36mrateLimit.using_memory_store[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+    [35mprefix[39m: "otp"
+[08:35:12.062] [32mINFO[39m: [36memail.worker_started[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+    [35mpollIntervalMs[39m: 10000
+[auth] ✅ Redis user cache connected
+[cron] ✅ Redis distributed lock connected
+✅ Socket.io Redis adapter connected — safe to run multiple instances
+[erp:cron] Scheduler initialized
+🔌 ERP sync cron scheduler started
+[Audit] Relayer balance: 1.0415 ETH
+[08:35:12.329] [32mINFO[39m: [36m✅ Blockchain polling started (block:[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+[08:35:12.342] [32mINFO[39m: [36m🔄 Syncing missed events from block 11489433 to 11491433...[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+[08:35:12.342] [32mINFO[39m: [36m   (1 chunks × 2000 blocks — timeout: 120s)[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+[08:35:13.105] [32mINFO[39m: [36m   Found 0 CreditListed events[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+[pdfQueue] Worker 1/2 started
+[08:35:13.245] [33mWARN[39m: [36mRazorpay health check failed[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+[08:35:13.245] [32mINFO[39m: [36mFeature flag changed[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+    [35mflag[39m: "razorpay.enabled"
+    [35moldValue[39m: true
+    [35mnewValue[39m: false
+    [35msource[39m: "health"
+[08:35:13.246] [32mINFO[39m: [36mFeature flags initialized[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+    [35mflags[39m: {
+      "blockchain.enabled": true,
+      "blockchain.rpc.healthy": true,
+      "blockchain.contract.deployed": true,
+      "blockchain.minting": true,
+      "blockchain.trading": true,
+      "blockchain.retirement": true,
+      "blockchain.chainLogging": true
+    }
+[08:35:13.946] [32mINFO[39m: [36m   Found 0 ListingCancelled events[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+[pdfQueue] Worker 2/2 started
+[08:35:14.814] [32mINFO[39m: [36m   Found 0 CreditMinted events[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+[08:35:15.689] [32mINFO[39m: [36m   Found 0 CreditTraded events[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"
+[08:35:15.704] [32mINFO[39m: [36m✅ Historical event sync complete[39m
+    [35mhost[39m: "VARUN-DESHMUKH"
+    [35mservice[39m: "ethertrack-kyc"

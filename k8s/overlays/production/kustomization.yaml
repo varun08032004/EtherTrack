@@ -1,0 +1,315 @@
+# EtherTrack - Production Overlay (Blue-Green Deployment)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ethertrack
+
+resources:
+  - ../../base
+
+commonLabels:
+  environment: production
+
+images:
+  - name: ethertrack-backend
+    newTag: production-latest
+  - name: ethertrack-frontend
+    newTag: production-latest
+
+replicas:
+  - name: ethertrack-backend-blue
+    count: 3
+  - name: ethertrack-backend-green
+    count: 3
+  - name: ethertrack-frontend-blue
+    count: 3
+  - name: ethertrack-frontend-green
+    count: 3
+
+# Blue environment (active)
+patches:
+  # Blue Backend
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ethertrack-backend-blue
+        namespace: ethertrack
+        labels:
+          app: ethertrack-backend
+          version: blue
+          environment: production
+          color: blue
+      spec:
+        replicas: 3
+        selector:
+          matchLabels:
+            app: ethertrack-backend
+            color: blue
+        template:
+          metadata:
+            labels:
+              app: ethertrack-backend
+              version: "{{VERSION}}"
+              component: backend
+              color: blue
+            annotations:
+              prometheus.io/scrape: "true"
+              prometheus.io/port: "5000"
+              prometheus.io/path: "/metrics"
+          spec:
+            serviceAccountName: ethertrack-backend
+            containers:
+              - name: backend
+                env:
+                  - name: DEPLOYMENT_COLOR
+                    value: "blue"
+                  - name: DEPLOYMENT_VERSION
+                    value: "{{VERSION}}"
+    target:
+      kind: Deployment
+      name: ethertrack-backend
+      namespace: ethertrack
+
+  # Green Backend
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ethertrack-backend-green
+        namespace: ethertrack
+        labels:
+          app: ethertrack-backend
+          version: green
+          environment: production
+          color: green
+      spec:
+        replicas: 3
+        selector:
+          matchLabels:
+            app: ethertrack-backend
+            color: green
+        template:
+          metadata:
+            labels:
+              app: ethertrack-backend
+              version: "{{VERSION}}"
+              component: backend
+              color: green
+            annotations:
+              prometheus.io/scrape: "true"
+              prometheus.io/port: "5000"
+              prometheus.io/path: "/metrics"
+          spec:
+            serviceAccountName: ethertrack-backend
+            containers:
+              - name: backend
+                env:
+                  - name: DEPLOYMENT_COLOR
+                    value: "green"
+                  - name: DEPLOYMENT_VERSION
+                    value: "{{VERSION}}"
+    target:
+      kind: Deployment
+      name: ethertrack-backend
+      namespace: ethertrack
+
+  # Blue Frontend
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ethertrack-frontend-blue
+        namespace: ethertrack
+        labels:
+          app: ethertrack-frontend
+          version: blue
+          environment: production
+          color: blue
+      spec:
+        replicas: 3
+        selector:
+          matchLabels:
+            app: ethertrack-frontend
+            color: blue
+        template:
+          metadata:
+            labels:
+              app: ethertrack-frontend
+              version: "{{VERSION}}"
+              component: frontend
+              color: blue
+          spec:
+            containers:
+              - name: frontend
+                env:
+                  - name: DEPLOYMENT_COLOR
+                    value: "blue"
+                  - name: DEPLOYMENT_VERSION
+                    value: "{{VERSION}}"
+    target:
+      kind: Deployment
+      name: ethertrack-frontend
+      namespace: ethertrack
+
+  # Green Frontend
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ethertrack-frontend-green
+        namespace: ethertrack
+        labels:
+          app: ethertrack-frontend
+          version: green
+          environment: production
+          color: green
+      spec:
+        replicas: 3
+        selector:
+          matchLabels:
+            app: ethertrack-frontend
+            color: green
+        template:
+          metadata:
+            labels:
+              app: ethertrack-frontend
+              version: "{{VERSION}}"
+              component: frontend
+              color: green
+          spec:
+            containers:
+              - name: frontend
+                env:
+                  - name: DEPLOYMENT_COLOR
+                    value: "green"
+                  - name: DEPLOYMENT_VERSION
+                    value: "{{VERSION}}"
+    target:
+      kind: Deployment
+      name: ethertrack-frontend
+      namespace: ethertrack
+
+  # Service selectors for Blue-Green switching
+  - patch: |-
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: ethertrack-backend
+        namespace: ethertrack
+      spec:
+        selector:
+          app: ethertrack-backend
+          color: blue
+    target:
+      kind: Service
+      name: ethertrack-backend
+      namespace: ethertrack
+
+  - patch: |-
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: ethertrack-frontend
+        namespace: ethertrack
+      spec:
+        selector:
+          app: ethertrack-frontend
+          color: blue
+    target:
+      kind: Service
+      name: ethertrack-frontend
+      namespace: ethertrack
+
+  # Ingress for Blue (active)
+  - patch: |-
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: ethertrack-api
+        namespace: ethertrack
+      spec:
+        rules:
+          - host: api.ethertrack.in
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: ethertrack-backend
+                      port:
+                        number: 80
+        tls:
+          - hosts:
+              - api.ethertrack.in
+            secretName: ethertrack-api-tls
+    target:
+      kind: Ingress
+      name: ethertrack-api
+      namespace: ethertrack
+
+  - patch: |-
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: ethertrack-frontend
+        namespace: ethertrack
+      spec:
+        rules:
+          - host: ethertrack.in
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: ethertrack-frontend
+                      port:
+                        number: 80
+          - host: www.ethertrack.in
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: ethertrack-frontend
+                      port:
+                        number: 80
+          - host: app.ethertrack.in
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: ethertrack-frontend
+                      port:
+                        number: 80
+        tls:
+          - hosts:
+              - ethertrack.in
+              - www.ethertrack.in
+              - app.ethertrack.in
+            secretName: ethertrack-frontend-tls
+    target:
+      kind: Ingress
+      name: ethertrack-frontend
+      namespace: ethertrack
+
+# ConfigMap for production
+configMapGenerator:
+  - name: ethertrack-config
+    behavior: merge
+    literals:
+      - NODE_ENV=production
+      - LOG_LEVEL=info
+      - SENTRY_ENVIRONMENT=production
+      - FEATURE_FLAGS_DEBUG=false
+
+images:
+  - name: ethertrack-backend
+    newTag: production-latest
+  - name: ethertrack-frontend
+    newTag: production-latest

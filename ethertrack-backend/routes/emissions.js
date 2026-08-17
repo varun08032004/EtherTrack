@@ -30,6 +30,7 @@ const { createNotification } = require('./notifications');
 const { requirePlan }      = require('../middleware/planGate');
 const { writeLimiter }     = require('../middleware/rateLimit');
 const { hasPermission }    = require('../middleware/rbac');
+const { getEmissionsSummary } = require('../services/cacheStrategy');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // [FEAT-ORG-LEDGER] Shared org emissions ledger
@@ -347,6 +348,9 @@ router.post('/log', authenticate, requirePlan('growth'), writeLimiter, async (re
     }
 
     res.status(201).json({ message: 'Activity logged', activity: rows[0] });
+    
+    // Invalidate emissions log cache for the org/user
+    require('../services/cacheStrategy').invalidate(`emissions:log:${req.user.org_id || req.user.id}`);
   } catch (err) { dbErr(res, 'Log emission', err); }
 });
 
@@ -409,36 +413,68 @@ router.post('/bulk', authenticate, requirePlan('growth'), writeLimiter, async (r
   try {
     await query('BEGIN');
 
+    // Build batch INSERT with multi-row VALUES (eliminates N+1)
+    const batchValues = [];
+    const batchParams = [];
+    let paramIndex = 1;
+
     for (const r of valid) {
-      const { rowCount } = await query(
-        `INSERT INTO emission_activities
-           (user_id, org_id, date, activity, quantity, unit, scope, category, factor, co2e, notes, source, logged_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
-         ON CONFLICT ON CONSTRAINT uc_emission_user_date_activity_qty DO NOTHING
-         RETURNING id`,
-        [
-          req.user.id, req.user.org_id || null, r.date, r.activity, r.quantity, r.unit,
-          r.scope, r.category, r.factor, r.co2e, r.notes, r.source,
-        ]
-      ).catch(async (err) => {
-        if (err.code === '42703' || err.message.includes('uc_emission_user_date_activity_qty')) {
-          return query(
+      batchValues.push(
+        `($${paramIndex},$${paramIndex+1},$${paramIndex+2},$${paramIndex+3},$${paramIndex+4},$${paramIndex+5},$${paramIndex+6},$${paramIndex+7},$${paramIndex+8},$${paramIndex+9},$${paramIndex+10},$${paramIndex+11},$${paramIndex+12},NOW())`
+      );
+      batchParams.push(
+        req.user.id, req.user.org_id || null, r.date, r.activity, r.quantity, r.unit,
+        r.scope, r.category, r.factor, r.co2e, r.notes, r.source
+      );
+      paramIndex += 13;
+    }
+
+    if (batchValues.length > 0) {
+      try {
+        const batchQuery = `
+          INSERT INTO emission_activities
+            (user_id, org_id, date, activity, quantity, unit, scope, category, factor, co2e, notes, source, logged_at)
+          VALUES ${batchValues.join(',')}
+          ON CONFLICT ON CONSTRAINT uc_emission_user_date_activity_qty DO NOTHING
+          RETURNING id
+        `;
+        const { rows } = await query(batchQuery, batchParams);
+        inserted = rows.length;
+        duplicates = valid.length - inserted;
+      } catch (e) {
+        // Fallback to individual inserts for resilience (e.g., if constraint doesn't exist)
+        console.error('[emissions/bulk] batch insert failed, falling back:', e.message);
+        for (const r of valid) {
+          const { rowCount } = await query(
             `INSERT INTO emission_activities
                (user_id, org_id, date, activity, quantity, unit, scope, category, factor, co2e, notes, source, logged_at)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
-             ON CONFLICT DO NOTHING
+             ON CONFLICT ON CONSTRAINT uc_emission_user_date_activity_qty DO NOTHING
              RETURNING id`,
             [
               req.user.id, req.user.org_id || null, r.date, r.activity, r.quantity, r.unit,
               r.scope, r.category, r.factor, r.co2e, r.notes, r.source,
             ]
-          );
+          ).catch(async (err) => {
+            if (err.code === '42703' || err.message.includes('uc_emission_user_date_activity_qty')) {
+              return query(
+                `INSERT INTO emission_activities
+                   (user_id, org_id, date, activity, quantity, unit, scope, category, factor, co2e, notes, source, logged_at)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
+                 ON CONFLICT DO NOTHING
+                 RETURNING id`,
+                [
+                  req.user.id, req.user.org_id || null, r.date, r.activity, r.quantity, r.unit,
+                  r.scope, r.category, r.factor, r.co2e, r.notes, r.source,
+                ]
+              );
+            }
+            throw err;
+          });
+          if (rowCount > 0) inserted++;
+          else              duplicates++;
         }
-        throw err;
-      });
-
-      if (rowCount > 0) inserted++;
-      else              duplicates++;
+      }
     }
 
     await query('COMMIT');
@@ -468,6 +504,9 @@ router.post('/bulk', authenticate, requirePlan('growth'), writeLimiter, async (r
       errDetails: errSkipped,
       total:      records.length,
     });
+
+    // Invalidate emissions log cache for the org/user
+    require('../services/cacheStrategy').invalidate(`emissions:log:${req.user.org_id || req.user.id}`);
 
   } catch (err) {
     await query('ROLLBACK').catch(() => {});
@@ -500,6 +539,9 @@ router.delete('/activities/:id', authenticate, writeLimiter, async (req, res) =>
     });
 
     res.json({ message: 'Deleted', id: rows[0].id });
+    
+    // Invalidate emissions log cache for the org/user
+    require('../services/cacheStrategy').invalidate(`emissions:log:${req.user.org_id || req.user.id}`);
   } catch (err) { dbErr(res, 'Delete activity', err); }
 });
 
@@ -563,6 +605,9 @@ router.post('/bulk-delete', authenticate, writeLimiter, async (req, res) => {
       co2eRemoved: rows.reduce((s, r) => s + parseFloat(r.co2e || 0), 0),
     });
 
+    // Invalidate emissions log cache for the org/user
+    require('../services/cacheStrategy').invalidate(`emissions:log:${req.user.org_id || req.user.id}`);
+
   } catch (err) {
     dbErr(res, 'Bulk delete', err);
   }
@@ -580,47 +625,9 @@ router.get('/summary', authenticate, async (req, res) => {
   const scope = ledgerScope(req, 1); // $1 = org_id or user_id depending on account type
 
   try {
-    const [scopeRows, monthRows, catRows, prevYearRow, s2DetailRows] = await Promise.all([
-      query(`SELECT scope, COALESCE(SUM(co2e),0) AS total_co2e, COUNT(*) AS records
-             FROM emission_activities WHERE ${scope.clause} AND EXTRACT(YEAR FROM date)=$2
-             GROUP BY scope ORDER BY scope`, [scope.value, year]),
-      query(`SELECT EXTRACT(MONTH FROM date)::int AS month, scope, COALESCE(SUM(co2e),0) AS total_co2e
-             FROM emission_activities WHERE ${scope.clause} AND EXTRACT(YEAR FROM date)=$2
-             GROUP BY month, scope ORDER BY month, scope`, [scope.value, year]),
-      query(`SELECT category, COALESCE(SUM(co2e),0) AS total_co2e
-             FROM emission_activities WHERE ${scope.clause} AND EXTRACT(YEAR FROM date)=$2 AND category IS NOT NULL
-             GROUP BY category ORDER BY total_co2e DESC LIMIT 10`, [scope.value, year]),
-      query(`SELECT COALESCE(SUM(co2e),0) AS total_co2e
-             FROM emission_activities WHERE ${scope.clause} AND EXTRACT(YEAR FROM date)=$2`,
-            [scope.value, year - 1]),
-      query(`SELECT
-               COALESCE(SUM(co2e) FILTER (WHERE category ILIKE '%Location-based%'),0) AS scope2_location,
-               COALESCE(SUM(co2e) FILTER (WHERE category ILIKE '%Market-based%'),  0) AS scope2_market
-             FROM emission_activities WHERE ${scope.clause} AND EXTRACT(YEAR FROM date)=$2 AND scope=2`,
-            [scope.value, year]),
-    ]);
-
-    const s    = (sc) => parseFloat(scopeRows.rows.find(r => r.scope === sc)?.total_co2e || 0);
-    const scope1 = s(1), scope2 = s(2), scope3 = s(3);
-    const total  = scope1 + scope2 + scope3;
-    const prevTotal  = parseFloat(prevYearRow.rows[0]?.total_co2e || 0);
-    const yoyChange  = prevTotal > 0 ? ((total - prevTotal) / prevTotal) * 100 : null;
-    const scope2Location = parseFloat(s2DetailRows.rows[0]?.scope2_location || 0);
-    const scope2Market   = parseFloat(s2DetailRows.rows[0]?.scope2_market   || 0);
-
-    res.json({
-      year, scope1, scope2, scope3, total,
-      scope2Location: scope2Location || scope2, scope2Market,
-      creditsNeeded: Math.ceil(total), yoyChange, prevYearTotal: prevTotal,
-      scopeBreakdown: scopeRows.rows, monthlyTrend: monthRows.rows,
-      categoryBreakdown: catRows.rows,
-      meta: {
-        gridEmissionFactor: 0.727,
-        gridEFKwh:          0.000727,
-        gridEFSource:       'CEA V20.0 Dec 2024 (FY 2023-24 weighted average)',
-        generatedAt:        new Date().toISOString(),
-      },
-    });
+    const summary = await getEmissionsSummary(req, year, scope);
+    
+    res.json(summary);
   } catch (err) { dbErr(res, 'Emission summary', err); }
 });
 
@@ -720,6 +727,9 @@ router.post('/profile', authenticate, writeLimiter, async (req, res) => {
       ]
     );
     res.json({ message: 'Profile saved', profile: rows[0] });
+    
+    // Invalidate emissions profile cache
+    require('../services/cacheStrategy').invalidate(`emissions:profile:${req.user.id}`);
   } catch (err) { dbErr(res, 'Save profile', err); }
 });
 

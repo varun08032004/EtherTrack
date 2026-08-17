@@ -244,24 +244,19 @@ const mintApprovedCredit = async (batchId, { force = false } = {}) => {
     throw new Error(`Batch ${batchId} already fully tokenised (token_id: ${batch.token_id})`);
   }
 
-  // [FIX-WALLETLESS-MINT] Previously this threw if the user had no wallet
-  // bound, meaning credits could not even be minted onto the platform
-  // without MetaMask — the single biggest forced dependency in the whole
-  // flow. Now: users WITH a wallet mint self-custody (to their own wallet,
-  // unchanged behavior). Users WITHOUT a wallet mint into pooled custody
-  // (the CUSTODY_WALLET_ADDRESS) and ownership is tracked via
-  // CreditLedger — the exact same walletless pattern already used for KYC
-  // and emissions tracking. No MetaMask required unless the user
-  // specifically chooses to connect one later.
-  const isPooledCustody = !batch.wallet_address;
+// ✅ FIX: ALL credits now mint to EtherTrack custodial wallet
+// The custodial wallet holds ALL tokenized credits on behalf of users
+// Users' ownership is tracked in the database (carbon_batches, credit_ledger)
+// No MetaMask wallet required for minting
+const isPooledCustody = true;
 
-  // ✅ Validate amount before sending to contract
-  const creditAmount = parseInt(batch.quantity || batch.total_credits || batch.available_credits || 0);
-  if (!creditAmount || creditAmount <= 0)
-    throw new Error(`Batch ${batchId} has invalid credit amount: ${creditAmount}`);
+// ✅ Validate amount before sending to contract
+const creditAmount = parseInt(batch.quantity || batch.total_credits || batch.available_credits || 0);
+if (!creditAmount || creditAmount <= 0)
+  throw new Error(`Batch ${batchId} has invalid credit amount: ${creditAmount}`);
 
-  const { tokenContract, kycContract, custodyWalletAddress } = getContracts();
-  const mintTargetWallet = isPooledCustody ? custodyWalletAddress : batch.wallet_address;
+const { tokenContract, kycContract, custodyWalletAddress } = getContracts();
+const mintTargetWallet = custodyWalletAddress;
 
   // 3. Check serial not already on-chain
   let alreadyRegistered = false;
@@ -276,10 +271,11 @@ const mintApprovedCredit = async (batchId, { force = false } = {}) => {
     // ✅ Use 'status' not 'batch_status'
     await query(
       `UPDATE carbon_batches
-       SET status     = 'tokenised',
-           updated_at = NOW()
-       WHERE id = $1`,
-      [batchId]
+       SET status        = 'tokenised',
+           custody_model = $1,
+           updated_at    = NOW()
+       WHERE id = $2`,
+      [isPooledCustody ? 'pooled' : 'self', batchId]
     );
     return { tokenId: null, txHash: null, alreadyExisted: true };
   }
@@ -403,14 +399,15 @@ const mintApprovedCredit = async (batchId, { force = false } = {}) => {
   // 10. ✅ Update DB using 'status' not 'batch_status'
   await query(
     `UPDATE carbon_batches
-     SET status       = 'tokenised',
-         token_id     = $1,
-         tx_hash_mint = $2,
-         tokenised_at = NOW(),
-         tokenised_by = $3,
-         updated_at   = NOW()
-     WHERE id = $4`,
-    [tokenId, tx.hash, batch.user_uuid || null, batchId]
+     SET status        = 'tokenised',
+         token_id      = $1,
+         tx_hash_mint  = $2,
+         tokenised_at  = NOW(),
+         tokenised_by  = $3,
+         custody_model = $4,
+         updated_at    = NOW()
+     WHERE id = $5`,
+    [tokenId, tx.hash, batch.user_uuid || null, isPooledCustody ? 'pooled' : 'self', batchId]
   );
 
   console.log(`   DB updated — batch ${batchId} → tokenised`);

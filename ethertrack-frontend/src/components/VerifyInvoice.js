@@ -9,7 +9,7 @@
 // This page is intentionally public — no AuthContext, no login required —
 // since it's the destination of a QR code anyone (a customer, an auditor,
 // a bank) might scan without being logged into EtherTrack.
-'use strict';
+
 
 import React, { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';

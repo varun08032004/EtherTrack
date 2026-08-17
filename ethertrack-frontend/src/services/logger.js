@@ -1,6 +1,6 @@
 // services/logger.js — EtherTrack · Production structured logger -   28/05/2026
 // Pino with PII redaction, correlation IDs, and environment-aware transport
-'use strict';
+
 
 const pino = require('pino');
 

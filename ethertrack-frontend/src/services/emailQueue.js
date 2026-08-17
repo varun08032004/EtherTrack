@@ -1,5 +1,5 @@
 // services/emailQueue.js — EtherTrack · Async email queue via BullMQ - 08/06/2026
-'use strict';
+
 
 const { Queue, Worker, QueueEvents } = require('bullmq');
 const IORedis    = require('ioredis');

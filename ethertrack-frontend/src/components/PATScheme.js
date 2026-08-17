@@ -250,7 +250,7 @@ export default function PATScheme({ profile }) {
   useEffect(() => {
     if (profile?.company_name && !form.dc_name)
       setForm(f => ({ ...f, dc_name: profile.company_name }));
-  }, [profile]);
+  }, [profile, form]);
 
   // [FIX-SEC-VALIDATE] Real-time validation
   useEffect(() => {

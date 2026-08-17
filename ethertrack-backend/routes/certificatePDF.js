@@ -12,7 +12,7 @@
 const express    = require('express');
 const { safeQuery: query }          = require('../db/pool');
 const { authenticate }              = require('../middleware/auth');
-const { generateCertificatePDF }    = require('../services/pdfGenerator');
+const { pdfQueue } = require('../services/pdfQueue');
 
 const router = express.Router();
 
@@ -92,7 +92,7 @@ router.get('/:certId/pdf', authenticate, async (req, res) => {
         : null,
     };
 
-    const pdfBuffer = await generateCertificatePDF(certData);
+    const pdfBuffer = await pdfQueue.generateCertificate(certData);
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(

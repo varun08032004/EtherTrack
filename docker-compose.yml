@@ -1,0 +1,205 @@
+# EtherTrack - Docker Compose for Local Development
+# Usage: docker-compose -f docker-compose.yml up -d
+
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: ethertrack-postgres
+    environment:
+      POSTGRES_DB: ethertrack
+      POSTGRES_USER: ethertrack
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ethertrack_dev_password}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/pgdata
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ethertrack -d ethertrack"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ethertrack-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: ethertrack-redis
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ethertrack-network
+
+  # Backend API
+  backend:
+    build:
+      context: ./ethertrack-backend
+      dockerfile: Dockerfile
+      target: production
+    container_name: ethertrack-backend
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      DATABASE_URL: postgresql://ethertrack:${POSTGRES_PASSWORD:-ethertrack_dev_password}@postgres:5432/ethertrack
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-dev_jwt_secret_change_in_production}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-dev_refresh_secret_change_in_production}
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:-dev_totp_key_change_in_production}
+      COOKIE_SECRET: ${COOKIE_SECRET:-dev_cookie_secret_change_in_production}
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET}
+      PINATA_API_KEY: ${PINATA_API_KEY}
+      PINATA_SECRET_KEY: ${PINATA_SECRET_KEY}
+      ALCHEMY_RPC: ${ALCHEMY_RPC}
+      KYC_REGISTRY_ADDRESS: ${KYC_REGISTRY_ADDRESS}
+      SENTRY_DSN: ${SENTRY_DSN}
+      ETH_INR_FALLBACK: ${ETH_INR_FALLBACK}
+      FRONTEND_URL: http://localhost:3000
+      BASE_URL: http://localhost:5000
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - ethertrack-network
+    restart: unless-stopped
+
+  # Frontend (Nginx)
+  frontend:
+    build:
+      context: ./ethertrack-frontend
+      dockerfile: Dockerfile
+      target: production
+    container_name: ethertrack-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - ethertrack-network
+    restart: unless-stopped
+
+  # Monitoring - Prometheus
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: ethertrack-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./monitoring/prometheus/rules:/etc/prometheus/rules
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - ethertrack-network
+    restart: unless-stopped
+
+  # Monitoring - Alertmanager
+  alertmanager:
+    image: prom/alertmanager:v0.26.0
+    container_name: ethertrack-alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml
+      - alertmanager_data:/alertmanager
+    ports:
+      - "9093:9093"
+    networks:
+      - ethertrack-network
+    restart: unless-stopped
+
+  # Monitoring - Grafana
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: ethertrack-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: "grafana-piechart-panel"
+    volumes:
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - ethertrack-network
+    restart: unless-stopped
+
+  # Log Aggregation - Loki
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: ethertrack-loki
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./monitoring/loki:/etc/loki
+      - loki_data:/loki
+    ports:
+      - "3100:3100"
+    networks:
+      - ethertrack-network
+    restart: unless-stopped
+
+  # Log Aggregation - Promtail
+  promtail:
+    image: grafana/promtail:2.9.0
+    container_name: ethertrack-promtail
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./monitoring/promtail:/etc/promtail
+      - ./ethertrack-backend/logs:/var/log/ethertrack-backend:ro
+      - /var/log:/var/log:ro
+    depends_on:
+      - loki
+    networks:
+      - ethertrack-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  alertmanager_data:
+  grafana_data:
+  loki_data:
+
+networks:
+  ethertrack-network:
+    driver: bridge

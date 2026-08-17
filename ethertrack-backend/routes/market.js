@@ -25,7 +25,7 @@
 const router     = require('express').Router();
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit'); // [M9] import ipKeyGenerator
 const { safeQuery: query } = require('../db/pool');
-const statsCache = require('../services/statsCache');
+const { getMarketStats, getMarketListings } = require('../services/cacheStrategy');
 const { getLiveETHRate, cacheAge } = require('../services/rateService');
 
 // ── [M9] Rate limiter — IPv6-safe (was crashing server on startup) ─
@@ -67,69 +67,9 @@ const FALLBACK_ETH_INR = 280_000;
 router.get('/listings', async (req, res) => {
   try {
     const { standard, projectType, sortBy } = req.query;
-
-    const std   = STANDARD_ALLOW.has(standard)    ? standard    : 'ALL';
-    const ptype = PROJ_TYPE_ALLOW.has(projectType) ? projectType : 'ALL';
-
-    const params = [];
-    let whereExtra = '';
-
-    if (std !== 'ALL') {
-      params.push(std);
-      whereExtra += ` AND cb.standard = $${params.length}`;
-    }
-    if (ptype !== 'ALL') {
-      params.push(ptype);
-      whereExtra += ` AND cb.project_type = $${params.length}`;
-    }
-
-    const orderClause = SORT_ALLOW[sortBy] || SORT_ALLOW.recent;
-
-    const { rows } = await query(
-      `SELECT
-         cb.id                                       AS "batchId",
-         cb.id                                       AS "listingId",
-         cb.listing_id_onchain                       AS "listingIdOnchain",
-         cb.project_name                             AS "projectName",
-         cb.project_location                         AS "location",
-         cb.standard,
-         cb.project_type                             AS "projectType",
-         cb.developer,
-         cb.vintage_year                             AS "vintageYear",
-         cb.registry_serial                          AS "serialNumber",
-         -- [M11] cap displayed/purchasable amount at the smaller of the two:
-         -- what's actually escrowed in this listing (listed_quantity) vs
-         -- what the batch still has (available_credits, a safety floor in
-         -- case of data drift). This is the number buyers should ever see
-         -- or be allowed to purchase against for THIS listing.
-         LEAST(cb.available_credits, cb.listed_quantity) AS amount,
-         cb.price_per_credit_inr                     AS "pricePerUnitINR",
-         cb.last_traded_price_inr                    AS "lastTradedPriceINR",
-         cb.token_id                                 AS "tokenId",
-         COALESCE(cb.vintage_discount, 0)            AS "vintageDiscount",
-         COALESCE(cb.total_retired, 0)               AS "totalRetired",
-         EXTRACT(EPOCH FROM cb.expires_at)::bigint   AS "expiresAt",
-         u.wallet_address                            AS seller,
-         cb.updated_at
-       FROM carbon_batches cb
-       JOIN users u ON u.id = cb.user_id
-       WHERE cb.admin_status  = 'approved'
-         AND cb.available_credits > 0
-         AND cb.listed_quantity > 0
-         AND cb.listing_id_onchain IS NOT NULL
-         AND cb.deleted_at IS NULL
-         AND (cb.expires_at IS NULL OR cb.expires_at > NOW())
-         ${whereExtra}
-       ORDER BY ${orderClause}
-       LIMIT 200`,
-      params
-    );
-
-    const listings = rows.map(r => ({
-      ...r,
-      adjPrice: r.pricePerUnitINR ? r.pricePerUnitINR / FALLBACK_ETH_INR : 0,
-    }));
-
+    
+    const listings = await getMarketListings({ standard, projectType, sortBy });
+    
     res.json({ listings, count: listings.length });
   } catch (e) {
     console.error('[market/listings]', e);
@@ -140,37 +80,9 @@ router.get('/listings', async (req, res) => {
 // ── GET /api/market/stats ─────────────────────────────────────────
 router.get('/stats', async (req, res) => {
   try {
-    const cached = statsCache.get('market:stats');
-    if (cached) {
-      res.setHeader('X-Cache', 'HIT');
-      return res.json(cached);
-    }
-
-    res.setHeader('X-Cache', 'MISS');
-    const [volume, count, listings, retired] = await Promise.all([
-      query(`SELECT COALESCE(SUM(subtotal_inr), 0) AS total FROM trades WHERE status = 'completed'`),
-      query(`SELECT COUNT(*) FROM trades WHERE status = 'completed'`),
-      query(
-        `SELECT COUNT(*) FROM carbon_batches
-         WHERE admin_status     = 'approved'
-           AND available_credits > 0
-           AND listed_quantity > 0
-           AND listing_id_onchain IS NOT NULL
-           AND deleted_at IS NULL
-           AND (expires_at IS NULL OR expires_at > NOW())`
-      ),
-      query(`SELECT COALESCE(SUM(retired_credits), 0) AS total FROM carbon_batches`),
-    ]);
-
-    const stats = {
-      totalVolumeINR: parseFloat(volume.rows[0].total),
-      totalTrades:    parseInt(count.rows[0].count,    10),
-      activeListings: parseInt(listings.rows[0].count, 10),
-      totalRetired:   parseInt(retired.rows[0].total,  10),
-      cachedAt:       new Date().toISOString(),
-    };
-
-    statsCache.set('market:stats', stats, 90);
+    const stats = await getMarketStats();
+    
+    res.setHeader('X-Cache', 'HIT');
     res.json(stats);
   } catch (e) {
     console.error('[market/stats]', e);

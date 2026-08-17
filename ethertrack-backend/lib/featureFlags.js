@@ -309,9 +309,9 @@ featureFlags.registerHealthCheck('checkRazorpayHealth', async () => {
       key_id: process.env.RAZORPAY_KEY_ID,
       key_secret: process.env.RAZORPAY_KEY_SECRET
     });
-    // Simple API call to check connectivity
+    // Safe non-mutating connectivity check - fetch account info (read-only)
     await Promise.race([
-      rzp.orders.create({ amount: 100, currency: 'INR' }),
+      rzp.accounts.fetch(),
       new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
     ]);
     return true;

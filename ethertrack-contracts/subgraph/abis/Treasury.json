@@ -1,0 +1,4 @@
+[
+  { "type": "event", "name": "FeeDeposited", "inputs": [ { "name": "mode", "type": "uint8" }, { "name": "amount", "type": "uint256" }, { "name": "payer", "type": "address" } ], "anonymous": false },
+  { "type": "event", "name": "FeeWithdrawn", "inputs": [ { "name": "amount", "type": "uint256" }, { "name": "recipient", "type": "address" } ], "anonymous": false }
+]

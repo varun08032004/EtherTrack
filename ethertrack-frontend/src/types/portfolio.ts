@@ -71,6 +71,7 @@ export interface CarbonCredit {
   docIpfsHash:             string | null;
   registeredAt:            string | null;
   listingId:               number | null;
+  custodyModel:            'self' | 'pooled';
 }
 
 export interface BoughtCredit extends CarbonCredit {

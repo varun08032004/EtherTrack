@@ -25,6 +25,8 @@ const { validateCoupon, computeDiscount, recordRedemption } = require('../servic
 
 const logger = require('../services/logger');
 
+const router = express.Router();
+
 // ── Request logger middleware with correlation ID ───────────────────────────────
 router.use((req, _res, next) => {
   req.log = logger.child({
@@ -35,8 +37,6 @@ router.use((req, _res, next) => {
   });
   next();
 });
-
-const router = express.Router();
 
 const { getBreaker } = require('../lib/circuitBreaker');
 const razorpayBreaker = getBreaker('razorpay', {

@@ -6,7 +6,7 @@
 //
 // Input/data-capture layer only — saves to /api/brsr/principle/:id.
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { apiFetch } from '../services/api';
 
 const currentYear = new Date().getFullYear();
@@ -240,8 +240,8 @@ export default function BRSRPrincipleForm({ profile, year: propYear, onDataReady
 
   const setField = (key, val) => { setData(d => ({ ...d, [key]: val })); setDirty(true); };
 
-  const essentialFields = schema?.essential || [];
-  const leadershipFields = schema?.leadership || [];
+  const essentialFields = useMemo(() => schema?.essential || [], [schema]);
+  const leadershipFields = useMemo(() => schema?.leadership || [], [schema]);
   const essentialAnswered = essentialFields.filter(f => isFieldAnswered(f, data)).length;
   const compPct = essentialFields.length ? Math.round(essentialAnswered / essentialFields.length * 100) : 0;
 

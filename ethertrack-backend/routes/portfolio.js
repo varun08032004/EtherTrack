@@ -13,7 +13,9 @@ const { safeQuery: query } = require('../db/pool');
 const { authenticate, requireKYC } = require('../middleware/auth');
 const { sendCreditSubmittedEmail, sendListingConfirmedEmail, sendDelistingConfirmedEmail } = require('../services/email');
 const { assetActionLimiter } = require('../middleware/rateLimit');
-const Joi         = require('joi');
+const { encodeCursor, decodeCursor, buildPaginatedResponse } = require('../lib/pagination');
+const { getMarketListings, getMarketStats } = require('../services/cacheStrategy');
+const Joi = require('joi');
 
 // ── Constants & validation maps ──────────────────────────────────
 const PROJECT_TYPE_MAP = {
@@ -461,35 +463,68 @@ router.get('/my-submissions', authenticate, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────
 router.get('/my-credits', authenticate, async (req, res) => {
   try {
-    const { rows } = await query(
-      `SELECT cb.id, cb.project_name, cb.project_location, cb.country,
-              cb.standard, cb.project_type, cb.developer,
-              cb.quantity, cb.total_credits, cb.available_credits, cb.retired_credits,
-              cb.listed_quantity,
-              cb.vintage_year, cb.expiry_date, cb.registry_serial,
-              cb.doc_ipfs_hash, cb.admin_status, cb.admin_notes,
-              cb.status, cb.token_id, cb.tx_hash_mint,
-              cb.listing_id_onchain,
-              cb.created_at, cb.updated_at,
-              cb.credit_type, cb.cbam_eligible,
-              cb.acva_name, cb.acva_date, cb.acva_status,
-              cb.icm_registry_id, cb.banking_status,
-              cb.corresponding_adjustment, cb.sdg_tags,
-              cb.icvcm_ccp_eligible, cb.icvcm_ccp_label, cb.icvcm_ccp_date,
-              cb.registry_link, cb.methodology_id,
-              cb.additionality_type, cb.permanence_rating, cb.co_benefits_verified,
-              p.project_code AS project_id
-       FROM carbon_batches cb
-       LEFT JOIN projects p ON p.id = cb.project_id
-       WHERE cb.user_id = $1
-         AND cb.admin_status = 'approved'
-       ORDER BY cb.updated_at DESC
-       LIMIT 500`,
-      [req.user.id]
-    );
-
-    const credits = rows.map(mapCreditRow);
-    res.json({ credits });
+    const { limit = 50, cursor } = req.query;
+    const limitNum = Math.min(Math.max(parseInt(limit) || 20, 1), 200);
+    
+    // Parse cursor if provided
+    let cursorData = null;
+    if (cursor) {
+      try {
+        cursorData = JSON.parse(Buffer.from(cursor, 'base64').toString());
+      } catch {
+        return res.status(400).json({ error: 'Invalid cursor format' });
+      }
+    }
+    
+    const cacheKey = require('../services/cacheStrategy').KEYS.portfolioCredits(req.user.id, limit, cursor);
+    
+    const credits = await require('../services/cacheStrategy').getOrSet(
+      cacheKey,
+      async () => {
+        const params = [req.user.id];
+        if (cursorData) {
+          params.push(cursorData.updated_at, cursorData.id);
+        }
+        params.push(200); // LIMIT 200
+        
+        const query = `
+          SELECT cb.id, cb.project_name, cb.project_location, cb.country,
+                 cb.standard, cb.project_type, cb.developer,
+                 cb.quantity, cb.total_credits, cb.available_credits, cb.retired_credits,
+                 cb.listed_quantity,
+                 cb.vintage_year, cb.expiry_date, cb.registry_serial,
+                 cb.doc_ipfs_hash, cb.admin_status, cb.admin_notes,
+                 cb.status, cb.token_id, cb.tx_hash_mint,
+                 cb.listing_id_onchain,
+                 cb.created_at, cb.updated_at,
+                 cb.credit_type, cb.cbam_eligible,
+                 cb.acva_name, cb.acva_date, cb.acva_status,
+                 cb.icm_registry_id, cb.banking_status,
+                 cb.corresponding_adjustment, cb.sdg_tags,
+                 cb.icvcm_ccp_eligible, cb.icvcm_ccp_label, cb.icvcm_ccp_date,
+                 cb.registry_link, cb.methodology_id,
+                 cb.additionality_type, cb.permanence_rating, cb.co_benefits_verified,
+                 p.project_code AS project_id
+          FROM carbon_batches cb
+          LEFT JOIN projects p ON p.id = cb.project_id
+          WHERE cb.user_id = $1
+            AND cb.admin_status = 'approved'
+            ${cursor ? 'AND (cb.updated_at, cb.id) < ($2, $3)' : ''}
+          ORDER BY cb.updated_at DESC, cb.id DESC
+          LIMIT $${cursor ? 3 : 2}
+        `;
+        
+        const { rows } = await require('../db/pool').safeQuery(query, params);
+        const hasMore = rows.length > 200;
+        const results = hasMore ? rows.slice(0, 200) : rows;
+        const nextCursor = results.length === 200 ? 
+          Buffer.from(JSON.stringify({ updated_at: results[199].updated_at, id: results[199].id })).toString('base64') : null;
+        
+        const credits = results.map(mapCreditRow);
+        return { credits, nextCursor, hasMore: !!nextCursor };
+      }, 60); // TTL 60 seconds
+    
+    res.json(credits);
   } catch (e) {
     console.error('[my-credits]', e.message);
     res.status(500).json({ error: 'Failed to fetch credits.' });
@@ -501,92 +536,98 @@ router.get('/my-credits', authenticate, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────
 router.get('/my-bought-credits', authenticate, async (req, res) => {
   try {
-    const { rows } = await query(
-      `SELECT
-         t.id             AS trade_id,
-         t.token_id,
-         t.quantity,
-         t.price_per_credit_inr,
-         t.subtotal_inr,
-         t.buyer_pays_inr,
-         t.payment_mode,
-         t.tx_hash,
-         t.created_at    AS bought_at,
-         t.status        AS trade_status,
-         su.full_name    AS seller_name,
-         su.email        AS seller_email,
-         su.wallet_address AS seller_wallet,
-         cb.id           AS batch_id,
-         cb.project_name,
-         cb.project_location,
-         cb.country,
-         cb.standard,
-         cb.project_type,
-         cb.developer,
-         cb.vintage_year,
-         cb.expiry_date,
-         cb.registry_serial,
-         cb.credit_type,
-         cb.cbam_eligible,
-         cb.corresponding_adjustment,
-         cb.sdg_tags,
-         cb.icvcm_ccp_eligible,
-         cb.icvcm_ccp_label,
-         cb.registry_link,
-         cb.methodology_id
-       FROM trades t
-       JOIN users su ON su.id = t.seller_id
-       LEFT JOIN carbon_batches cb ON cb.id = t.batch_id
-       WHERE t.buyer_id = $1
-         AND t.status = 'completed'
-       ORDER BY t.created_at DESC
-       LIMIT 500`,
-      [req.user.id]
-    );
+    const cacheKey = require('../services/cacheStrategy').KEYS.portfolioBought(req.user.id);
+    
+    const bought = await require('../services/cacheStrategy').getOrSet(
+      cacheKey,
+      async () => {
+        const { rows } = await require('../db/pool').safeQuery(
+          `SELECT
+             t.id             AS trade_id,
+             t.token_id,
+             t.quantity,
+             t.price_per_credit_inr,
+             t.subtotal_inr,
+             t.buyer_pays_inr,
+             t.payment_mode,
+             t.tx_hash,
+             t.created_at    AS bought_at,
+             t.status        AS trade_status,
+             su.full_name    AS seller_name,
+             su.email        AS seller_email,
+             su.wallet_address AS seller_wallet,
+             cb.id           AS batch_id,
+             cb.project_name,
+             cb.project_location,
+             cb.country,
+             cb.standard,
+             cb.project_type,
+             cb.developer,
+             cb.vintage_year,
+             cb.expiry_date,
+             cb.registry_serial,
+             cb.credit_type,
+             cb.cbam_eligible,
+             cb.corresponding_adjustment,
+             cb.sdg_tags,
+             cb.icvcm_ccp_eligible,
+             cb.icvcm_ccp_label,
+             cb.registry_link,
+             cb.methodology_id
+           FROM trades t
+           JOIN users su ON su.id = t.seller_id
+           LEFT JOIN carbon_batches cb ON cb.id = t.batch_id
+           WHERE t.buyer_id = $1
+             AND t.status = 'completed'
+             ORDER BY t.created_at DESC
+             LIMIT 500`,
+          [req.user.id]
+        );
 
-    const bought = rows.map(r => ({
-      id              : `bought-${r.trade_id}`,
-      tradeId         : r.trade_id,
-      tokenId         : r.token_id,
-      tokenHex        : r.token_id != null
-        ? `0x${Number(r.token_id).toString(16).padStart(8, '0').toUpperCase()}`
-        : null,
-      credits         : Number(r.quantity),
-      heldCredits     : Number(r.quantity),
-      listedCredits   : 0,
-      quantity        : Number(r.quantity),
-      pricePerCredit  : Number(r.price_per_credit_inr) || 0,
-      totalPaid       : Number(r.buyer_pays_inr) || 0,
-      paymentMode     : r.payment_mode || 'eth',
-      txHash          : r.tx_hash,
-      boughtAt        : r.bought_at,
-      batchId         : r.batch_id,
-      projectName     : r.project_name || 'Unknown Project',
-      location        : r.project_location || '',
-      country         : r.country || '',
-      standard        : r.standard || 'VCS',
-      projectType     : r.project_type || '',
-      developer       : r.developer || '',
-      vintageYear     : r.vintage_year,
-      expiryDate      : r.expiry_date,
-      serialNumber    : r.registry_serial,
-      creditType      : r.credit_type || 'voluntary',
-      cbamEligible    : r.cbam_eligible || false,
-      correspondingAdjustment : r.corresponding_adjustment || 'none',
-      sdgTags         : parseSdgTags(r.sdg_tags),
-      icvcmCcpEligible : r.icvcm_ccp_eligible || false,
-      icvcmCcpLabel   : r.icvcm_ccp_label || '',
-      registryLink    : r.registry_link || '',
-      methodologyId   : r.methodology_id || '',
-      sellerName      : r.seller_name,
-      sellerWallet    : r.seller_wallet,
-      status          : 'BOUGHT',
-      isBought        : true,
-      isOnChain       : true,
-      admin_status    : 'approved',
-      vintageDiscount : 0,
-    }));
-
+        return rows.map(r => ({
+          id              : `bought-${r.trade_id}`,
+          tradeId         : r.trade_id,
+          tokenId         : r.token_id,
+          tokenHex        : r.token_id != null
+            ? `0x${Number(r.token_id).toString(16).padStart(8, '0').toUpperCase()}`
+            : null,
+          credits         : Number(r.quantity),
+          heldCredits     : Number(r.quantity),
+          listedCredits   : 0,
+          quantity        : Number(r.quantity),
+          pricePerCredit  : Number(r.price_per_credit_inr) || 0,
+          totalPaid       : Number(r.buyer_pays_inr) || 0,
+          paymentMode     : r.payment_mode || 'eth',
+          txHash          : r.tx_hash,
+          boughtAt        : r.bought_at,
+          batchId         : r.batch_id,
+          projectName     : r.project_name || 'Unknown Project',
+          location        : r.project_location || '',
+          country         : r.country || '',
+          standard        : r.standard || 'VCS',
+          projectType     : r.project_type || '',
+          developer       : r.developer || '',
+          vintageYear     : r.vintage_year,
+          expiryDate      : r.expiry_date,
+          serialNumber    : r.registry_serial,
+          creditType      : r.credit_type || 'voluntary',
+          cbamEligible    : r.cbam_eligible || false,
+          correspondingAdjustment : r.corresponding_adjustment || 'none',
+          sdgTags         : parseSdgTags(r.sdg_tags),
+          icvcmCcpEligible : r.icvcm_ccp_eligible || false,
+          icvcmCcpLabel   : r.icvcm_ccp_label || '',
+          registryLink    : r.registry_link || '',
+          methodologyId   : r.methodology_id || '',
+          sellerName      : r.seller_name,
+          sellerWallet    : r.seller_wallet,
+          status          : 'BOUGHT',
+          isBought        : true,
+          isOnChain       : true,
+          admin_status    : 'approved',
+          vintageDiscount : 0,
+        }));
+      }, 60); // TTL 60 seconds
+    
     res.json({ bought });
   } catch (e) {
     console.error('[my-bought-credits]', e.message);
@@ -1050,6 +1091,7 @@ function mapCreditRow(r) {
     status,
     isOnChain       : r.status === 'tokenised' && r.token_id != null,
     sdg_tags        : parseSdgTags(r.sdg_tags),
+    custodyModel    : r.custody_model,
   };
 }
 

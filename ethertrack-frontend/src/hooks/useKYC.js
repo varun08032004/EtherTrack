@@ -98,7 +98,7 @@ export function useKYC() {
     } finally {
       setLoading(false);
     }
-  }, [getContracts, checkKYC]);
+  }, [checkKYC]);
 
   return {
     isVerified,

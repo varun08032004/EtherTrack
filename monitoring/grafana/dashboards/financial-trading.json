@@ -1,0 +1,59 @@
+{
+  "dashboard": {
+    "title": "EtherTrack - Financial & Trading",
+    "uid": "ethertrack-financial",
+    "tags": ["ethertrack", "financial", "trading"],
+    "timezone": "browser",
+    "refresh": "10s",
+    "panels": [
+      {
+        "title": "Trade Settlement Rate",
+        "type": "graph",
+        "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+        "targets": [
+          {"expr": "sum(rate(ethertrack_trade_settlement_total[5m])) by (result, payment_mode)", "legendFormat": "{{result}} - {{payment_mode}}"}
+        ]
+      },
+      {
+        "title": "Wallet Transaction Rate",
+        "type": "graph",
+        "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+        "targets": [
+          {"expr": "sum(rate(ethertrack_wallet_transaction_total[5m])) by (type, result)", "legendFormat": "{{type}} - {{result}}"}
+        ]
+      },
+      {
+        "title": "Reconciliation Status",
+        "type": "graph",
+        "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+        "targets": [
+          {"expr": "sum(rate(ethertrack_reconciliation_total[5m])) by (type, result)", "legendFormat": "{{type}} - {{result}}"}
+        ]
+      },
+      {
+        "title": "Webhook Success/Failure",
+        "type": "graph",
+        "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+        "targets": [
+          {"expr": "sum(rate(ethertrack_webhook_total[5m])) by (provider, event, result)", "legendFormat": "{{provider}} - {{event}} - {{result}}"}
+        ]
+      },
+      {
+        "title": "KYC Operations",
+        "type": "graph",
+        "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8},
+        "targets": [
+          {"expr": "sum(rate(ethertrack_kyc_total[5m])) by (action, result)", "legendFormat": "{{action}} - {{result}}"}
+        ]
+      },
+      {
+        "title": "Payment Mode Distribution",
+        "type": "piechart",
+        "gridPos": {"x": 12, "y": 16, "w": 12, "h": 8},
+        "targets": [
+          {"expr": "sum(rate(ethertrack_trade_settlement_total[5m])) by (payment_mode)", "legendFormat": "{{payment_mode}}"}
+        ]
+      }
+    ]
+  }
+}

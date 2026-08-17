@@ -21,7 +21,7 @@ const router     = require('express').Router();
 const { ethers } = require('ethers');
 const Razorpay   = require('razorpay');
 const crypto     = require('crypto');
-const { safeQuery: query, getClient } = require('../db/pool');
+const { safeQuery: query, withTransaction } = require('../db/pool');
 const { authenticate }     = require('../middleware/auth');
 const { orgActionLimiter } = require('../middleware/rateLimit');
 const { requireRole, getPermissions } = require('../middleware/rbac');
@@ -561,62 +561,61 @@ router.post('/:orgId/retirement-queue', authenticate, requireRole('owner', 'admi
 
 router.post('/:orgId/retirement-queue/:itemId/approve', authenticate, requireRole('owner', 'admin'), orgActionLimiter, async (req, res) => {
   const { orgId, itemId } = req.params;
-  const client = await getClient();
   try {
-    await client.query('BEGIN');
-    const { rows } = await client.query(
-      `SELECT q.*, cb.registry_serial, u.email AS requester_email, u.full_name AS requester_full_name, o.name AS org_name
-       FROM org_retirement_queue q
-       LEFT JOIN carbon_batches cb ON cb.id = q.batch_id
-       LEFT JOIN users u ON u.id = q.requester_id
-       LEFT JOIN organisations o ON o.id = q.org_id
-       WHERE q.id = $1 AND q.org_id = $2 FOR UPDATE`,
-      [itemId, orgId]
-    );
-    if (!rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Request not found' }); }
-    const item = rows[0];
-    if (item.status !== 'pending') { await client.query('ROLLBACK'); return res.status(409).json({ error: `Request already ${item.status}` }); }
-
-    const certId = `CERT-${String(item.token_id || item.batch_id || itemId).padStart(8,'0').slice(-8)}-${Date.now().toString(36).toUpperCase().slice(-6)}`;
-
-    await client.query(
-      `INSERT INTO retirements
-         (batch_id, token_id, serial_number, project_name, standard,
-          amount, retire_scope, retired_by, org_id,
-          beneficiary_name, beneficiary_entity, beneficiary_gstin,
-          reporting_standard, purpose, certificate_id,
-          approved_by, approved_at, retired_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW(),NOW())`,
-      [
-        item.batch_id, item.token_id, item.serial_number||item.registry_serial,
-        item.project_name, item.standard, item.qty, item.scope,
-        item.requester_id, orgId,
-        item.beneficiary_name, item.beneficiary_entity, item.beneficiary_gstin,
-        item.reporting_standard, item.purpose, certId, req.user.id,
-      ]
-    );
-    await client.query(
-      `UPDATE org_retirement_queue
-       SET status='approved', approved_by=$1, approved_at=NOW(), cert_id=$2, updated_at=NOW()
-       WHERE id=$3`,
-      [req.user.id, certId, itemId]
-    );
-    if (item.batch_id) {
-      await client.query(
-        `UPDATE carbon_batches
-         SET available_credits = GREATEST(0, available_credits - $1),
-             retired_credits   = COALESCE(retired_credits, 0) + $2,
-             updated_at        = NOW()
-         WHERE id = $3`,
-        [item.qty, item.qty, item.batch_id]
+    await withTransaction(async (client) => {
+      const { rows } = await client.query(
+        `SELECT q.*, cb.registry_serial, u.email AS requester_email, u.full_name AS requester_full_name, o.name AS org_name
+         FROM org_retirement_queue q
+         LEFT JOIN carbon_batches cb ON cb.id = q.batch_id
+         LEFT JOIN users u ON u.id = q.requester_id
+         LEFT JOIN organisations o ON o.id = q.org_id
+         WHERE q.id = $1 AND q.org_id = $2 FOR UPDATE`,
+        [itemId, orgId]
       );
-    }
-    await client.query(
-      `INSERT INTO audit_logs (org_id, user_id, action, meta, created_at)
-       VALUES ($1,$2,'RETIRE_APPROVED',$3,NOW())`,
-      [orgId, req.user.id, `${item.qty} tCO₂ retired from ${item.project_name} — cert ${certId}`]
-    );
-    await client.query('COMMIT');
+      if (!rows.length) throw Object.assign(new Error('Request not found'), { statusCode: 404 });
+      const item = rows[0];
+      if (item.status !== 'pending') throw Object.assign(new Error(`Request already ${item.status}`), { statusCode: 409 });
+
+      const certId = `CERT-${String(item.token_id || item.batch_id || itemId).padStart(8,'0').slice(-8)}-${Date.now().toString(36).toUpperCase().slice(-6)}`;
+
+      await client.query(
+        `INSERT INTO retirements
+           (batch_id, token_id, serial_number, project_name, standard,
+            amount, retire_scope, retired_by, org_id,
+            beneficiary_name, beneficiary_entity, beneficiary_gstin,
+            reporting_standard, purpose, certificate_id,
+            approved_by, approved_at, retired_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW(),NOW())`,
+        [
+          item.batch_id, item.token_id, item.serial_number||item.registry_serial,
+          item.project_name, item.standard, item.qty, item.scope,
+          item.requester_id, orgId,
+          item.beneficiary_name, item.beneficiary_entity, item.beneficiary_gstin,
+          item.reporting_standard, item.purpose, certId, req.user.id,
+        ]
+      );
+      await client.query(
+        `UPDATE org_retirement_queue
+         SET status='approved', approved_by=$1, approved_at=NOW(), cert_id=$2, updated_at=NOW()
+         WHERE id=$3`,
+        [req.user.id, certId, itemId]
+      );
+      if (item.batch_id) {
+        await client.query(
+          `UPDATE carbon_batches
+           SET available_credits = GREATEST(0, available_credits - $1),
+               retired_credits   = COALESCE(retired_credits, 0) + $2,
+               updated_at        = NOW()
+           WHERE id = $3`,
+          [item.qty, item.qty, item.batch_id]
+        );
+      }
+      await client.query(
+        `INSERT INTO audit_logs (org_id, user_id, action, meta, created_at)
+         VALUES ($1,$2,'RETIRE_APPROVED',$3,NOW())`,
+        [orgId, req.user.id, `${item.qty} tCO₂ retired from ${item.project_name} — cert ${certId}`]
+      );
+    });
 
     if (item.requester_email) {
       sendRetirementEmail(item.requester_email, {
@@ -628,12 +627,9 @@ router.post('/:orgId/retirement-queue/:itemId/approve', authenticate, requireRol
 
     res.json({ success: true, certId, message: `Retirement approved — ${item.qty} tCO₂` });
   } catch (e) {
-    await client.query('ROLLBACK');
     if (e.code === '23505') return res.status(409).json({ error: 'This credit has already been retired' });
     req.log.error('[org/retirement-queue/approve]', e.message);
-    res.status(500).json({ error: 'Approval failed', detail: e.message });
-  } finally {
-    client.release();
+    res.status(e.statusCode || 500).json({ error: 'Approval failed', detail: e.message });
   }
 });
 
@@ -975,19 +971,19 @@ async function checkSubscriptionExpiries() {
           await sendSubscriptionExpiredEmail(user.email, {
             name: user.full_name, plan: planLabel, downgradeTo: 'Free',
             renewUrl: `${process.env.FRONTEND_URL}/billing`,
-          }).catch(e => req.log.warn('[checkSubscriptionExpiries] expired email failed:', e.message));
+          }).catch(e => logger.warn('[checkSubscriptionExpiries] expired email failed:', e.message));
         } else if (days === 1) {
           await createNotification(user.id, 'SYSTEM', '⚠️ Subscription Expires Tomorrow', `Your ${planLabel} plan expires tomorrow.`,                                '/billing', { plan: user.subscription_plan });
           await sendSubscriptionExpiringSoonEmail(user.email, {
             name: user.full_name, plan: planLabel, expiryDate: dateStr, daysLeft: 1,
             renewUrl: `${process.env.FRONTEND_URL}/billing`,
-          }).catch(e => req.log.warn('[checkSubscriptionExpiries] expiring email failed:', e.message));
+          }).catch(e => logger.warn('[checkSubscriptionExpiries] expiring email failed:', e.message));
         } else if (days === 7) {
           await createNotification(user.id, 'SYSTEM', '⏰ Expiring in 7 Days',             `Your ${planLabel} plan expires on ${dateStr}.`,                         '/billing', { plan: user.subscription_plan });
           await sendSubscriptionExpiringSoonEmail(user.email, {
             name: user.full_name, plan: planLabel, expiryDate: dateStr, daysLeft: 7,
             renewUrl: `${process.env.FRONTEND_URL}/billing`,
-          }).catch(e => req.log.warn('[checkSubscriptionExpiries] expiring email failed:', e.message));
+          }).catch(e => logger.warn('[checkSubscriptionExpiries] expiring email failed:', e.message));
         } else if (days === 30) {
           await createNotification(user.id, 'SYSTEM', '📅 Renewal Reminder',              `Your ${planLabel} plan renews on ${dateStr} (30 days away).`,           '/billing', { plan: user.subscription_plan });
           // no email at 30 days — 7/1/0 day emails are enough, avoid over-mailing
@@ -1027,12 +1023,12 @@ async function checkSubscriptionExpiries() {
           [user.id, user.subscription_plan, user.subscription_cycle]
         );
  
-        req.log.info(
+        logger.info(
           `[org/cron] Downgraded expired user ${user.id} ` +
           `from ${user.subscription_plan} → free`
         );
       } catch (e) {
-        req.log.warn('[checkSubscriptionExpiries] downgrade failed:', e.message);
+        logger.warn('[checkSubscriptionExpiries] downgrade failed:', e.message);
       }
     }
  
@@ -1048,24 +1044,24 @@ async function checkSubscriptionExpiries() {
         AND subscription_renewal_date < NOW()
     `);
  
-    if (corpExpired.length > 0) {
-      req.log.warn(
+if (corpExpired.length > 0) {
+      logger.warn(
         `[org/cron] ⚠️  ${corpExpired.length} corporate account(s) past renewal date — ` +
         `NOT auto-downgraded. Sales team follow-up required:\n` +
         corpExpired.map(u => `  · ${u.email} (expired ${new Date(u.subscription_renewal_date).toLocaleDateString('en-IN')})`).join('\n')
       );
       // Optionally: fire an alert to your internal Slack/webhook here.
     }
- 
-    req.log.info(
+
+    logger.info(
       `[org/cron] Expiry check — ` +
       `${expiring.length} notified, ` +
       `${expired.length} downgraded, ` +
       `${corpExpired.length} corporate past-renewal (manual follow-up needed)`
     );
- 
+
   } catch (e) {
-    req.log.error('[org/checkSubscriptionExpiries]', e.message);
+    logger.error('[org/checkSubscriptionExpiries]', e.message);
   }
 }
 // Alias — TeamManagement.js calls POST /:orgId/verifiers (no /request suffix)

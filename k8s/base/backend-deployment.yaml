@@ -1,0 +1,226 @@
+# EtherTrack Backend - Base Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ethertrack-backend
+  namespace: ethertrack
+  labels:
+    app: ethertrack-backend
+    version: "{{VERSION}}"
+    component: backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ethertrack-backend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: ethertrack-backend
+        version: "{{VERSION}}"
+        component: backend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "5000"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: ethertrack-backend
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+      containers:
+        - name: backend
+          image: "{{BACKEND_IMAGE}}:{{VERSION}}"
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 5000
+              name: http
+              protocol: TCP
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "5000"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ethertrack-secrets
+                  key: database-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ethertrack-secrets
+                  key: redis-url
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ethertrack-secrets
+                  key: jwt-secret
+            - name: JWT_REFRESH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ethertrack-secrets
+                  key: jwt-refresh-secret
+            - name: TOTP_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ethertrack-secrets
+                  key: totp-encryption-key
+            - name: COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ethertrack-secrets
+                  key: cookie-secret
+            - name: RAZORPAY_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: ethertrack-secrets
+                  key: razorpay-key-id
+            - name: RAZORPAY_KEY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ethertrack-secrets
+                  key: razorpay-key-secret
+            - name: RAZORPAY_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ethertrack-secrets
+                  key: razorpay-webhook-secret
+            - name: PINATA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ethertrack-secrets
+                  key: pinata-api-key
+            - name: PINATA_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ethertrack-secrets
+                  key: pinata-secret-key
+            - name: ALCHEMY_RPC
+              valueFrom:
+                secretKeyRef:
+                  name: ethertrack-secrets
+                  key: alchemy-rpc
+            - name: KYC_REGISTRY_ADDRESS
+              valueFrom:
+                secretKeyRef:
+                  name: ethertrack-secrets
+                  key: kyc-registry-address
+            - name: SENTRY_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: ethertrack-secrets
+                  key: sentry-dsn
+            - name: ETH_INR_FALLBACK
+              valueFrom:
+                secretKeyRef:
+                  name: ethertrack-secrets
+                  key: eth-inr-fallback
+            - name: FRONTEND_URL
+              value: "https://ethertrack.in"
+            - name: BASE_URL
+              value: "https://api.ethertrack.in"
+          envFrom:
+            - configMapRef:
+                name: ethertrack-config
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 10"]
+          volumeMounts:
+            - name: uploads
+              mountPath: /app/uploads
+            - name: logs
+              mountPath: /app/logs
+            - name: tmp
+              mountPath: /app/tmp
+      volumes:
+        - name: uploads
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - ethertrack-backend
+                topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: ethertrack-backend
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ethertrack-backend
+  namespace: ethertrack
+  labels:
+    app: ethertrack-backend
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 5000
+      protocol: TCP
+      name: http
+  selector:
+    app: ethertrack-backend
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ethertrack-backend-internal
+  namespace: ethertrack
+  labels:
+    app: ethertrack-backend
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5000
+      targetPort: 5000
+      protocol: TCP
+      name: http
+  selector:
+    app: ethertrack-backend

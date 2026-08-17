@@ -16,7 +16,7 @@
 //   Every 30 sec — Price alert checks (notify users when price threshold hit)
 //   Every day 2am — CERC settlement reconciliation
 
-'use strict';
+
 
 const cron = require('node-cron');
 

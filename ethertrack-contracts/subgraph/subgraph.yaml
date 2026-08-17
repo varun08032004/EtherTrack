@@ -1,0 +1,360 @@
+{
+  "specVersion": "1.0.0",
+  "schema": {
+    "file": "./schema.graphql"
+  },
+  "dataSources": [
+    {
+      "kind": "ethereum",
+      "name": "CarbonCreditToken",
+      "network": "polygon",
+      "source": {
+        "address": "{{CARBON_CREDIT_TOKEN_ADDRESS}}",
+        "abi": "CarbonCreditToken",
+        "startBlock": {{CARBON_CREDIT_TOKEN_START_BLOCK}}
+      },
+      "mapping": {
+        "kind": "ethereum/indexer",
+        "apiVersion": "0.0.7",
+        "language": "wasm/assemblyscript",
+        "entities": [
+          "CarbonCredit",
+          "User"
+        ],
+        "abis": [
+          {
+            "name": "CarbonCreditToken",
+            "file": "./abis/CarbonCreditToken.json"
+          }
+        ],
+        "eventHandlers": [
+          {
+            "event": "CreditMinted(indexed uint256, indexed address, uint256, string, Standard, string)",
+            "handler": "handleCreditMinted"
+          },
+          {
+            "event": "CreditRetired(indexed uint256, indexed address, uint256, string)",
+            "handler": "handleCreditRetired"
+          },
+          {
+            "event": "TransferSingle(indexed address, indexed address, indexed address, uint256, uint256)",
+            "handler": "handleTransferSingle"
+          },
+          {
+            "event": "TransferBatch(indexed address, indexed address, indexed address, uint256[], uint256[])",
+            "handler": "handleTransferBatch"
+          }
+        ],
+        "file": "./src/mappings/carbon-credit-token.ts"
+      }
+    },
+    {
+      "kind": "ethereum",
+      "name": "Marketplace",
+      "network": "polygon",
+      "source": {
+        "address": "{{MARKETPLACE_ADDRESS}}",
+        "abi": "Marketplace",
+        "startBlock": {{MARKETPLACE_START_BLOCK}}
+      },
+      "mapping": {
+        "kind": "ethereum/indexer",
+        "apiVersion": "0.0.7",
+        "language": "wasm/assemblyscript",
+        "entities": [
+          "Listing",
+          "BuyOrder",
+          "Trade",
+          "INRTradeLog",
+          "User",
+          "MarketplaceStats",
+          "UserTokenBalance"
+        ],
+        "abis": [
+          {
+            "name": "Marketplace",
+            "file": "./abis/Marketplace.json"
+          }
+        ],
+        "eventHandlers": [
+          {
+            "event": "CreditListed(indexed uint256, indexed address, indexed uint256, uint256, uint256, uint256)",
+            "handler": "handleCreditListed"
+          },
+          {
+            "event": "ListingCancelled(indexed uint256, indexed address)",
+            "handler": "handleListingCancelled"
+          },
+          {
+            "event": "ListingUpdated(indexed uint256, uint256, uint256)",
+            "handler": "handleListingUpdated"
+          },
+          {
+            "event": "BuyOrderPlaced(indexed uint256, indexed address, indexed uint256, uint256, uint256, uint256)",
+            "handler": "handleBuyOrderPlaced"
+          },
+          {
+            "event": "BuyOrderCancelled(indexed uint256, indexed address, uint256)",
+            "handler": "handleBuyOrderCancelled"
+          },
+          {
+            "event": "BuyOrderFilled(indexed uint256, uint256, uint256)",
+            "handler": "handleBuyOrderFilled"
+          },
+          {
+            "event": "CreditTraded(indexed uint256, indexed uint256, indexed uint256, indexed address, indexed address, uint256, uint256, uint256, uint256, uint256, uint256, uint256, bool)",
+            "handler": "handleCreditTraded"
+          },
+          {
+            "event": "INRTradeLogged(indexed bytes32, indexed uint256, uint256, uint256, uint8, indexed address, address, bytes32, uint256)",
+            "handler": "handleINRTradeLogged"
+          },
+          {
+            "event": "MatchExecuted(indexed uint256, indexed uint256, uint256, uint256)",
+            "handler": "handleMatchExecuted"
+          }
+        ],
+        "file": "./src/mappings/marketplace.ts"
+      }
+    },
+    {
+      "kind": "ethereum",
+      "name": "KYCRegistry",
+      "network": "polygon",
+      "source": {
+        "address": "{{KYC_REGISTRY_ADDRESS}}",
+        "abi": "KYCRegistry",
+        "startBlock": {{KYC_REGISTRY_START_BLOCK}}
+      },
+      "mapping": {
+        "kind": "ethereum/indexer",
+        "apiVersion": "0.0.7",
+        "language": "wasm/assemblyscript",
+        "entities": [
+          "User"
+        ],
+        "abis": [
+          {
+            "name": "KYCRegistry",
+            "file": "./abis/KYCRegistry.json"
+          }
+        ],
+        "eventHandlers": [
+          {
+            "event": "KYCSubmitted(indexed address, uint256)",
+            "handler": "handleKYCSubmitted"
+          },
+          {
+            "event": "KYCApproved(indexed address, uint256, address)",
+            "handler": "handleKYCApproved"
+          },
+          {
+            "event": "KYCRejected(indexed address, uint256, string)",
+            "handler": "handleKYCRejected"
+          },
+          {
+            "event": "KYCRevoked(indexed address, uint256, address)",
+            "handler": "handleKYCRevoked"
+          }
+        ],
+        "file": "./src/mappings/kyc-registry.ts"
+      }
+    },
+    {
+      "kind": "ethereum",
+      "name": "Treasury",
+      "network": "polygon",
+      "source": {
+        "address": "{{TREASURY_ADDRESS}}",
+        "abi": "Treasury",
+        "startBlock": {{TREASURY_START_BLOCK}}
+      },
+      "mapping": {
+        "kind": "ethereum/indexer",
+        "apiVersion": "0.0.7",
+        "language": "wasm/assemblyscript",
+        "entities": [
+          "MarketplaceStats"
+        ],
+        "abis": [
+          {
+            "name": "Treasury",
+            "file": "./abis/Treasury.json"
+          }
+        ],
+        "eventHandlers": [
+          {
+            "event": "FeeDeposited(indexed address, uint256, uint8)",
+            "handler": "handleFeeDeposited"
+          },
+          {
+            "event": "FeeWithdrawn(indexed address, uint256, uint256)",
+            "handler": "handleFeeWithdrawn"
+          }
+        ],
+        "file": "./src/mappings/treasury.ts"
+      }
+    },
+    {
+      "kind": "ethereum",
+      "name": "CreditLedger",
+      "network": "polygon",
+      "source": {
+        "address": "{{CREDIT_LEDGER_ADDRESS}}",
+        "abi": "CreditLedger",
+        "startBlock": {{CREDIT_LEDGER_START_BLOCK}}
+      },
+      "mapping": {
+        "kind": "ethereum/indexer",
+        "apiVersion": "0.0.7",
+        "language": "wasm/assemblyscript",
+        "entities": [
+          "User",
+          "UserTokenBalance"
+        ],
+        "abis": [
+          {
+            "name": "CreditLedger",
+            "file": "./abis/CreditLedger.json"
+          }
+        ],
+        "eventHandlers": [
+          {
+            "event": "OwnershipLogged(indexed uint256, indexed bytes32, indexed uint256, int256, ActionType, bytes32)",
+            "handler": "handleOwnershipLogged"
+          },
+          {
+            "event": "CreditRetiredLogged(indexed uint256, indexed bytes32, indexed uint256, uint256, bytes32)",
+            "handler": "handleCreditRetiredLogged"
+          }
+        ],
+        "file": "./src/mappings/credit-ledger.ts"
+      }
+    },
+    {
+      "kind": "ethereum",
+      "name": "CreditLedger",
+      "network": "polygon",
+      "source": {
+        "address": "{{CREDIT_LEDGER_ADDRESS}}",
+        "abi": "CreditLedger",
+        "startBlock": {{CREDIT_LEDGER_START_BLOCK}}
+      },
+      "mapping": {
+        "kind": "ethereum/indexer",
+        "apiVersion": "0.0.7",
+        "language": "wasm/assemblyscript",
+        "entities": [
+          "User",
+          "UserTokenBalance"
+        ],
+        "abis": [
+          {
+            "name": "CreditLedger",
+            "file": "./abis/CreditLedger.json"
+          }
+        ],
+        "eventHandlers": [
+          {
+            "event": "OwnershipLogged(indexed uint256, indexed bytes32, indexed uint256, int256, ActionType, bytes32)",
+            "handler": "handleOwnershipLogged"
+          },
+          {
+            "event": "CreditRetiredLogged(indexed uint256, indexed bytes32, indexed uint256, uint256, bytes32)",
+            "handler": "handleCreditRetiredLogged"
+          }
+        ],
+        "file": "./src/mappings/credit-ledger.ts"
+      }
+    },
+    {
+      "kind": "ethereum",
+      "name": "Governance",
+      "network": "polygon",
+      "source": {
+        "address": "{{GOVERNANCE_ADDRESS}}",
+        "abi": "Governance",
+        "startBlock": {{GOVERNANCE_START_BLOCK}}
+      },
+      "mapping": {
+        "kind": "ethereum/indexer",
+        "apiVersion": "0.0.7",
+        "language": "wasm/assemblyscript",
+        "entities": [
+          "SafeConfig",
+          "SafeTransaction",
+          "TimelockProposal"
+        ],
+        "abis": [
+          {
+            "name": "Governance",
+            "file": "./abis/Governance.json"
+          }
+        ],
+        "eventHandlers": [
+          {
+            "event": "SafeRegistered(indexed address, string, uint256, address[])",
+            "handler": "handleSafeRegistered"
+          },
+          {
+            "event": "SafeUpdated(indexed address, string, bool)",
+            "handler": "handleSafeUpdated"
+          },
+          {
+            "event": "TransactionQueued(indexed uint256, indexed address, address, uint256)",
+            "handler": "handleTransactionQueued"
+          },
+          {
+            "event": "TransactionExecuted(indexed uint256, indexed address)",
+            "handler": "handleTransactionExecuted"
+          },
+          {
+            "event": "TransactionConfirmed(indexed uint256, indexed address)",
+            "handler": "handleTransactionConfirmed"
+          }
+        ],
+        "file": "./src/mappings/governance.ts"
+      }
+    }
+  ],
+  "templates": [
+    {
+      "name": "SafeTemplate",
+      "kind": "ethereum",
+      "network": "polygon",
+      "source": {
+        "abi": "GnosisSafe"
+      },
+      "mapping": {
+        "kind": "ethereum/indexer",
+        "apiVersion": "0.0.7",
+        "language": "wasm/assemblyscript",
+        "entities": [
+          "SafeConfig",
+          "SafeTransaction"
+        ],
+        "abis": [
+          {
+            "name": "GnosisSafe",
+            "file": "./abis/GnosisSafe.json"
+          }
+        ],
+        "eventHandlers": [
+          {
+            "event": "ExecutionSuccess(indexed bytes32)",
+            "handler": "handleExecutionSuccess"
+          },
+          {
+            "event": "ExecutionFailure(indexed bytes32)",
+            "handler": "handleExecutionFailure"
+          },
+          {
+            "event": "Confirmation(indexed bytes32, indexed address)",
+            "handler": "handleConfirmation"
+          }
+        ],
+        "file": "./src/mappings/safe-template.ts"
+      }
+    }
+  ]
+}

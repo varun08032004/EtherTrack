@@ -1,0 +1,4 @@
+[
+  { "type": "event", "name": "OwnershipLogged", "inputs": [ { "name": "logId", "type": "uint256", "indexed": true }, { "name": "userId", "type": "bytes32", "indexed": true }, { "name": "tokenId", "type": "uint256", "indexed": true }, { "name": "amountDelta", "type": "int256" }, { "name": "actionType", "type": "uint8" }, { "name": "refHash", "type": "bytes32" } ], "anonymous": false },
+  { "type": "event", "name": "CreditRetiredLogged", "inputs": [ { "name": "logId", "type": "uint256", "indexed": true }, { "name": "userId", "type": "bytes32", "indexed": true }, { "name": "tokenId", "type": "uint256", "indexed": true }, { "name": "amount", "type": "uint256" }, { "name": "refHash", "type": "bytes32" } ], "anonymous": false }
+]

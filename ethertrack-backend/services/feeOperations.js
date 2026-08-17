@@ -215,7 +215,7 @@ async function sweepPlatformFees() {
 
   // ── Razorpay Payout (outside DB transaction — external call) ─────────────
   try {
-    const payout = await razorpay.payouts.create({
+    const payout = await withRazorpay((rzp) => rzp.payouts.create({
       account_number:       process.env.RAZORPAY_ACCOUNT_NUMBER,
       fund_account_id:      process.env.COMPANY_FUND_ACCOUNT_ID,
       amount:               Math.round(balance * 100), // paise
@@ -230,7 +230,7 @@ async function sweepPlatformFees() {
         gst_owed:    String(gstOwed),
         platform:    'ethertrack',
       },
-    });
+    }));
 
     await query(
       `UPDATE company_fee_sweeps

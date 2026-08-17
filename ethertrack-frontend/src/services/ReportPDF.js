@@ -8,7 +8,7 @@
 //    [FIX-PATCH] Diagnostic patch removed — no longer needed after above fixes.
 // ─────────────────────────────────────────────────────────────────────────────
 
-'use strict';
+
 
 import { jsPDF } from 'jspdf';
 
@@ -43,7 +43,8 @@ const pdfStr = (v) => {
     .replace(/→/g,  '->')
     .replace(/·/g,  '.')
     .replace(/—/g,  '--')
-    .replace(/[^\x00-\xFF]/g, '?'); // strip anything outside latin-1
+    // eslint-disable-next-line no-control-regex
+    .replace(/[^\u0000-\u00FF]/g, '?'); // strip anything outside latin-1
   return s.length > 0 ? s : ' ';
 };
 
@@ -716,7 +717,6 @@ export const generateCDPPDF = async ({
   const s2    = agg(emissions, 2);
   const s2mkt = aggMarketBased(emissions);
   const s3    = agg(emissions, 3);
-  const total = s1 + s2 + s3;
   const retired = retirements.reduce((s, r) => s + parseInt(r.amount || 0, 10), 0);
 
   const p1     = previousYearEmissions ? agg(previousYearEmissions, 1) : 0;
@@ -779,10 +779,10 @@ export const generateCDPPDF = async ({
     );
   }
 
-  y = drawUncertaintyBlock(doc, ctx, y + 4);
+y = drawUncertaintyBlock(doc, ctx, y + 4);
   y = drawEmissionFactorAttribution(doc, ctx, y + 4);
-  y = drawVerifierBlock(doc, ctx, verifier, y + 4);
-  y = drawSignatureBlock(doc, ctx, y + 4, 'CDP Climate Change Questionnaire');
+  y = drawVerifierBlock(doc, ctx, y + 4);
+  drawSignatureBlock(doc, ctx, y + 4, 'CDP Climate Change Questionnaire');
 
   const totalPages = doc.getNumberOfPages();
   for (let p = 1; p <= totalPages; p++) { doc.setPage(p); drawFooter(doc, 'CDP CLIMATE CHANGE QUESTIONNAIRE'); }
@@ -855,7 +855,7 @@ export const generateTCFDPDF = async ({
   y = drawUncertaintyBlock(doc, ctx, y + 4);
   y = drawEmissionFactorAttribution(doc, ctx, y + 4);
   y = drawVerifierBlock(doc, ctx, verifier, y + 4);
-  y = drawSignatureBlock(doc, ctx, y + 4, 'TCFD Climate Disclosure');
+  drawSignatureBlock(doc, ctx, y + 4, 'TCFD Climate Disclosure');
 
   const totalPages = doc.getNumberOfPages();
   for (let p = 1; p <= totalPages; p++) { doc.setPage(p); drawFooter(doc, 'TCFD CLIMATE DISCLOSURE'); }

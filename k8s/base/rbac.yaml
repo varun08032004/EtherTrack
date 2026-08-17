@@ -1,0 +1,83 @@
+# EtherTrack - Service Accounts and RBAC
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ethertrack-backend
+  namespace: ethertrack
+  labels:
+    app: ethertrack-backend
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ethertrack-frontend
+  namespace: ethertrack
+  labels:
+    app: ethertrack-frontend
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ethertrack-cron
+  namespace: ethertrack
+  labels:
+    app: ethertrack-cron
+---
+# RBAC for backend to access Kubernetes API (for scaling, etc.)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ethertrack-backend
+  namespace: ethertrack
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ethertrack-backend
+  namespace: ethertrack
+subjects:
+  - kind: ServiceAccount
+    name: ethertrack-backend
+    namespace: ethertrack
+roleRef:
+  kind: Role
+  name: ethertrack-backend
+  apiGroup: rbac.authorization.k8s.io
+---
+# Cron job role for backup, cleanup, etc.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ethertrack-cron
+  namespace: ethertrack
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec", "pods/log"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "create", "delete", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ethertrack-cron
+  namespace: ethertrack
+subjects:
+  - kind: ServiceAccount
+    name: ethertrack-cron
+    namespace: ethertrack
+roleRef:
+  kind: Role
+  name: ethertrack-cron
+  apiGroup: rbac.authorization.k8s.io

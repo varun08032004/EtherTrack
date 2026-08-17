@@ -836,7 +836,7 @@ export default function CarbonCredits() {
       setSelected(listings[0]);
       setAnalyticsToken(listings[0]);
     }
-  }, [listings]);
+  }, [listings, selected]);
 
   // ── My open bids ──────────────────────────────────────────────
   useEffect(() => {
@@ -874,7 +874,7 @@ export default function CarbonCredits() {
         setAlerts(prev => prev.map(x => x.id === a.id ? { ...x, triggered: true } : x));
       }
     });
-  }, [listings, alerts]);
+  }, [listings, alerts, liveETHINR]);
 
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type });

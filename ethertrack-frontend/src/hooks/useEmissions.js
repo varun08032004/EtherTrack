@@ -49,38 +49,6 @@ export function useEmissions() {
     }
   }, [getContracts]);
 
-  // ── Log emission on-chain ───────────────────────────────────────────────────
-  // Replaces: local state update in EmissionTracking.js
-  const logEmission = useCallback(async (walletAddress, emissionData) => {
-    setTxPending(true);
-    setError('');
-    try {
-      const { emissionRegistry } = await getContracts();
-
-      const periodTimestamp = Math.floor(
-        new Date(emissionData.period || Date.now()).getTime() / 1000
-      );
-
-      const tx = await emissionRegistry.logEmission(
-        periodTimestamp,
-        emissionData.energyKWh   || 0,
-        emissionData.transportKm || 0,
-        emissionData.wasteKg     || 0,
-        emissionData.scope       || 0, // SCOPE_1
-        emissionData.notes       || '',
-      );
-      const receipt = await tx.wait();
-      await fetchEmissionLogs(walletAddress);
-      return { success: true, txHash: receipt.hash };
-    } catch (err) {
-      const msg = err.reason || err.message;
-      setError(msg);
-      return { success: false, error: msg };
-    } finally {
-      setTxPending(false);
-    }
-  }, [getContracts]);
-
   // ── Fetch emission history ──────────────────────────────────────────────────
   const fetchEmissionLogs = useCallback(async (walletAddress) => {
     if (!walletAddress) return;
@@ -113,6 +81,38 @@ export function useEmissions() {
       setLoading(false);
     }
   }, [getContracts]);
+
+  // ── Log emission on-chain ───────────────────────────────────────────────────
+  // Replaces: local state update in EmissionTracking.js
+  const logEmission = useCallback(async (walletAddress, emissionData) => {
+    setTxPending(true);
+    setError('');
+    try {
+      const { emissionRegistry } = await getContracts();
+
+      const periodTimestamp = Math.floor(
+        new Date(emissionData.period || Date.now()).getTime() / 1000
+      );
+
+      const tx = await emissionRegistry.logEmission(
+        periodTimestamp,
+        emissionData.energyKWh   || 0,
+        emissionData.transportKm || 0,
+        emissionData.wasteKg     || 0,
+        emissionData.scope       || 0, // SCOPE_1
+        emissionData.notes       || '',
+      );
+      const receipt = await tx.wait();
+      await fetchEmissionLogs(walletAddress);
+      return { success: true, txHash: receipt.hash };
+    } catch (err) {
+      const msg = err.reason || err.message;
+      setError(msg);
+      return { success: false, error: msg };
+    } finally {
+      setTxPending(false);
+    }
+  }, [getContracts, fetchEmissionLogs]);
 
   // ── Get net emissions (emitted - offset) ────────────────────────────────────
   const getNetEmissions = useCallback(async (walletAddress) => {

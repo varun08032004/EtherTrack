@@ -25,7 +25,7 @@
 //   5. Apply resolution map to all rows instantly → full preview + import
 
 import React, { useState, useRef, useCallback, useMemo } from 'react';
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 import { apiFetch } from '../../services/api';
 
 // ─── Sanitisation ─────────────────────────────────────────────────────────────
@@ -43,11 +43,14 @@ const normaliseDate = (raw) => {
   const s = String(raw).trim();
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
 
-  // Excel serial
+  // Excel serial number (days since 1900-01-01, with 1900 leap year bug)
   if (typeof raw === 'number' && raw > 1000) {
     try {
-      const d = XLSX.SSF.parse_date_code(raw);
-      if (d) return `${d.y}-${String(d.m).padStart(2,'0')}-${String(d.d).padStart(2,'0')}`;
+      const excelEpoch = new Date(1900, 0, 1);
+      // Excel incorrectly treats 1900 as a leap year, so adjust for dates after 1900-02-28
+      const daysOffset = raw - (raw > 59 ? 2 : 1);
+      const d = new Date(excelEpoch.getTime() + daysOffset * 86400000);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
     } catch (_) {}
   }
 
@@ -366,11 +369,25 @@ const readFile = (file) => new Promise((resolve, reject) => {
   const ext = file.name.split('.').pop().toLowerCase();
   if (['xlsx', 'xls', 'xlsm', 'ods'].includes(ext)) {
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
-        const wb  = XLSX.read(new Uint8Array(e.target.result), { type: 'array', cellDates: false });
-        const ws  = wb.Sheets[wb.SheetNames[0]];
-        resolve(XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }));
+        const buffer = e.target.result;
+        const workbook = new ExcelJS.Workbook();
+        await workbook.xlsx.load(buffer);
+        const worksheet = workbook.worksheets[0];
+        if (!worksheet) {
+          reject(new Error('No worksheets found in Excel file'));
+          return;
+        }
+        const rows = [];
+        worksheet.eachRow({ includeEmpty: false }, (row) => {
+          const rowData = [];
+          row.eachCell({ includeEmpty: true }, (cell) => {
+            rowData.push(cell.value ?? '');
+          });
+          rows.push(rowData);
+        });
+        resolve(rows);
       } catch (err) { reject(new Error('Could not parse Excel file: ' + err.message)); }
     };
     reader.onerror = reject;
@@ -406,13 +423,14 @@ const parseRows = (rows, EF) => {
   let quantityHeaderRaw = '';
   for (let i = 0; i < Math.min(5, rows.length); i++) {
     const map = {};
-    rows[i].forEach((cell, j) => {
+    for (let j = 0; j < rows[i].length; j++) {
+      const cell = rows[i][j];
       const c = resolveHeader(String(cell ?? ''));
       if (c && !(c in map)) {
         map[c] = j;
         if (c === 'quantity') quantityHeaderRaw = String(cell ?? '');
       }
-    });
+    }
     if (Object.keys(map).length >= 2) { headerRowIdx = i; headerMap = map; break; }
   }
 
@@ -683,8 +701,8 @@ export default function CSVImport({ EF, year, onBulkAdded, onImportError }) {
     if (!file) return;
     if (file.size > 15 * 1024 * 1024) { toast('File too large — max 15 MB', 'err'); return; }
     const ext = file.name.split('.').pop().toLowerCase();
-    if (!['csv', 'txt', 'xlsx', 'xls', 'xlsm', 'ods'].includes(ext)) {
-      toast(`Unsupported format .${ext} — use CSV or Excel`, 'err'); return;
+    if (!['csv', 'txt', 'xlsx', 'xls', 'xlsm'].includes(ext)) {
+      toast(`Unsupported format .${ext} — use CSV or Excel (.xlsx, .xls, .xlsm)`, 'err'); return;
     }
     try {
       toast('Reading file…');
@@ -826,15 +844,18 @@ export default function CSVImport({ EF, year, onBulkAdded, onImportError }) {
             <div className="ci-drop-icon">📊</div>
             <div className="ci-drop-title">DROP FILE HERE OR CLICK TO BROWSE</div>
             <div className="ci-drop-sub">
-              CSV, Excel (.xlsx / .xls) · Max 15 MB · Up to 20,000 rows<br/>
+              CSV, Excel (.xlsx / .xls / .xlsm) · Max 15 MB · Up to 20,000 rows<br/>
               Column order doesn't matter — we detect date, activity, quantity, notes automatically<br/>
               <span style={{ color: '#14b8a6' }}>Pre-calculated tCO₂e columns auto-detected</span> — name your quantity column "Quantity (tCO2e)"
             </div>
           </div>
-          <input ref={fileRef} type="file" accept=".csv,.txt,.xlsx,.xls,.xlsm,.ods"
+          <input ref={fileRef} type="file" accept=".csv,.txt,.xlsx,.xls,.xlsm"
             style={{ display: 'none' }} onChange={e => processFile(e.target.files[0])} />
           <div style={{ fontSize: 10, color: 'var(--mut)', textAlign: 'center', marginTop: 4 }}>
             Activity names don't need to match exactly — we'll suggest the right emission factor · Scope 2 electricity, heating & cooling fully supported
+          </div>
+          <div style={{ fontSize: 9, color: '#14b8a6', textAlign: 'center', marginTop: 6 }}>
+            📝 ODS (OpenDocument) format not supported — please use .xlsx, .xls, .xlsm, or CSV
           </div>
         </>)}
 

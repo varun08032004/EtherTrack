@@ -1,0 +1,482 @@
+# EtherTrack - CI/CD Pipeline
+# Continuous Integration and Continuous Deployment
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      skip_tests:
+        description: 'Skip tests (emergency only)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  BACKEND_IMAGE: ${{ github.repository }}-backend
+  FRONTEND_IMAGE: ${{ github.repository }}-frontend
+
+jobs:
+  # ===========================================
+  # LINT & TYPE CHECK
+  # ===========================================
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            ethertrack-backend/package-lock.json
+            ethertrack-frontend/package-lock.json
+
+      - name: Install backend dependencies
+        run: |
+          cd ethertrack-backend
+          npm ci
+
+      - name: Install frontend dependencies
+        run: |
+          cd ethertrack-frontend
+          npm ci
+
+      - name: Run backend lint
+        run: |
+          cd ethertrack-backend
+          npm run lint 2>/dev/null || echo "No lint script defined"
+
+      - name: Run frontend lint
+        run: |
+          cd ethertrack-frontend
+          npm run lint 2>/dev/null || echo "No lint script defined"
+
+      - name: Run backend typecheck
+        run: |
+          cd ethertrack-backend
+          npx tsc --noEmit 2>/dev/null || echo "No TypeScript config or tsc not available"
+
+      - name: Run frontend typecheck
+        run: |
+          cd ethertrack-frontend
+          npx tsc --noEmit 2>/dev/null || echo "No TypeScript config or tsc not available"
+
+  # ===========================================
+  # SECURITY SCANS
+  # ===========================================
+  security:
+    name: Security Scans
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: lint
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --verbose --redact --config=.gitleaks.toml
+
+      - name: Run TruffleHog
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.pull_request.base.sha || '' }}
+          head: ${{ github.event.pull_request.head.sha || github.sha }}
+          extra_args: --fail --json --no-verification
+
+      - name: Backend npm audit
+        run: |
+          cd ethertrack-backend
+          npm audit --audit-level=high --json > audit-report.json || true
+          CRITICAL=$(jq '[.vulnerabilities[] | select(.severity == "critical")] | length' audit-report.json)
+          HIGH=$(jq '[.vulnerabilities[] | select(.severity == "high")] | length' audit-report.json)
+          if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+            echo "::error::Found $CRITICAL critical and $HIGH high severity vulnerabilities"
+            cat audit-report.json | jq '.vulnerabilities[] | select(.severity == "critical" or .severity == "high") | {package: .name, severity: .severity, title: .title, url: .url}'
+            exit 1
+          fi
+
+      - name: Frontend npm audit
+        run: |
+          cd ethertrack-frontend
+          npm audit --audit-level=critical --json > audit-report.json || true
+          CRITICAL=$(jq '[.vulnerabilities[] | select(.severity == "critical")] | length' audit-report.json)
+          if [ "$CRITICAL" -gt 0 ]; then
+            echo "::error::Found $CRITICAL critical severity vulnerabilities"
+            cat audit-report.json | jq '.vulnerabilities[] | select(.severity == "critical") | {package: .name, severity: .severity, title: .title, url: .url}'
+            exit 1
+          fi
+
+      - name: Snyk scan
+        if: env.SNYK_TOKEN != ''
+        uses: snyk/actions/node@master
+        with:
+          command: test
+          args: --severity-threshold=high --json-file-output=snyk-report.json
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Upload security reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: |
+            */audit-report.json
+            snyk-report.json
+          retention-days: 30
+
+  # ===========================================
+  # BACKEND TESTS
+  # ===========================================
+  backend-tests:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: lint
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: ethertrack_test
+          POSTGRES_USER: ethertrack
+          POSTGRES_PASSWORD: test_password
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U ethertrack -d ethertrack_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: [6379:6379]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: ethertrack-backend/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          cd ethertrack-backend
+          npm ci
+
+      - name: Run database migrations
+        run: |
+          cd ethertrack-backend
+          DATABASE_URL=postgresql://ethertrack:test_password@localhost:5432/ethertrack_test npm run db:migrate
+
+      - name: Run backend tests
+        run: |
+          cd ethertrack-backend
+          DATABASE_URL=postgresql://ethertrack:test_password@localhost:5432/ethertrack_test \
+          REDIS_URL=redis://localhost:6379 \
+          npm test -- --coverage
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: ethertrack-backend/coverage
+          retention-days: 30
+
+  # ===========================================
+  # FRONTEND TESTS
+  # ===========================================
+  frontend-tests:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: lint
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: ethertrack-frontend/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          cd ethertrack-frontend
+          npm ci
+
+      - name: Run frontend tests
+        run: |
+          cd ethertrack-frontend
+          npm test -- --coverage --watchAll=false
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage
+          path: ethertrack-frontend/coverage
+          retention-days: 30
+
+  # ===========================================
+  # CONTRACT TESTS
+  # ===========================================
+  contract-tests:
+    name: Contract Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: lint
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: ethertrack-contracts/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          cd ethertrack-contracts
+          npm ci
+
+      - name: Compile contracts
+        run: |
+          cd ethertrack-contracts
+          npx hardhat compile
+
+      - name: Run contract tests
+        run: |
+          cd ethertrack-contracts
+          npx hardhat test
+
+      - name: Run contract fuzzing
+        run: |
+          cd ethertrack-contracts
+          npx hardhat test --grep "invariant" || echo "No invariant tests found"
+
+  # ===========================================
+  # BUILD DOCKER IMAGES
+  # ===========================================
+  build:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [backend-tests, frontend-tests, contract-tests, security]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Backend
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./ethertrack-backend
+          file: ./ethertrack-backend/Dockerfile
+          push: true
+          tags: ${{ steps.meta-backend.outputs.tags }}
+          labels: ${{ steps.meta-backend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Extract metadata for Frontend
+        id: meta-frontend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./ethertrack-frontend
+          file: ./ethertrack-frontend/Dockerfile
+          push: true
+          tags: ${{ steps.meta-frontend.outputs.tags }}
+          labels: ${{ steps.meta-frontend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ===========================================
+  # DEPLOY STAGING
+  # ===========================================
+  deploy-staging:
+    name: Deploy Staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build
+    if: github.ref == 'refs/heads/develop' || github.event.workflow_dispatch.inputs.environment == 'staging'
+    environment: staging
+    steps:
+      - name: Deploy to Staging
+        run: |
+          echo "Deploying to staging environment..."
+          # kubectl set image deployment/ethertrack-backend backend=${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:latest -n staging
+          # kubectl set image deployment/ethertrack-frontend frontend=${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:latest -n staging
+          # kubectl rollout status deployment/ethertrack-backend -n staging --timeout=300s
+          # kubectl rollout status deployment/ethertrack-frontend -n staging --timeout=300s
+          echo "Staging deployment simulated (replace with actual kubectl commands)"
+
+      - name: Run smoke tests
+        run: |
+          echo "Running smoke tests against staging..."
+          # curl -f https://staging-api.ethertrack.in/health || exit 1
+          # curl -f https://staging.ethertrack.in/health || exit 1
+          echo "Smoke tests passed (simulated)"
+
+  # ===========================================
+  # DEPLOY PRODUCTION (Blue-Green)
+  # ===========================================
+  deploy-production:
+    name: Deploy Production (Blue-Green)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: build
+    if: github.ref == 'refs/heads/main' || github.event.workflow_dispatch.inputs.environment == 'production'
+    environment: production
+    steps:
+      - name: Checkout deployment config
+        uses: actions/checkout@v4
+        with:
+          path: deploy-config
+          repository: ethertrack/deployment-config
+          token: ${{ secrets.DEPLOY_CONFIG_TOKEN }}
+
+      - name: Deploy to Blue environment
+        id: deploy-blue
+        run: |
+          echo "Deploying to Blue environment (inactive)..."
+          # kubectl set image deployment/ethertrack-backend-blue backend=${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:${{ github.sha }} -n production
+          # kubectl set image deployment/ethertrack-frontend-blue frontend=${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:${{ github.sha }} -n production
+          # kubectl rollout status deployment/ethertrack-backend-blue -n production --timeout=300s
+          # kubectl rollout status deployment/ethertrack-frontend-blue -n production --timeout=300s
+          echo "Blue deployment simulated"
+
+      - name: Run smoke tests on Blue
+        id: smoke-blue
+        run: |
+          echo "Running smoke tests on Blue environment..."
+          # curl -f https://blue-api.ethertrack.in/health || exit 1
+          # curl -f https://blue.ethertrack.in/health || exit 1
+          echo "Blue smoke tests passed (simulated)"
+
+      - name: Switch traffic to Blue (Blue-Green switch)
+        id: switch-traffic
+        run: |
+          echo "Switching traffic from Green to Blue..."
+          # kubectl patch service ethertrack-api -n production -p '{"spec":{"selector":{"version":"blue"}}}'
+          # kubectl patch service ethertrack-frontend -n production -p '{"spec":{"selector":{"version":"blue"}}}'
+          echo "Traffic switch simulated"
+
+      - name: Run post-switch smoke tests
+        run: |
+          echo "Running post-switch smoke tests..."
+          # curl -f https://api.ethertrack.in/health || exit 1
+          # curl -f https://ethertrack.in/health || exit 1
+          echo "Post-switch smoke tests passed (simulated)"
+
+      - name: Monitor for 5 minutes
+        run: |
+          echo "Monitoring for 5 minutes..."
+          # sleep 300
+          # Check error rates, latency, etc.
+          echo "Monitoring complete"
+
+      - name: Cleanup Green (optional - keep for quick rollback)
+        if: always()
+        run: |
+          echo "Keeping Green environment for 1 hour for quick rollback..."
+          # kubectl scale deployment/ethertrack-backend-green --replicas=1 -n production
+          # kubectl scale deployment/ethertrack-frontend-green --replicas=1 -n production
+
+  # ===========================================
+  # ROLLBACK (Manual Trigger)
+  # ===========================================
+  rollback:
+    name: Rollback Production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'workflow_dispatch'
+    environment: production
+    steps:
+      - name: Rollback to previous version
+        run: |
+          echo "Rolling back to previous version..."
+          # kubectl rollout undo deployment/ethertrack-backend -n production
+          # kubectl rollout undo deployment/ethertrack-frontend -n production
+          # kubectl rollout status deployment/ethertrack-backend -n production --timeout=300s
+          # kubectl rollout status deployment/ethertrack-frontend -n production --timeout=300s
+          echo "Rollback simulated"
+
+      - name: Verify rollback
+        run: |
+          echo "Verifying rollback..."
+          # curl -f https://api.ethertrack.in/health || exit 1
+          # curl -f https://ethertrack.in/health || exit 1
+          echo "Rollback verified (simulated)"

@@ -1,0 +1,6 @@
+[
+  { "type": "event", "name": "KYCSubmitted", "inputs": [ { "name": "user", "type": "address", "indexed": true }, { "name": "submittedAt", "type": "uint256" } ], "anonymous": false },
+  { "type": "event", "name": "KYCApproved", "inputs": [ { "name": "user", "type": "address", "indexed": true }, { "name": "submittedAt", "type": "uint256" }, { "name": "approvedAt", "type": "uint256" }, { "name": "approver", "type": "address" } ], "anonymous": false },
+  { "type": "event", "name": "KYCRejected", "inputs": [ { "name": "user", "type": "address", "indexed": true }, { "name": "submittedAt", "type": "uint256" }, { "name": "rejectedAt", "type": "uint256" }, { "name": "rejector", "type": "address" } ], "anonymous": false },
+  { "type": "event", "name": "KYCRevoked", "inputs": [ { "name": "user", "type": "address", "indexed": true }, { "name": "revokedAt", "type": "uint256" }, { "name": "revoker", "type": "address" } ], "anonymous": false }
+]

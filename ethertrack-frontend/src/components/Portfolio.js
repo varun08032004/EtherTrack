@@ -21,7 +21,13 @@
 //   card with a `certId` now shows a CERTIFICATE button — not just RETIRED
 //   ones — since Certificates of Ownership are now issued at purchase/
 //   transfer time too, not just at retirement.
-'use strict';
+// [FIX-JSX-SYNTAX] Two parser errors fixed:
+//   1) `{KYCExpiryBanner navigate={navigate}/}` was written as a JS
+//      expression container instead of a JSX element — corrected to
+//      `<KYCExpiryBanner navigate={navigate}/>`.
+//   2) The `.pt-card-actions` wrapper `<div>` inside each credit card was
+//      never closed before `</article>` — added the missing `</div>`.
+
 
 import React, {
   useState, useContext, useEffect, useRef,
@@ -42,7 +48,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
   LineChart, Line, Legend,
 } from 'recharts';
-import SellerApprovalBanner from '../components/SellerApprovalBanner';
+
 import { RetirementCertificate } from '../components/RetirementCertificate';
 
 // ── RBAC ─────────────────────────────────────────────────────────
@@ -800,14 +806,11 @@ export default function PortfolioV3() {
   const navigate = useNavigate();
   const { user, dbUser } = useContext(AuthContext);
   const {
-    myCredits, myBoughtCredits, myLedgerCredits, myRetirements, stats, loading,
-    walletAddress, isKYCVerified,
+    myCredits, myBoughtCredits, myRetirements, stats, loading,
+    isKYCVerified,
     listCredit, delistCredit, retireCredit,
-    listCreditLedger, delistCreditLedger, retireCreditLedger,
+    retireCreditLedger,
     loadMyCredits, refreshKYC, refreshRetirements, refreshBoughtCredits, refreshLedgerCredits,
-    // [FIX-SHARED-PRICING] same market snapshot PortfolioContext's `stats`
-    // uses to compute totalValue — pricing/badges here are guaranteed to
-    // reconcile with the Dashboard because both read this exact object.
     marketBuckets,
   } = usePortfolio();
 
@@ -868,13 +871,14 @@ export default function PortfolioV3() {
   }, []);
 
   useEffect(() => {
-    if (!walletAddress || !refreshKYC) return;
+    if (!refreshKYC) return;
     refreshKYC();
     if (!isKYCVerified) {
       kycIntervalRef.current = setInterval(refreshKYC, 15000);
     }
     return () => { if (kycIntervalRef.current) clearInterval(kycIntervalRef.current); };
-  }, [walletAddress, refreshKYC, isKYCVerified]);
+// eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (isKYCVerified && kycIntervalRef.current) {
@@ -996,38 +1000,21 @@ useEffect(() => {
     })),
   [myBoughtCredits]);
 
-  // [FIX-LEDGER] Wallet-free (pooled custody) credits — normalised to the
-  // same shape as everything else, tagged isLedger:true so LIST/DELIST/
-  // RETIRE actions know to call the ledger-backed functions instead of the
-  // wallet-based ones. certId (populated by the backend for any credit that
-  // came from a BUY/transfer) drives the CERTIFICATE button below.
-  const normalisedLedger = useMemo(() =>
-    (myLedgerCredits || []).map(l => ({
-      ...l,
-      status        : 'HELD',
-      isLedger      : true,
-      isBought      : false,
-      isOnChain     : true,
-      admin_status  : 'approved',
-      listedCredits : safeNum(l.listedCredits, 0),
-      pricePerCredit: safeNum(l.pricePerCredit, 850),
-    })),
-  [myLedgerCredits]);
-
+  // myCredits from context now includes both self-custody and pooled-custody credits
   const allCredits = useMemo(
-    () => [...ownedCredits, ...normalisedBought, ...normalisedLedger],
-    [ownedCredits, normalisedBought, normalisedLedger]
+    () => [...ownedCredits, ...normalisedBought],
+    [ownedCredits, normalisedBought]
   );
 
   const tabCounts = useMemo(() => ({
     ALL     : allCredits.length,
-    HELD    : ownedCredits.filter(c => c.status==='HELD'||c.status==='PARTIAL').reduce((s,c)=>s+safeNum(c.heldCredits??c.credits),0) + normalisedBought.reduce((s,c)=>s+safeNum(c.heldCredits??c.credits),0) + normalisedLedger.reduce((s,c)=>s+safeNum(c.heldCredits??c.credits),0),
-    LISTED  : ownedCredits.filter(c => c.status==='LISTED'||c.status==='PARTIAL').reduce((s,c)=>s+safeNum(c.listedCredits),0) + normalisedLedger.reduce((s,c)=>s+safeNum(c.listedCredits),0),
+    HELD    : ownedCredits.filter(c => c.status==='HELD'||c.status==='PARTIAL').reduce((s,c)=>s+safeNum(c.heldCredits??c.credits),0) + normalisedBought.reduce((s,c)=>s+safeNum(c.heldCredits??c.credits),0),
+    LISTED  : ownedCredits.filter(c => c.status==='LISTED'||c.status==='PARTIAL').reduce((s,c)=>s+safeNum(c.listedCredits),0),
     BOUGHT  : normalisedBought.length,
     RETIRED : myRetirements.length,
     PENDING : ownedCredits.filter(c => c.isPending && !c.isRejected).length,
     REJECTED: ownedCredits.filter(c => c.isRejected).length,
-  }), [allCredits, ownedCredits, normalisedBought, normalisedLedger, myRetirements]);
+  }), [allCredits, ownedCredits, normalisedBought, myRetirements]);
 
   // [FIX-SHARED-PRICING] getReferencePrice calls include (creditType,
   // marketBuckets) so this reconciles with PortfolioContext's
@@ -1048,10 +1035,10 @@ useEffect(() => {
 
   const retiredTco2 = myRetirements.reduce((s, r) => s + safeNum(r.amount), 0);
 
-  const totalInvested = normalisedBought.reduce((s, c) =>
+  const totalInvested = myBoughtCredits.reduce((s, c) =>
     s + safeNum(c.pricePerCredit) * safeNum(c.heldCredits ?? c.credits), 0);
 
-  const totalCurrentValue = normalisedBought.reduce((s, c) =>
+  const totalCurrentValue = myBoughtCredits.reduce((s, c) =>
     s + getReferencePrice(c.projectType, c.standard, c.vintageYear, c.creditType, marketBuckets)
       * safeNum(c.heldCredits ?? c.credits), 0);
 
@@ -1059,7 +1046,7 @@ useEffect(() => {
   const pnlPct = totalInvested > 0 ? ((pnl / totalInvested) * 100).toFixed(1) : 0;
 
   return { totalTco2, listedTco2, portfolioValue, retiredTco2, pnl, pnlPct };
-}, [allCredits, myRetirements, normalisedBought, marketBuckets]);
+}, [allCredits, myRetirements, myBoughtCredits, marketBuckets]);
 
   const filtered = useMemo(() => {
   let result = allCredits.filter(c => {
@@ -1327,7 +1314,10 @@ useEffect(() => {
 
  const handleListForSale = async (credit) => {
   if (!can('portfolio:list')) { showToast('No permission to list credits', 'error'); return; }
-  if (!credit.isLedger && !credit.tokenId && credit.tokenId !== 0) { showToast('Credit not yet minted on-chain', 'error'); return; }
+  if (!credit.tokenId && credit.tokenId !== 0 && !credit.batchId) {
+    showToast('Credit not yet available for listing', 'error');
+    return;
+  }
   const price = safeNum(listPrice);
   if (!price || price <= 0) { showToast('Enter a valid price', 'error'); return; }
   const qty = parseInt(listQty, 10) || credit.credits;
@@ -1336,53 +1326,9 @@ useEffect(() => {
     return;
   }
 
-  // [FIX-LEDGER] Wallet-free sellers — no on-chain escrow, no ETH price
-  // needed. Just a DB-visible listing against their ledger balance.
-  if (credit.isLedger) {
-    try {
-      setTxPending(`Listing "${sanitise(credit.projectName)}"…`);
-      await listCreditLedger(credit.tokenId, credit.batchId || null, qty, price, 30);
-      setShowList(null);
-      setListPrice('');
-      setListQty('');
-      setListPriceWarn('');
-      setActiveTab('LISTED');
-      showToast('Listed on marketplace!');
-      await refreshLedgerCredits();
-    } catch (e) {
-      showToast(e.message || 'Listing failed', 'error');
-    } finally {
-      if (mountedRef.current) setTxPending('');
-    }
-    return;
-  }
-
   try {
     setTxPending(`Listing "${sanitise(credit.projectName)}"…`);
-    const rate     = ethPriceInr || 210000;
-    const priceEth = (price / rate).toFixed(6);
-    const result   = await listCredit(credit.tokenId, qty, priceEth, price);
-
-    const { listingId } = result;
-    if (listingId !== null && listingId !== undefined) {
-      try {
-        await apiFetch('/api/portfolio/confirm-listing', {
-          method : 'POST',
-          body   : JSON.stringify({
-            batchId          : credit.id,
-            listingIdOnchain : listingId,
-            txHash           : result.txHash || null,
-            pricePerCreditInr: price,
-          }),
-        });
-      } catch (dbErr) {
-        console.error('[confirm-listing] DB sync failed:', dbErr?.message);
-        showToast('Listed on-chain but market sync failed — refresh in a moment', 'error');
-      }
-    } else {
-      console.warn('[handleListForSale] listingId not returned from contract — market may lag');
-    }
-
+    await listCredit(credit.tokenId, credit.batchId, qty, price, 30);
     setShowList(null);
     setListPrice('');
     setListQty('');
@@ -1391,7 +1337,7 @@ useEffect(() => {
     showToast('Listed on marketplace!');
     await loadMyCredits();
   } catch (e) {
-    showToast(e.message || 'Transaction failed', 'error');
+    showToast(e.message || 'Listing failed', 'error');
   } finally {
     if (mountedRef.current) setTxPending('');
   }
@@ -1400,73 +1346,20 @@ useEffect(() => {
 const handleDelist = async (credit, qty) => {
   if (!can('portfolio:list')) { showToast('No permission', 'error'); return; }
 
-  // [FIX-LEDGER] Wallet-free sellers — nothing was ever escrowed out of
-  // pooled custody, so delisting is just deactivating the DB listing row.
-  if (credit.isLedger) {
-    try {
-      setTxPending('Cancelling listing…');
-      await delistCreditLedger(credit.ledgerListingId);
-      showToast('Listing removed from marketplace.');
-      await refreshLedgerCredits();
-    } catch (e) {
-      showToast(e.message || 'Delisting failed', 'error');
-    } finally {
-      if (mountedRef.current) setTxPending('');
-      setShowDelist(null);
-      setDelistQty('');
-    }
-    return;
-  }
-
   try {
     setTxPending('Cancelling listing…');
-    const onchainListingId = credit.listingIdOnchain ?? credit.listingId;
+    await delistCredit(credit.listingId);
 
     if (qty && qty < credit.listedCredits) {
-      await delistCredit(onchainListingId);
-
-      try {
-        await apiFetch('/api/portfolio/confirm-delisting', {
-          method : 'POST',
-          body   : JSON.stringify({ batchId: credit.id }),
-        });
-      } catch (e) { console.error('[confirm-delisting]', e?.message); }
-
       const remainingQty = credit.listedCredits - qty;
-      const rate         = ethPriceInr || 210000;
-      const priceEth     = (credit.pricePerCredit / rate).toFixed(6);
-      const relistResult = await listCredit(credit.tokenId, remainingQty, priceEth, credit.pricePerCredit);
-
-      if (relistResult?.listingId !== null && relistResult?.listingId !== undefined) {
-        try {
-          await apiFetch('/api/portfolio/confirm-listing', {
-            method : 'POST',
-            body   : JSON.stringify({
-              batchId          : credit.id,
-              listingIdOnchain : relistResult.listingId,
-              txHash           : relistResult.txHash || null,
-              pricePerCreditInr: credit.pricePerCredit,
-            }),
-          });
-        } catch (e) { console.error('[confirm-listing relist]', e?.message); }
-      }
-
+      await listCredit(credit.tokenId, credit.batchId, remainingQty, credit.pricePerCredit, 30);
       showToast(`${qty} credits delisted. ${remainingQty} still listed.`);
     } else {
-      await delistCredit(onchainListingId);
-
-      try {
-        await apiFetch('/api/portfolio/confirm-delisting', {
-          method : 'POST',
-          body   : JSON.stringify({ batchId: credit.id }),
-        });
-      } catch (e) { console.error('[confirm-delisting]', e?.message); }
-
       showToast('All credits removed from marketplace.');
     }
     await loadMyCredits();
   } catch (e) {
-    showToast(e.message || 'Transaction failed', 'error');
+    showToast(e.message || 'Delisting failed', 'error');
   } finally {
     if (mountedRef.current) setTxPending('');
     setShowDelist(null);
@@ -1487,17 +1380,10 @@ const handleBulkList = async () => {
 
   setBulkProgress({ total: selectedCredits.length, done: 0, failed: 0, status: 'listing' });
 
-  const rate = ethPriceInr || 210000;
-  const priceEth = (price / rate).toFixed(6);
-
   for (let i = 0; i < selectedCredits.length; i++) {
     const credit = selectedCredits[i];
     try {
-      if (credit.isLedger) {
-        await listCreditLedger(credit.tokenId, credit.batchId || null, credit.heldCredits ?? credit.credits, price, 30);
-      } else {
-        await listCredit(credit.tokenId, credit.heldCredits ?? credit.credits, priceEth, price);
-      }
+      await listCredit(credit.tokenId, credit.batchId, credit.heldCredits ?? credit.credits, price, 30);
       setBulkProgress(p => ({ ...p, done: p.done + 1 }));
     } catch (e) {
       setBulkProgress(p => ({ ...p, failed: p.failed + 1 }));
@@ -1526,11 +1412,7 @@ const handleBulkRetire = async () => {
   for (let i = 0; i < selectedCredits.length; i++) {
     const credit = selectedCredits[i];
     try {
-      if (credit.isLedger) {
-        await retireCreditLedger(credit.tokenId, credit.heldCredits ?? credit.credits);
-      } else {
-        await retireCredit(credit.tokenId, credit.heldCredits ?? credit.credits, '1', {});
-      }
+      await retireCredit(credit.tokenId, credit.heldCredits ?? credit.credits, '1', {});
       setBulkProgress(p => ({ ...p, done: p.done + 1 }));
     } catch (e) {
       setBulkProgress(p => ({ ...p, failed: p.failed + 1 }));
@@ -1583,10 +1465,9 @@ const result = await retireCredit(credit.tokenId, qty);
           projectType    : credit.projectType,
           txHash         : result.txHash,
           blockNumber    : result.blockNumber || null,
-          beneficiary    : user?.email || walletAddress,
+          beneficiary    : user?.email,
           retireScope    : scope,
           correspondingAdjustment : credit.correspondingAdjustment,
-          walletAddress,
           beneficiaryName    : corporateData?.beneficiaryName   || '',
           beneficiaryEntity  : corporateData?.beneficiaryEntity || '',
           beneficiaryGstin   : corporateData?.beneficiaryGstin  || '',
@@ -1801,20 +1682,6 @@ const result = await retireCredit(credit.tokenId, qty);
           </div>
 
           <KYCExpiryBanner navigate={navigate}/>
-          <SellerApprovalBanner />
-
-          {walletAddress && !isKYCVerified && (
-            <div role="alert" style={{ marginBottom:20, padding:'12px 16px', background:'#110a00',
-              border:'1px solid #f59e0b33', borderRadius:8, fontSize:11, color:'#f59e0b88',
-              display:'flex', alignItems:'center', gap:10 }}>
-              ⚠️ KYC not verified.{' '}
-              <button onClick={() => refreshKYC && refreshKYC()}
-                style={{ background:'none', border:'none', color:'#f59e0b',
-                  cursor:'pointer', fontSize:11, textDecoration:'underline', padding:0 }}>
-                Refresh KYC status
-              </button>
-            </div>
-          )}
 
           {creditLimitReached && (
             <div role="alert" style={{ marginBottom:20, padding:'12px 16px', background:'#110a00',
@@ -1839,13 +1706,7 @@ const result = await retireCredit(credit.tokenId, qty);
                     {myCredits.filter(c => c.status !== 'RETIRED').length} active tokens
                   </span>
               }
-              {walletAddress && (
-                <a href={`https://sepolia.etherscan.io/address/${walletAddress}`}
-                  target="_blank" rel="noreferrer noopener"
-                  style={{ color:'#60a5fa88', textDecoration:'none', fontSize:11 }}>
-                  🔗 {walletAddress.slice(0,6)}…{walletAddress.slice(-4)} ↗
-                </a>
-              )}
+              
               {ethPriceInr && (
                 <span style={{ fontSize:10, color:'#22c55e77' }}>
                   ETH ₹{ethPriceInr.toLocaleString()}
@@ -2793,23 +2654,15 @@ const result = await retireCredit(credit.tokenId, qty);
             </>
         }
       </>
-    ) : (
+) : (
       <>
         <button className="pt-act-btn cert" onClick={() => setShowCert(credit)}>
           📜 CERTIFICATE
         </button>
-        <a href={`https://sepolia.etherscan.io/address/${walletAddress}`}
-          target="_blank" rel="noreferrer noopener"
-          className="pt-act-btn market"
-          style={{ textDecoration:'none', display:'flex', alignItems:'center',
-            justifyContent:'center' }}>
-          ETHERSCAN ↗
-        </a>
       </>
     )}
-  </div>
-
-</article>
+    </div>
+    </article>
                   );
                 })}
               </div>
@@ -3688,19 +3541,7 @@ const result = await retireCredit(credit.tokenId, qty);
             </div>
           )}
 
-          {isMinted && (
-            <div>
-              <a href={`https://sepolia.etherscan.io/address/${walletAddress}`}
-                target="_blank" rel="noreferrer noopener"
-                style={{ fontSize:10, color:'#60a5fa88', textDecoration:'none',
-                  display:'inline-flex', alignItems:'center', gap:6, padding:'6px 14px',
-                  borderRadius:6, border:'1px solid #60a5fa22', background:'#060e18' }}>
-                ⛓ VIEW ON ETHERSCAN ↗
-              </a>
-            </div>
-          )}
-
-        </div>
+</div>
 
         <div style={{ padding:'14px 24px', borderTop:'1px solid #0d1f11',
           background:'#050809', display:'flex', justifyContent:'flex-end' }}>

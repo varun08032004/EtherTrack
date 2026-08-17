@@ -1,0 +1,219 @@
+# EtherTrack Subgraph Schema
+# The Graph subgraph for indexing EtherTrack protocol events
+
+# ─────────────────────────────────────────────────────────────
+# Core Entities
+# ─────────────────────────────────────────────────────────────
+
+type CarbonCredit @entity {
+  id: ID!                           # tokenId
+  projectName: String!
+  location: String!
+  standard: Standard!
+  projectType: String!
+  developer: String!
+  vintageYear: BigInt!
+  expiryDate: BigInt!
+  serialNumber: String!
+  metadataURI: String!
+  active: Boolean!
+  registeredBy: Bytes!
+  registeredAt: BigInt!
+  totalSupply: BigInt!
+  totalRetired: BigInt!
+  totalListed: BigInt!
+  totalSold: BigInt!
+  currentPriceETH: BigInt
+  currentPriceINR: BigInt
+  lastTradeAt: BigInt
+  createdAt: BigInt!
+  updatedAt: BigInt!
+}
+
+type Listing @entity {
+  id: ID!                           # listingId
+  seller: Bytes!
+  token: CarbonCredit!
+  amount: BigInt!
+  amountRemaining: BigInt!
+  pricePerUnitETH: BigInt!
+  pricePerUnitINR: BigInt!
+  listedAt: BigInt!
+  expiresAt: BigInt!
+  active: Boolean!
+  createdAt: BigInt!
+  updatedAt: BigInt!
+}
+
+type BuyOrder @entity {
+  id: ID!                           # orderId
+  buyer: Bytes!
+  token: CarbonCredit!
+  amount: BigInt!
+  amountFilled: BigInt!
+  limitPrice: BigInt!
+  ethEscrowed: BigInt!
+  status: OrderStatus!
+  createdAt: BigInt!
+  expiresAt: BigInt!
+  updatedAt: BigInt!
+}
+
+type Trade @entity {
+  id: ID!                           # tradeId
+  listing: Listing
+  buyOrder: BuyOrder
+  buyer: Bytes!
+  seller: Bytes!
+  token: CarbonCredit!
+  amount: BigInt!
+  pricePerUnitETH: BigInt!
+  pricePerUnitINR: BigInt!
+  totalPriceETH: BigInt!
+  priceINR: BigInt!
+  buyerFee: BigInt!
+  sellerFee: BigInt!
+  totalFee: BigInt!
+  tradedAt: BigInt!
+  isAMM: Boolean!
+  transactionHash: Bytes!
+  blockNumber: BigInt!
+  logIndex: BigInt!
+}
+
+type INRTradeLog @entity {
+  id: ID!                           # tradeId (keccak256 of DB UUID)
+  token: CarbonCredit!
+  quantity: BigInt!
+  priceINR: BigInt!
+  payMode: PayMode!
+  buyer: Bytes!
+  seller: Bytes!
+  timestamp: BigInt!
+  tradeHash: Bytes!
+  blockLogged: BigInt!
+  transactionHash: Bytes!
+  blockNumber: BigInt!
+  logIndex: BigInt!
+}
+
+type User @entity {
+  id: ID!                           # userId (keccak256 of platform UUID)
+  wallet: Bytes!                    # primary wallet address
+  email: String
+  kycVerified: Boolean!
+  kycSubmittedAt: BigInt
+  kycApprovedAt: BigInt
+  totalCreditsOwned: BigInt!
+  totalCreditsRetired: BigInt!
+  totalTrades: BigInt!
+  totalVolumeETH: BigInt!
+  totalVolumeINR: BigInt!
+  createdAt: BigInt!
+  updatedAt: BigInt!
+}
+
+type UserTokenBalance @entity {
+  id: ID!                           # userId-tokenId
+  user: User!
+  token: CarbonCredit!
+  balance: BigInt!
+  retired: BigInt!
+  updatedAt: BigInt!
+}
+
+type MarketplaceStats @entity {
+  id: ID!                           # singleton "global"
+  totalVolumeETH: BigInt!
+  totalVolumeINR: BigInt!
+  totalTrades: BigInt!
+  totalListings: BigInt!
+  activeListings: BigInt!
+  totalUsers: BigInt!
+  kycVerifiedUsers: BigInt!
+  totalCreditsMinted: BigInt!
+  totalCreditsRetired: BigInt!
+  totalFeesCollectedETH: BigInt!
+  totalFeesCollectedINR: BigInt!
+  lastTradeAt: BigInt!
+  updatedAt: BigInt!
+}
+
+# ─────────────────────────────────────────────────────────────
+# Enums
+# ─────────────────────────────────────────────────────────────
+
+enum Standard {
+  VCS
+  GS
+  CDM
+  ACR
+}
+
+enum OrderStatus {
+  OPEN
+  FILLED
+  PARTIALLY_FILLED
+  CANCELLED
+  EXPIRED
+}
+
+enum PayMode {
+  INR_WALLET
+  RAZORPAY
+  ETH
+}
+
+enum ActionType {
+  MINT
+  LIST
+  DELIST
+  BUY
+  SELL
+  RETIRE
+  WITHDRAW_TO_WALLET
+}
+
+# ─────────────────────────────────────────────────────────────
+# Governance Entities
+# ─────────────────────────────────────────────────────────────
+
+type SafeConfig @entity {
+  id: ID!                           # safeAddress
+  label: String!
+  threshold: BigInt!
+  owners: [Bytes!]!
+  nonce: BigInt!
+  active: Boolean!
+  createdAt: BigInt!
+  updatedAt: BigInt!
+}
+
+type SafeTransaction @entity {
+  id: ID!                           # txId
+  safe: SafeConfig!
+  to: Bytes!
+  value: BigInt!
+  data: Bytes!
+  timestamp: BigInt!
+  executed: Boolean!
+  safeTxHash: Bytes!
+  confirmations: BigInt!
+  confirmers: [Bytes!]!
+}
+
+type TimelockProposal @entity {
+  id: ID!                           # proposalId
+  proposer: Bytes!
+  targets: [Bytes!]!
+  values: [BigInt!]!
+  calldatas: [Bytes!]!
+  description: String!
+  predecessor: Bytes!
+  salt: Bytes!
+  scheduledAt: BigInt!
+  executed: Boolean!
+  cancelled: Boolean!
+  executedAt: BigInt
+  executedBy: Bytes
+}

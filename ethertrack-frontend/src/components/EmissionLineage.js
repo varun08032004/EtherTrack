@@ -72,7 +72,7 @@ export default function EmissionLineage({ record, onClose }) {
       })
       .catch(() => setLineage(buildLocalLineage(record)))
       .finally(() => setLoading(false));
-  }, [record?.id]);
+  }, [record]);
 
   // Build lineage from local record data when API not available
   const buildLocalLineage = (r) => ({

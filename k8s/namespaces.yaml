@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ethertrack
+  labels:
+    name: ethertrack
+    environment: production
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ethertrack-staging
+  labels:
+    name: ethertrack-staging
+    environment: staging

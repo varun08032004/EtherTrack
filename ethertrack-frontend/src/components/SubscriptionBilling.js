@@ -80,8 +80,9 @@ const validatePan   = v => !v || PAN_REGEX.test(v);
 const Portal = ({ children }) => {
   const el = useRef(document.createElement('div'));
   useEffect(() => {
-    document.body.appendChild(el.current);
-    return () => document.body.removeChild(el.current);
+    const elRef = el.current;
+    document.body.appendChild(elRef);
+    return () => document.body.removeChild(elRef);
   }, []);
   return createPortal(children, el.current);
 };
@@ -183,12 +184,13 @@ export default function SubscriptionBilling({
   // ── Focus trap via inert on main (modal is in Portal) ────────
   useEffect(() => {
     if (!payModal) return;
-    mainRef.current?.setAttribute('inert', '');
+    const mainEl = mainRef.current;
+    mainEl?.setAttribute('inert', '');
     const firstBtn = modalRef.current?.querySelector(
       'button:not([disabled]), [tabindex="0"]'
     );
     setTimeout(() => firstBtn?.focus(), 60);
-    return () => mainRef.current?.removeAttribute('inert');
+    return () => mainEl?.removeAttribute('inert');
   }, [payModal]);
 
   // ── Toast cleanup on unmount ─────────────────────────────────

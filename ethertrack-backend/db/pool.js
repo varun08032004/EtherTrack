@@ -150,8 +150,6 @@ const safeQuery = async (text, params = [], retries = MAX_RETRIES) => {
   }
 };
 
-const getClient = (text) => getPool(text).connect();
-
 const withTransaction = async (callback) => {
   // Transactions always use primary pool
   const client = await pool.connect();
@@ -211,4 +209,4 @@ const shutdown = async () => {
   console.log('[DB Pool] All connections closed');
 };
 
-module.exports = { safeQuery, getClient, withTransaction, healthCheck, shutdown, pool, readPool };
+module.exports = { safeQuery, withTransaction, healthCheck, shutdown, pool, readPool };

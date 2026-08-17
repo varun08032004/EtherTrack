@@ -370,8 +370,9 @@ export default function ERPSync({ profile, EF = {} }) {
   const unlock = (tabs) =>
     setTabUnlocked(prev => { const n = { ...prev }; tabs.forEach(t => { n[t] = true; }); return n; });
 
-  const allRequiredFilled = () =>
-    erp.fields.filter(f => f.required).every(f => (creds[f.key] || '').trim().length > 0);
+  const allRequiredFilled = useCallback(() =>
+    erp.fields.filter(f => f.required).every(f => (creds[f.key] || '').trim().length > 0),
+  [erp, creds]);
 
   // ── connection test ────────────────────────────────────────────────────────
   const handleTest = useCallback(async () => {
@@ -404,7 +405,7 @@ export default function ERPSync({ profile, EF = {} }) {
       unlock(['map', 'preview', 'sync']);
       toast('✓ Connected to ' + erp.name);
     }
-  }, [selectedERP, creds, erp]);
+  }, [selectedERP, creds, erp, allRequiredFilled]);
 
   // ── OAuth launch ───────────────────────────────────────────────────────────
   const handleOAuth = useCallback(async () => {
@@ -423,7 +424,7 @@ export default function ERPSync({ profile, EF = {} }) {
     } catch {
       toast('Could not initiate OAuth — check your Client ID & Secret', 'err');
     }
-  }, [selectedERP, creds]);
+  }, [selectedERP, creds, allRequiredFilled]);
 
   const toggleItem = (item) =>
     setCheckedItems(prev => ({ ...prev, [item]: !prev[item] }));

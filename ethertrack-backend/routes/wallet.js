@@ -21,12 +21,14 @@ const crypto     = require('crypto');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 
 const { safeQuery: query, pool }       = require('../db/pool');
-const { authenticate, invalidateUserCache } = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
 const { walletActionLimiter } = require('../middleware/rateLimit');
 const { createNotification }           = require('./notifications');
 const { sendWalletConnectedEmail, sendDepositConfirmedEmail, sendWithdrawalProcessedEmail, sendWithdrawalFailedEmail, sendBankAccountAddedEmail, sendBankAccountRemovedEmail } = require('../services/email');
 const { verifyKYCOnChain } = require('../services/minter');
 const logger = require('../services/logger');
+const { generateIdempotencyLockKey, acquireAdvisoryLockInt } = require('../lib/advisoryLock');
+const { getWalletBalance, invalidateUserCache } = require('../services/cacheStrategy');
 
 // ── Request logger middleware with correlation ID ───────────────────────────────
 router.use((req, _res, next) => {
@@ -279,12 +281,9 @@ router.get('/limits', authenticate, walletReadLimiter, async (req, res) => {
 // ── Balance ───────────────────────────────────────────────────────────────────
 router.get('/balance', authenticate, walletReadLimiter, async (req, res) => {
   try {
-    const { rows: userRows } = await query(
-      'SELECT inr_balance, inr_balance_locked FROM users WHERE id = $1',
-      [req.user.id]
-    );
-    if (!userRows.length) return res.status(404).json({ error: 'User not found' });
-
+    const balance = await getWalletBalance(req.user.id);
+    if (balance === null) return res.status(404).json({ error: 'User not found' });
+    
     const { rows: txRows } = await query(
       `SELECT id, type, method, amount, status, reference, gst_invoice_no,
               balance_before, balance_after, created_at, notes
@@ -295,9 +294,9 @@ router.get('/balance', authenticate, walletReadLimiter, async (req, res) => {
       [req.user.id]
     );
     res.json({
-      balance:       parseFloat(userRows[0].inr_balance),
-      balanceLocked: parseFloat(userRows[0].inr_balance_locked),
-      transactions:  txRows,
+      balance:       balance.balance,
+      balanceLocked: balance.locked,
+      transactions:  balance,
     });
   } catch (err) {
     req.log.error({ err: err?.message, userId: req.user.id }, 'Balance fetch error');
@@ -311,17 +310,31 @@ router.get('/transactions', authenticate, walletReadLimiter, async (req, res) =>
   const cursor = req.query.cursor || null;
 
   try {
-    const { rows } = await query(
-      `SELECT id, type, method, amount, status, reference, gst_invoice_no,
-              balance_before, balance_after, created_at, notes
-       FROM wallet_transactions
-       WHERE user_id = $1
-         ${cursor ? 'AND created_at < $3' : ''}
-       ORDER BY created_at DESC
-       LIMIT $2`,
-      cursor ? [req.user.id, limit + 1, cursor] : [req.user.id, limit + 1]
+    const key = `wallet:tx:${req.user.id}:${JSON.stringify({ limit, cursor })}`;
+    const { getOrSet } = require('../services/cacheStrategy');
+    const { safeQuery: query } = require('../db/pool');
+    const { TTL } = require('../services/cacheStrategy');
+
+    const data = await require('../services/cacheStrategy').getOrSet(
+      `wallet:tx:${req.user.id}:${JSON.stringify({ limit, cursor })}`,
+      async () => {
+        const { safeQuery: query } = require('../db/pool');
+        const { rows } = await query(
+          `SELECT id, type, method, amount, status, reference, gst_invoice_no,
+                  balance_before, balance_after, created_at, notes
+           FROM wallet_transactions
+           WHERE user_id = $1
+             ${cursor ? 'AND created_at < $3' : ''}
+           ORDER BY created_at DESC
+           LIMIT $2`,
+          cursor ? [req.user.id, limit + 1, cursor] : [req.user.id, limit + 1]
+        );
+        return rows;
+      },
+      30 // TTL 30 seconds for transactions
     );
 
+    const rows = data;
     const hasMore    = rows.length > limit;
     const txRows     = hasMore ? rows.slice(0, limit) : rows;
     const nextCursor = hasMore ? txRows[txRows.length - 1].created_at : null;
@@ -669,14 +682,6 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
   if (!idempotencyKey)
     return res.status(400).json({ error: 'Idempotency key required', code: 'IDEMPOTENCY_KEY_REQUIRED' });
 
-  // Check for duplicate withdrawal request
-  const { rows: existing } = await query(
-    `SELECT id, balance_after FROM wallet_transactions
-     WHERE user_id = $1 AND idempotency_key = $2 AND status = 'success'`,
-    [req.user.id, idempotencyKey]
-  );
-  if (existing.length)
-    return res.json({ success: true, balance: existing[0].balance_after, idempotent: true });
   const { rows: limitRows } = await query(
     `SELECT COALESCE(SUM(amount), 0) AS used
      FROM wallet_transactions
@@ -696,9 +701,24 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
   if (!compliance.allowed)
     return res.status(403).json({ error: compliance.reason, code: 'COMPLIANCE_BLOCK' });
 
+  // Acquire advisory lock on idempotency key to prevent concurrent duplicate withdrawals
+  const idemLockKey = generateIdempotencyLockKey(req.user.id, idempotencyKey);
+  await query(`SELECT pg_advisory_xact_lock($1)`, [idemLockKey]);
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // Check idempotency inside transaction (advisory lock already held)
+    const { rows: existing } = await client.query(
+      `SELECT id, balance_after FROM wallet_transactions
+       WHERE user_id = $1 AND idempotency_key = $2 AND status = 'success'`,
+      [req.user.id, idempotencyKey]
+    );
+    if (existing.length) {
+      await client.query('COMMIT');
+      return res.json({ success: true, balance: existing[0].balance_after, idempotent: true });
+    }
 
     const { rows: userRows } = await client.query(
       'SELECT inr_balance, company_pan FROM users WHERE id = $1 FOR UPDATE',
@@ -838,18 +858,24 @@ router.post('/trade-deduct', authenticate, walletActionLimiter, async (req, res)
   if (!idempotencyKey)
     return res.status(400).json({ error: 'Idempotency key required' });
 
-  // Check for existing transaction with this idempotency key
-  const { rows: existing } = await query(
-    `SELECT id, balance_after FROM wallet_transactions
-     WHERE user_id = $1 AND idempotency_key = $2 AND status = 'success'`,
-    [req.user.id, idempotencyKey]
-  );
-  if (existing.length)
-    return res.json({ success: true, balance: existing[0].balance_after, idempotent: true });
+  const idemLockKey = generateIdempotencyLockKey(req.user.id, idempotencyKey);
+  await query(`SELECT pg_advisory_xact_lock($1)`, [idemLockKey]);
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // Check for existing transaction with this idempotency key inside transaction
+    const { rows: existing } = await client.query(
+      `SELECT id, balance_after FROM wallet_transactions
+       WHERE user_id = $1 AND idempotency_key = $2 AND status = 'success'`,
+      [req.user.id, idempotencyKey]
+    );
+    if (existing.length) {
+      await client.query('COMMIT');
+      return res.json({ success: true, balance: existing[0].balance_after, idempotent: true });
+    }
+
     const { rows: userRows } = await client.query(
       'SELECT inr_balance FROM users WHERE id = $1 FOR UPDATE', [req.user.id]
     );
@@ -903,18 +929,24 @@ router.post('/trade-refund', authenticate, walletActionLimiter, async (req, res)
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
   if (!idempotencyKey)             return res.status(400).json({ error: 'Idempotency key required' });
 
-  // Check for existing refund with this idempotency key
-  const { rows: existing } = await query(
-    `SELECT id, balance_after FROM wallet_transactions
-     WHERE user_id = $1 AND idempotency_key = $2 AND status = 'success'`,
-    [req.user.id, idempotencyKey]
-  );
-  if (existing.length)
-    return res.json({ success: true, balance: existing[0].balance_after, idempotent: true });
+  const idemLockKey = generateIdempotencyLockKey(req.user.id, idempotencyKey);
+  await query(`SELECT pg_advisory_xact_lock($1)`, [idemLockKey]);
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // Check for existing refund with this idempotency key inside transaction
+    const { rows: existing } = await client.query(
+      `SELECT id, balance_after FROM wallet_transactions
+       WHERE user_id = $1 AND idempotency_key = $2 AND status = 'success'`,
+      [req.user.id, idempotencyKey]
+    );
+    if (existing.length) {
+      await client.query('COMMIT');
+      return res.json({ success: true, balance: existing[0].balance_after, idempotent: true });
+    }
+
     const { rows: userRows } = await client.query(
       'SELECT inr_balance FROM users WHERE id = $1 FOR UPDATE', [req.user.id]
     );
