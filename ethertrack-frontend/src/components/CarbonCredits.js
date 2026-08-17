@@ -3,11 +3,10 @@ import { useNavigate } from 'react-router-dom';
 import { useNotifications } from '../context/NotificationContext';
 import { usePortfolio } from '../context/PortfolioContext';
 import { useMarket } from '../hooks/useMarket';
-import { walletAPI, tradesAPI, apiFetch } from '../services/api';
+import { tradesAPI, apiFetch } from '../services/api';
 import { v4 as uuidv4 } from 'uuid';
 
 const PLATFORM_FEE = 0.005;
-const ETH_INR      = 280000;
 
 const STANDARDS   = {
   VCS: { color: '#22c55e', bg: '#0d2e1f' },
@@ -23,20 +22,9 @@ const TYPE_COLORS = {
 };
 
 const fmt    = n   => `₹${Number(n).toLocaleString('en-IN')}`;
-const fmtEth = inr => `${(inr / ETH_INR).toFixed(6)} ETH`;
 const n0     = v   => Number(v || 0).toFixed(0);
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
-
-// ── NEW: Razorpay SDK loader ──────────────────────────────────────
-const loadRazorpay = () => new Promise(resolve => {
-  if (window.Razorpay) return resolve(true);
-  const s = document.createElement('script');
-  s.src = 'https://checkout.razorpay.com/v1/checkout.js';
-  s.onload  = () => resolve(true);
-  s.onerror = () => resolve(false);
-  document.body.appendChild(s);
-});
 
 // ── NEW: ChainVerifiedBadge ───────────────────────────────────────
 function ChainVerifiedBadge({ chainStatus, chainTxHash }) {
@@ -658,10 +646,7 @@ export default function CarbonCredits() {
   const { addNotification, NOTIF_TYPES } = useNotifications();
 
   const {
-    buyCredit, placeBuyOrder, cancelBuyOrder,
-    ammPools, loadAMMPools, ammSwapETHForCredits, ammSwapCreditsForETH,
-    isKYCVerified, walletAddress, contracts,
-    ETH_INR_RATE, ethINRRate,
+    isKYCVerified,
     refreshTradeHistory,
   } = usePortfolio();
 
@@ -673,9 +658,9 @@ export default function CarbonCredits() {
     loading: marketLoading,
     error:   marketError,
     refetch: refetchMarket,
+    liveETHINR,
   } = useMarket();
 
-  const liveETHINR = ethINRRate || ETH_INR_RATE || ETH_INR;
   const loading = { listings: marketLoading };
 
   // ── State ─────────────────────────────────────────────────────
@@ -799,26 +784,7 @@ export default function CarbonCredits() {
     @media(max-width:768px){.cc-market-layout{grid-template-columns:1fr;}.cc-trade-layout{grid-template-columns:1fr;}.cc-stats{grid-template-columns:repeat(2,1fr);}.cc-tbl-head>*:nth-child(n+5),.cc-tbl-row>*:nth-child(n+5){display:none;}.cc-amm-grid{grid-template-columns:1fr;}}
   `, []);
 
-  // ── INR balance ───────────────────────────────────────────────
-  useEffect(() => {
-    if (!walletAddress && !isKYCVerified) return;
-    const fetchINRBalance = async () => {
-      setInrLoading(true);
-      try {
-        const data = await walletAPI.getBalance();
-        if (data?.balance !== undefined) setInrBalance(parseFloat(data.balance));
-      } catch {}
-      finally { setInrLoading(false); }
-    };
-    fetchINRBalance();
-  }, [walletAddress, isKYCVerified]);
-
-  const refreshINRBalance = useCallback(async () => {
-    try {
-      const data = await walletAPI.getBalance();
-      if (data?.balance !== undefined) setInrBalance(parseFloat(data.balance));
-    } catch {}
-  }, []);
+  
 
   // ── Price histories ───────────────────────────────────────────
   useEffect(() => {
@@ -838,28 +804,9 @@ export default function CarbonCredits() {
     }
   }, [listings, selected]);
 
-  // ── My open bids ──────────────────────────────────────────────
-  useEffect(() => {
-    if (!walletAddress || !buyOrders.length) { setMyOpenBids([]); return; }
-    setMyOpenBids(
-      buyOrders.filter(o =>
-        o.buyer?.toLowerCase() === walletAddress.toLowerCase() &&
-        (o.status === 0 || o.status === 2)
-      )
-    );
-  }, [buyOrders, walletAddress]);
+  
 
-  // ── MetaMask account change ───────────────────────────────────
-  useEffect(() => {
-    if (!window.ethereum) return;
-    const handler = accounts => {
-      if (accounts.length && accounts[0].toLowerCase() !== walletAddress?.toLowerCase()) {
-        window.location.reload();
-      }
-    };
-    window.ethereum.on('accountsChanged', handler);
-    return () => window.ethereum.removeListener('accountsChanged', handler);
-  }, [walletAddress]);
+  
 
   // ── Price alerts ──────────────────────────────────────────────
   useEffect(() => {

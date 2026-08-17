@@ -7,15 +7,14 @@ const { getOrCreateUserIdHash, logOwnershipChangeOnChain } = require('./creditLe
 
 const RPC_URL         = process.env.ALCHEMY_RPC;
 const MINTER_KEY      = process.env.MINTER_PRIVATE_KEY;
+const CUSTODY_KEY     = process.env.ETHERTRACK_CUSTODY_PRIVATE_KEY;
 const TOKEN_ADDRESS   = process.env.CARBON_CREDIT_TOKEN_ADDRESS;
 const KYC_REG_ADDRESS = process.env.KYC_REGISTRY_ADDRESS;
 const MARKETPLACE_ADDRESS = process.env.MARKETPLACE_ADDRESS;
-// [NEW] Pooled-custody wallet for users with no MetaMask wallet bound.
-// Defaults to the minter wallet's own address (it already holds elevated
-// trust as operator/signer everywhere else in the system) — set
-// CUSTODY_WALLET_ADDRESS explicitly in .env if you want a separate,
-// dedicated custody address instead (e.g. a cold/multisig wallet).
+// [NEW] Dedicated EtherTrack custody wallet — MUST be different from minter wallet.
+// Configured via ETHERTRACK_CUSTODY_PRIVATE_KEY and CUSTODY_WALLET_ADDRESS in .env
 let _custodyWalletAddress = process.env.CUSTODY_WALLET_ADDRESS || null;
+let _custodyWallet = null;
 
 // [NEW] Operator-only functions added to CarbonCreditToken.sol / Marketplace.sol
 // so INR/Razorpay-paying users never need to open MetaMask for routine
@@ -94,12 +93,31 @@ const getLiveETHRate = async () => {
 
 // ── Build provider + contracts ────────────────────────────────────
 const getContracts = () => {
-  if (!RPC_URL)       throw new Error('ALCHEMY_RPC not set in .env');
-  if (!MINTER_KEY)    throw new Error('MINTER_PRIVATE_KEY not set in .env');
-  if (!TOKEN_ADDRESS) throw new Error('CARBON_CREDIT_TOKEN_ADDRESS not set in .env');
+  if (!RPC_URL)         throw new Error('ALCHEMY_RPC not set in .env');
+  if (!MINTER_KEY)      throw new Error('MINTER_PRIVATE_KEY not set in .env');
+  if (!CUSTODY_KEY)     throw new Error('ETHERTRACK_CUSTODY_PRIVATE_KEY not set in .env');
+  if (!TOKEN_ADDRESS)   throw new Error('CARBON_CREDIT_TOKEN_ADDRESS not set in .env');
 
   const provider      = new ethers.JsonRpcProvider(RPC_URL);
   const minterWallet  = new ethers.Wallet(MINTER_KEY, provider);
+  
+  // Create dedicated custody wallet signer (separate from minter)
+  const custodyWallet = new ethers.Wallet(CUSTODY_KEY, provider);
+  
+  // Validate custody address matches configured address
+  if (_custodyWalletAddress && _custodyWalletAddress.toLowerCase() !== custodyWallet.address.toLowerCase()) {
+    throw new Error(`CUSTODY_WALLET_ADDRESS (${_custodyWalletAddress}) does not match ETHERTRACK_CUSTODY_PRIVATE_KEY address (${custodyWallet.address})`);
+  }
+  
+  // Set custody wallet address
+  _custodyWalletAddress = custodyWallet.address;
+  _custodyWallet = custodyWallet;
+  
+  // CRITICAL: Custody wallet MUST be different from minter wallet
+  if (custodyWallet.address.toLowerCase() === minterWallet.address.toLowerCase()) {
+    throw new Error('SECURITY VIOLATION: Custody wallet address MUST be different from minter wallet address. Check ETHERTRACK_CUSTODY_PRIVATE_KEY and MINTER_PRIVATE_KEY in .env');
+  }
+
   const tokenContract = new ethers.Contract(TOKEN_ADDRESS, TOKEN_ABI, minterWallet);
   const kycContract   = KYC_REG_ADDRESS
     ? new ethers.Contract(KYC_REG_ADDRESS, KYC_ABI, minterWallet)
@@ -108,11 +126,11 @@ const getContracts = () => {
     ? new ethers.Contract(MARKETPLACE_ADDRESS, MARKETPLACE_ABI, minterWallet)
     : null;
 
-  // Lazily default to the minter wallet's own address if no dedicated
-  // custody wallet was configured.
-  if (!_custodyWalletAddress) _custodyWalletAddress = minterWallet.address;
+  console.log(`[minter] Custody wallet configured: ${_custodyWalletAddress}`);
+  console.log(`[minter] Minter wallet: ${minterWallet.address}`);
+  console.log(`[minter] Custody != Minter: ${_custodyWalletAddress.toLowerCase() !== minterWallet.address.toLowerCase()}`);
 
-  return { provider, minterWallet, tokenContract, kycContract, marketContract, custodyWalletAddress: _custodyWalletAddress };
+  return { provider, minterWallet, custodyWallet, tokenContract, kycContract, marketContract, custodyWalletAddress: _custodyWalletAddress };
 };
 
 // ── Check on-chain KYC ────────────────────────────────────────────

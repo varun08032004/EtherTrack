@@ -217,10 +217,14 @@ router.post('/retire-credit-ledger', authenticate, requireKYC, assetActionLimite
   if (tokenId == null || !amount || amount <= 0) {
     return res.status(400).json({ error: 'tokenId and a positive amount are required' });
   }
-  if (req.user.wallet_address) {
-    return res.status(400).json({
-      error: 'You have a linked wallet — retire directly from your wallet instead.',
-    });
+
+  // Check if this token is in pooled custody for this user
+  const { rows: batchRows } = await query(
+    `SELECT custody_model FROM carbon_batches WHERE token_id = $1 AND user_id = $2 LIMIT 1`,
+    [tokenId, req.user.id]
+  );
+  if (!batchRows.length || batchRows[0].custody_model !== 'pooled') {
+    return res.status(400).json({ error: 'This credit is not in pooled custody — use the wallet-based flow.' });
   }
 
   try {
@@ -290,8 +294,14 @@ router.post('/list-credit-ledger', authenticate, requireKYC, assetActionLimiter,
   if (!priceInINR || priceInINR <= 0) {
     return res.status(400).json({ error: 'priceInINR must be greater than zero' });
   }
-  if (req.user.wallet_address) {
-    return res.status(400).json({ error: 'You have a linked wallet — list directly from your wallet instead.' });
+
+  // Check if this token is in pooled custody for this user
+  const { rows: batchRows } = await query(
+    `SELECT custody_model FROM carbon_batches WHERE token_id = $1 AND user_id = $2 LIMIT 1`,
+    [tokenId, req.user.id]
+  );
+  if (!batchRows.length || batchRows[0].custody_model !== 'pooled') {
+    return res.status(400).json({ error: 'This credit is not in pooled custody — use the wallet-based flow.' });
   }
 
   try {

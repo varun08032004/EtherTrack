@@ -409,11 +409,11 @@ router.post('/credits/:id/retry-mint', isAdmin, async (req, res) => {
     const batch = rows[0];
     if (batch.admin_status !== 'approved') return res.status(400).json({ error: 'Batch must be approved first' });
     if (batch.token_id != null) return res.status(400).json({ error: `Already minted — Token #${batch.token_id}` });
-    if (!batch.wallet_address) return res.status(400).json({ error: 'User has no wallet — use assign-wallet-and-mint' });
     // [COMPLIANCE-GATE] see services/minter.js — CCCs cannot be minted here.
     if (batch.credit_type === 'compliance') {
       return res.status(400).json({ error: 'Compliance-type credits (CCC) cannot be minted on EtherTrack — trading is restricted to CERC-registered Power Exchanges.' });
     }
+    // Custodial model: no user wallet required, mint goes to EtherTrack custody wallet
 
     const result = await mintApprovedCredit(id);
     if (result.tokenId != null) {
@@ -510,8 +510,7 @@ router.post('/credits/:id/correct-quantity', isAdmin, async (req, res) => {
 router.post('/credits/:id/assign-wallet-and-mint', isAdmin, async (req, res) => {
   const { id } = req.params;
   const { walletAddress } = req.body;
-  if (!walletAddress || !walletAddress.startsWith('0x') || walletAddress.length !== 42)
-    return res.status(400).json({ error: 'Valid 0x wallet address required' });
+  // Custodial model: walletAddress is optional - if not provided, mints to custody wallet
   try {
     const { rows } = await query(
       `SELECT cb.*, u.id AS user_id, u.email, u.full_name FROM carbon_batches cb JOIN users u ON u.id=cb.user_id WHERE cb.id=$1`, [id]
@@ -524,9 +523,12 @@ router.post('/credits/:id/assign-wallet-and-mint', isAdmin, async (req, res) => 
       return res.status(400).json({ error: 'Compliance-type credits (CCC) cannot be minted on EtherTrack — trading is restricted to CERC-registered Power Exchanges.' });
     }
 
-    await query(`UPDATE users SET wallet_address=$1, updated_at=NOW() WHERE id=$2`, [walletAddress.toLowerCase(), rows[0].user_id]);
-    await invalidateUserCache(rows[0].user_id);
-    await auditLog(req.user.id, 'WALLET_ASSIGNED_FOR_MINT', rows[0].user_id, `Wallet ${walletAddress} assigned for batch ${id}`);
+    // Optional: assign wallet if provided (for user's self-custody preference)
+    if (walletAddress && walletAddress.startsWith('0x') && walletAddress.length === 42) {
+      await query(`UPDATE users SET wallet_address=$1, updated_at=NOW() WHERE id=$2`, [walletAddress.toLowerCase(), rows[0].user_id]);
+      await invalidateUserCache(rows[0].user_id);
+      await auditLog(req.user.id, 'WALLET_ASSIGNED_FOR_MINT', rows[0].user_id, `Wallet ${walletAddress} assigned for batch ${id}`);
+    }
 
     const result = await mintApprovedCredit(id);
     if (result.tokenId != null) {
@@ -578,6 +580,10 @@ router.get('/credits/:id/mint-errors', isAdmin, async (req, res) => {
       if (lastErr.includes('Serial already registered')) diagnostics.push({ severity: 'warning', issue: 'Serial already on-chain', fix: 'Use "Set Token ID Manually"' });
       if (lastErr.includes('insufficient funds'))        diagnostics.push({ severity: 'critical', issue: 'Minter wallet out of ETH', fix: 'Top up minter wallet' });
       if (lastErr.includes('ALCHEMY_RPC') || lastErr.includes('network')) diagnostics.push({ severity: 'warning', issue: 'RPC connection failed', fix: 'Check ALCHEMY_RPC env var' });
+    }
+    // Custodial model: wallet address not required for minting
+    if (!b.wallet_address && b.custody_model !== 'pooled') {
+      diagnostics.push({ severity: 'info', issue: 'No wallet address (custodial mint will use EtherTrack custody wallet)', fix: 'Optional: assign wallet for self-custody' });
     }
     if (!diagnostics.length && !mintErrors.length) diagnostics.push({ severity: 'info', issue: 'No errors recorded', fix: 'Try retrying the mint' });
 

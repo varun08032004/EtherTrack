@@ -10,9 +10,9 @@
 const { ethers } = require('ethers');
 const { safeQuery: query } = require('../db/pool');
 
-const RPC_URL             = process.env.ALCHEMY_RPC;
-const MINTER_KEY           = process.env.MINTER_PRIVATE_KEY;
-const CREDIT_LEDGER_ADDRESS = process.env.CREDIT_LEDGER_ADDRESS;
+const RPC_URL                  = process.env.ALCHEMY_RPC;
+const CUSTODY_KEY              = process.env.ETHERTRACK_CUSTODY_PRIVATE_KEY;
+const CREDIT_LEDGER_ADDRESS    = process.env.CREDIT_LEDGER_ADDRESS;
 
 const LEDGER_ABI = [
   'function logOwnershipChange(bytes32 userId, uint256 tokenId, int256 amountDelta, uint8 actionType, bytes32 refHash, string calldata note) external returns (uint256 logId)',
@@ -21,18 +21,18 @@ const LEDGER_ABI = [
   'function getUserRetired(bytes32 userId, uint256 tokenId) view returns (uint256)',
   'function computeUserId(string calldata userUuid) view returns (bytes32)',
   'event OwnershipLogged(uint256 indexed logId, bytes32 indexed userId, uint256 indexed tokenId, int256 amountDelta, uint8 actionType, bytes32 refHash)',
-  'event CreditRetiredLogged(uint256 indexed logId, bytes32 indexed userId, uint256 tokenId, uint256 amount, bytes32 refHash)',
+  'event CreditRetiedLogged(uint256 indexed logId, bytes32 indexed userId, uint256 tokenId, uint256 amount, bytes32 refHash)',
 ];
 
 // Must match CreditLedger.sol's `enum ActionType { MINT, LIST, DELIST, BUY, SELL, RETIRE, WITHDRAW_TO_WALLET }`
 const ACTION_TYPE = { MINT: 0, LIST: 1, DELIST: 2, BUY: 3, SELL: 4, RETIRE: 5, WITHDRAW_TO_WALLET: 6 };
 
 const getLedgerContract = () => {
-  if (!RPC_URL || !MINTER_KEY || !CREDIT_LEDGER_ADDRESS) {
-    throw new Error('CreditLedger not configured — missing ALCHEMY_RPC, MINTER_PRIVATE_KEY, or CREDIT_LEDGER_ADDRESS');
+  if (!RPC_URL || !CUSTODY_KEY || !CREDIT_LEDGER_ADDRESS) {
+    throw new Error('CreditLedger not configured — missing ALCHEMY_RPC, ETHERTRACK_CUSTODY_PRIVATE_KEY, or CREDIT_LEDGER_ADDRESS');
   }
   const provider = new ethers.JsonRpcProvider(RPC_URL);
-  const wallet   = new ethers.Wallet(MINTER_KEY, provider);
+  const wallet   = new ethers.Wallet(CUSTODY_KEY, provider);
   return new ethers.Contract(CREDIT_LEDGER_ADDRESS, LEDGER_ABI, wallet);
 };
 
