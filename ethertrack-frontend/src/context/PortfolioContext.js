@@ -44,7 +44,6 @@
 //     that holder for these tokens, this is blocked at the contract level —
 //     I have not seen that contract and cannot confirm either way.
 // ─────────────────────────────────────────────────────────────────────────────
-'use strict';
 
 import React, {
   createContext, useContext, useState, useEffect,
@@ -56,7 +55,7 @@ import {
   buildMarketBuckets,
   getMarketPrice,
 } from '../utils/creditPricing';
-import { getCsrfToken, ensureCsrfCookie } from '../services/api';
+import { getCsrfToken, ensureCsrfCookie, portfolioAPI } from '../services/api';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 
@@ -257,42 +256,47 @@ const normaliseTradeRow = (t) => ({
 // mapDbCredit / mapLedgerCredit: NOTE there is deliberately no
 // `ownerWallet` field anywhere below. Ownership is
 // (user_id, organization_id, batch_id) — never a browser wallet address.
-const mapCredit = (db) => ({
-  id             : `db-${db.id}`,
-  tokenId        : db.token_id ?? null,
-  tokenHex       : toTokenHex(db.token_id),
-  projectId      : db.project_id || db.project_code || '',
-  projectName    : db.project_name || '',
-  location       : db.project_location || '',
-  country        : db.country || '',
-  standard       : db.standard || 'VCS',
-  projectType    : db.project_type || '',
-  developer      : db.developer || '',
-  vintageYear    : safeNum(db.vintage_year, 0),
-  expiryDate     : db.expiry_date || '',
-  serialNumber   : db.registry_serial || '',
-  credits        : safeNum(db.heldCredits ?? db.available_credits ?? db.quantity, 0),
-  heldCredits    : safeNum(db.heldCredits ?? db.available_credits ?? db.quantity, 0),
-  listedCredits  : safeNum(db.listedCredits ?? db.listed_quantity, 0),
-  totalRetired   : safeNum(db.totalRetired ?? db.retired_credits, 0),
-  active         : true,
-  status         : db.status || (db.available_credits === 0 ? 'RETIRED' : 'HELD'),
-  pricePerCredit : safeNum(db.price_per_credit_inr || db.last_traded_price_inr, 850),
-  listingId      : db.listingIdOnchain ?? db.listing_id_onchain ?? null,
-  vintageDiscount: vintagePenalty(safeNum(db.vintage_year, 0)),
-  admin_status   : db.admin_status || 'approved',
-  isOnChain      : db.token_id != null,
-  creditType              : db.credit_type || 'voluntary',
-  cbamEligible            : db.cbam_eligible || false,
-  sdg_tags                : Array.isArray(db.sdg_tags) ? db.sdg_tags
-    : (() => { try { return JSON.parse(db.sdg_tags || '[]'); } catch { return []; } })(),
-  correspondingAdjustment : db.corresponding_adjustment || 'none',
-  icvcm_ccp_eligible      : db.icvcm_ccp_eligible || false,
-  icvcm_ccp_label         : db.icvcm_ccp_label || '',
-  methodologyId           : db.methodology_id || '',
-  registryLink            : db.registry_link || '',
-  batchId                 : db.id ?? db.batchId ?? null,
-});
+const mapCredit = (api) => {
+  const isPooledCustody = api.custodyModel === 'pooled' || api.custody_model === 'pooled';
+  return {
+    id             : `db-${api.id ?? api.batchId}`,
+    tokenId        : api.tokenId ?? null,
+    tokenHex       : toTokenHex(api.tokenId),
+    projectId      : api.projectId || '',
+    projectName    : api.projectName || '',
+    location       : api.location || '',
+    country        : api.country || '',
+    standard       : api.standard || 'VCS',
+    projectType    : api.projectType || '',
+    developer      : api.developer || '',
+    vintageYear    : safeNum(api.vintageYear, 0),
+    expiryDate     : api.expiryDate || '',
+    serialNumber   : api.serialNumber || '',
+    credits        : safeNum(api.heldCredits ?? api.credits ?? api.quantity, 0),
+    heldCredits    : safeNum(api.heldCredits ?? api.credits ?? api.quantity, 0),
+    listedCredits  : safeNum(api.listedCredits, 0),
+    totalRetired   : safeNum(api.totalRetired, 0),
+    active         : true,
+    status         : api.status || 'HELD',
+    pricePerCredit : safeNum(api.pricePerCredit, 850),
+    listingId      : api.listingId ?? api.ledgerListingId ?? null,
+    vintageDiscount: vintagePenalty(safeNum(api.vintageYear, 0)),
+    admin_status   : api.admin_status || 'approved',
+    isOnChain      : api.tokenId != null,
+    isLedger       : api.isLedger === true || isPooledCustody,
+    custodyModel   : api.custodyModel || api.custody_model || 'self',
+    creditType              : api.creditType || 'voluntary',
+    cbamEligible            : api.cbamEligible || false,
+    sdg_tags                : Array.isArray(api.sdg_tags) ? api.sdg_tags
+      : (() => { try { return JSON.parse(api.sdg_tags || '[]'); } catch { return []; } })(),
+    correspondingAdjustment : api.correspondingAdjustment || 'none',
+    icvcm_ccp_eligible      : api.icvcm_ccp_eligible || false,
+    icvcm_ccp_label         : api.icvcm_ccp_label || '',
+    methodologyId           : api.methodologyId || '',
+    registryLink            : api.registryLink || '',
+    batchId                 : api.batchId ?? api.id ?? null,
+  };
+};
 
 const PortfolioContext = createContext(null);
 
@@ -321,7 +325,6 @@ export function PortfolioProvider({ children }) {
   const [loading, setLoading] = useState({
     identity: true, credits: false, listings: false, tx: false, trades: false,
   });
-  const [error, setError] = useState('');
 
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -453,16 +456,18 @@ export function PortfolioProvider({ children }) {
           const dep         = vintagePenalty(safeNum(l.vintageYear || l.vintage_year, 0));
           const priceINR    = safeNum(l.pricePerUnitINR || l.price_per_credit_inr, 850);
           const adjPriceINR = Math.round(priceINR * (1 - dep / 100));
+          const adjPrice    = adjPriceINR / 280000; // ETH price for MarketCard
           const expiresAt   = safeNum(l.expiresAt || l.expires_at, nowSec + 86400 * 30);
 
           return {
             listingId       : l.listingId ?? l.listing_id ?? null,
+            listingType     : l.listingType || l.listing_type || 'wallet',
             batchId         : l.batchId || null,
             tokenId         : safeNum(l.tokenId ?? l.token_id, null) || null,
             amount          : safeNum(l.amount ?? l.available_credits, 0),
             pricePerUnitINR : +priceINR,
             adjPriceINR     : +adjPriceINR,
-            adjPriceInr     : +adjPriceINR,
+            adjPrice        : +adjPrice,  // ETH price for MarketCard
             projectName     : l.projectName || l.project_name || '',
             location        : l.location || l.project_location || '',
             country         : (l.location || l.project_location || '').split(',').pop().trim(),
@@ -520,9 +525,36 @@ export function PortfolioProvider({ children }) {
     safeSet(setLoading)(l => ({ ...l, tx: true }));
     try {
       const result = await listCreditViaBackend(tokenId, batchId, amount, priceInINR, durationDays);
+      
+      // Immediately update the credit with the listingId so delist works without waiting for refresh
+      const newListingId = result.listingId;
+      if (newListingId) {
+        safeSet(setMyLedgerCredits)(prev => prev.map(c => 
+          c.tokenId === tokenId ? { ...c, listingId: newListingId, ledgerListingId: newListingId, listedCredits: (c.listedCredits || 0) + amount } : c
+        ));
+        safeSet(setMyCredits)(prev => prev.map(c => 
+          c.tokenId === tokenId ? { ...c, listingId: newListingId, ledgerListingId: newListingId, listedCredits: (c.listedCredits || 0) + amount } : c
+        ));
+      }
+      
       await Promise.allSettled([loadMyCredits(), refreshLedgerCredits(), loadListingsFromAPI()]);
       return { success: true, listingId: result.listingId, txHash: result.txHash || null };
     } catch (e) {
+      // Offer sync if balance mismatch
+      if (e.message?.includes('LEDGER_BALANCE_MISMATCH') || e.message?.includes('On-chain balance mismatch')) {
+        const shouldSync = window.confirm(`On-chain balance mismatch detected.\n\nClick OK to sync now, then retry.`);
+        if (shouldSync) {
+          try {
+            await portfolioAPI.syncLedgerBalance(tokenId);
+            // Retry after sync
+            const retryResult = await listCreditViaBackend(tokenId, batchId, amount, priceInINR, durationDays);
+            await Promise.allSettled([loadMyCredits(), refreshLedgerCredits(), loadListingsFromAPI()]);
+            return { success: true, listingId: retryResult.listingId, txHash: retryResult.txHash || null };
+          } catch (syncErr) {
+            throw new Error(`Sync failed: ${syncErr.message}`);
+          }
+        }
+      }
       throw new Error(getBackendErrorMessage(e) || 'Listing failed. Please try again.');
     } finally {
       safeSet(setLoading)(l => ({ ...l, tx: false }));
@@ -534,6 +566,20 @@ export function PortfolioProvider({ children }) {
     safeSet(setLoading)(l => ({ ...l, tx: true }));
     try {
       const result = await delistCreditViaBackend(listingId);
+      
+      // Immediately clear the listingId from the credit so UI updates instantly
+      // Check both listingId and ledgerListingId for compatibility
+      safeSet(setMyLedgerCredits)(prev => prev.map(c => 
+        (c.listingId === listingId || c.ledgerListingId === listingId) 
+          ? { ...c, listingId: null, ledgerListingId: null, listedCredits: 0 } 
+          : c
+      ));
+      safeSet(setMyCredits)(prev => prev.map(c => 
+        (c.listingId === listingId || c.ledgerListingId === listingId) 
+          ? { ...c, listingId: null, ledgerListingId: null, listedCredits: 0 } 
+          : c
+      ));
+      
       await Promise.allSettled([loadMyCredits(), refreshLedgerCredits(), loadListingsFromAPI()]);
       return { success: true, txHash: result.txHash || null };
     } catch (e) {
@@ -551,6 +597,15 @@ export function PortfolioProvider({ children }) {
     safeSet(setLoading)(l => ({ ...l, tx: true }));
     try {
       const result = await retireCreditViaBackend(tokenId, amount);
+      
+      // Immediately reduce heldCredits for instant UI feedback
+      safeSet(setMyLedgerCredits)(prev => prev.map(c => 
+        c.tokenId === tokenId ? { ...c, heldCredits: Math.max(0, (c.heldCredits || 0) - amount), credits: Math.max(0, (c.credits || 0) - amount) } : c
+      ));
+      safeSet(setMyCredits)(prev => prev.map(c => 
+        c.tokenId === tokenId ? { ...c, heldCredits: Math.max(0, (c.heldCredits || 0) - amount), credits: Math.max(0, (c.credits || 0) - amount) } : c
+      ));
+      
       await Promise.allSettled([loadMyCredits(), refreshLedgerCredits(), refreshRetirements()]);
       return { success: true, txHash: result.txHash || null, certId: result.certId || null };
     } catch (e) {
@@ -571,12 +626,12 @@ export function PortfolioProvider({ children }) {
       `Portfolio. This is pending a backend/operator settlement path — see MIGRATION_NOTES.md.`
     );
   };
-  const buyCredit       = useCallback(NOT_AVAILABLE('Direct ETH purchase'), []);
-  const placeBuyOrder   = useCallback(NOT_AVAILABLE('Buy orders'), []);
-  const cancelBuyOrder  = useCallback(NOT_AVAILABLE('Buy orders'), []);
-  const ammSwapETHForCredits  = useCallback(NOT_AVAILABLE('AMM swaps'), []);
-  const ammSwapCreditsForETH  = useCallback(NOT_AVAILABLE('AMM swaps'), []);
-  const ammAddLiquidity       = useCallback(NOT_AVAILABLE('AMM liquidity'), []);
+  const buyCredit       = NOT_AVAILABLE('Direct ETH purchase');
+  const placeBuyOrder   = NOT_AVAILABLE('Buy orders');
+  const cancelBuyOrder  = NOT_AVAILABLE('Buy orders');
+  const ammSwapETHForCredits  = NOT_AVAILABLE('AMM swaps');
+  const ammSwapCreditsForETH  = NOT_AVAILABLE('AMM swaps');
+  const ammAddLiquidity       = NOT_AVAILABLE('AMM liquidity');
 
   const refreshKYC = useCallback(async () => {
     const identity = await refreshIdentity();
@@ -584,10 +639,16 @@ export function PortfolioProvider({ children }) {
   }, [refreshIdentity]);
 
   // ── Derived pricing / stats — unchanged logic, just no wallet inputs ─
-  const allOwnedCredits = useMemo(
-    () => [...myCredits, ...myLedgerCredits],
-    [myCredits, myLedgerCredits]
-  );
+  const allOwnedCredits = useMemo(() => {
+    const seen = new Set();
+    const combined = [...myCredits, ...myLedgerCredits, ...myBoughtCredits];
+    return combined.filter(c => {
+      const key = c.tokenId ?? c.id;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [myCredits, myLedgerCredits, myBoughtCredits]);
 
   const tokenMetaMap = useMemo(
     () => buildTokenMetaMap({ listings, myCredits: allOwnedCredits, myBoughtCredits }),
@@ -596,19 +657,17 @@ export function PortfolioProvider({ children }) {
 
   const marketBuckets = useMemo(
     () => buildMarketBuckets({ listings, tradeHistory, buyOrders }, tokenMetaMap),
-    [listings, tradeHistory, tokenMetaMap]
+    [listings, tradeHistory, buyOrders, tokenMetaMap]
   );
 
   const stats = useMemo(() => {
-    const ownedActive  = allOwnedCredits.filter(c => c.status !== 'RETIRED');
-    const boughtActive = myBoughtCredits;
-    const allActive    = [...ownedActive, ...boughtActive];
+    const ownedActive = allOwnedCredits.filter(c => c.status !== 'RETIRED');
 
-    const totalCredits = allActive.reduce(
+    const totalCredits = ownedActive.reduce(
       (s, c) => s + safeNum(c.heldCredits ?? c.credits, 0), 0
     );
 
-    const totalValue = allActive.reduce((s, c) => {
+    const totalValue = ownedActive.reduce((s, c) => {
       const { price } = getMarketPrice(
         c.projectType, c.standard, c.vintageYear, c.creditType, marketBuckets
       );
@@ -629,7 +688,7 @@ export function PortfolioProvider({ children }) {
         .reduce((s, c) => s + safeNum(c.listedCredits, 0), 0),
       retiredCount : myRetirements.reduce((s, r) => s + safeNum(r.amount, 0), 0),
       heldCount    : allOwnedCredits.filter(c => c.status === 'HELD').length,
-      openBids     : 0, // buy orders disabled — see NOT_AVAILABLE above
+      openBids     : 0,
     };
   }, [allOwnedCredits, myBoughtCredits, myRetirements, marketBuckets]);
 
@@ -660,7 +719,7 @@ export function PortfolioProvider({ children }) {
       listings, buyOrders, tradeHistory, ammPools,
       marketBuckets,
       stats,
-      loading, error,
+      loading,
 
       // Backend-driven actions
       listCredit, delistCredit, retireCredit,
@@ -670,7 +729,6 @@ export function PortfolioProvider({ children }) {
       // Refresh / reconciliation
       loadMyCredits,
       loadListingsFromAPI,
-      refreshIdentity,
       refreshBoughtCredits,
       refreshLedgerCredits,
       refreshTradeHistory,

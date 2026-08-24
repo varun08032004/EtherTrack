@@ -30,6 +30,11 @@ const logger = require('../services/logger');
 const { generateIdempotencyLockKey, acquireAdvisoryLockInt } = require('../lib/advisoryLock');
 const { getWalletBalance, invalidateUserCache } = require('../services/cacheStrategy');
 
+// Get SettlementEngine from app context (initialized in app.ts)
+function getSettlementEngine(req) {
+  return req.app.get('settlementEngine') || req.app.getSettlementEngine?.();
+}
+
 // ── Request logger middleware with correlation ID ───────────────────────────────
 router.use((req, _res, next) => {
   req.log = logger.child({
@@ -507,8 +512,37 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 
   const event = JSON.parse(body);
   try {
+    // Handle DEPOSIT payment captured
     if (event.event === 'payment.captured') {
       const payment = event.payload.payment.entity;
+      
+      // First check if it's a trade payment
+      const { rows: tradeRows } = await query(
+        `SELECT id, payment_id FROM trades 
+         WHERE razorpay_order_id = $1 AND status = 'completed' AND chain_status != 'confirmed'
+         FOR UPDATE SKIP LOCKED`,
+        [payment.order_id]
+      );
+      
+      if (tradeRows.length > 0) {
+        // This is a TRADE payment
+        const trade = tradeRows[0];
+        req.log.info({ tradeId: trade.id, paymentId: payment.id }, 'Trade payment captured via webhook');
+        
+        try {
+          const se = getSettlementEngine(req);
+          await se.transitionToPaymentSettled(trade.id, {
+            providerReference: payment.id,
+            capturedAt: new Date()
+          });
+          req.log.info({ tradeId: trade.id }, 'Trade payment settled via webhook');
+        } catch (err) {
+          req.log.error({ err: err.message, tradeId: trade.id }, 'Failed to settle trade payment');
+        }
+        return res.json({ received: true });
+      }
+      
+      // Otherwise handle as wallet DEPOSIT
       const client  = await pool.connect();
       try {
         await client.query('BEGIN');
@@ -562,6 +596,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       } finally {
         client.release();
       }
+      return res.json({ received: true });
     }
 
     if (event.event === 'payment.failed') {
@@ -851,141 +886,19 @@ router.post('/withdraw', authenticate, walletWriteLimiter, async (req, res) => {
 });
 
 // ── Trade deduct ──────────────────────────────────────────────────────────────
-router.post('/trade-deduct', authenticate, walletActionLimiter, async (req, res) => {
-  const { amount, tokenId, quantity, projectName, idempotencyKey } = req.body;
-  if (!amount || amount <= 0)
-    return res.status(400).json({ error: 'Invalid amount' });
-  if (!idempotencyKey)
-    return res.status(400).json({ error: 'Idempotency key required' });
-
-  const idemLockKey = generateIdempotencyLockKey(req.user.id, idempotencyKey);
-  await query(`SELECT pg_advisory_xact_lock($1)`, [idemLockKey]);
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    // Check for existing transaction with this idempotency key inside transaction
-    const { rows: existing } = await client.query(
-      `SELECT id, balance_after FROM wallet_transactions
-       WHERE user_id = $1 AND idempotency_key = $2 AND status = 'success'`,
-      [req.user.id, idempotencyKey]
-    );
-    if (existing.length) {
-      await client.query('COMMIT');
-      return res.json({ success: true, balance: existing[0].balance_after, idempotent: true });
-    }
-
-    const { rows: userRows } = await client.query(
-      'SELECT inr_balance FROM users WHERE id = $1 FOR UPDATE', [req.user.id]
-    );
-    if (parseFloat(userRows[0].inr_balance) < amount) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Insufficient balance', available: parseFloat(userRows[0].inr_balance) });
-    }
-    const balanceBefore = parseFloat(userRows[0].inr_balance);
-    const balanceAfter  = await adjustLedger(req.user.id, amount, 'debit', client);
-    const { rows: txRows } = await client.query(
-      `INSERT INTO wallet_transactions
-         (user_id, type, method, amount, status, balance_before, balance_after, reference, idempotency_key, notes)
-       VALUES ($1, 'debit', 'system', $2, 'success', $3, $4, $5, $6, $7)
-       RETURNING reference`,
-      [req.user.id, amount, balanceBefore, balanceAfter,
-       idempotencyKey, idempotencyKey,
-       `Trade: ${quantity} × ${sanitiseText(projectName || 'carbon credits', 60)} (Token #${tokenId})`]
-    );
-    await client.query('COMMIT');
-
-    const txRef = txRows[0].reference;
-    try {
-      await transferNodalToMerchant(amount, txRef);
-      req.log.info({ userId: req.user.id, amount, tokenId }, 'Trade settled — nodal → merchant transfer done');
-    } catch (transferErr) {
-      req.log.error({ err: transferErr?.message, userId: req.user.id, txRef },
-        'Nodal→merchant transfer failed — schedule reconciliation');
-    }
-
-    try {
-      await createNotification(
-        req.user.id, 'TRADE', '🌿 Credit Purchase Paid',
-        `₹${parseFloat(amount).toLocaleString('en-IN')} deducted for ${quantity} × ${projectName || 'carbon credits'}`,
-        '/portfolio', { amount, quantity, projectName, tokenId }
-      );
-    } catch {}
-    req.log.info({ userId: req.user.id, amount, tokenId }, 'Trade deducted');
-    res.json({ success: true, balance: balanceAfter });
-  } catch (err) {
-    await client.query('ROLLBACK');
-    req.log.error({ err: err?.message, userId: req.user.id }, 'Trade deduct error');
-    res.status(500).json({ error: 'Payment failed' });
-  } finally {
-    client.release();
-  }
+router.post('/trade-deduct', (req, res) => {
+  res.status(410).json({
+    error: 'Deprecated. Use SettlementEngine via /api/trades/checkout-order + /api/trades/checkout-verify',
+    migration: 'https://docs.ethertrack.in/migration/settlement-engine'
+  });
 });
 
 // ── Trade refund ──────────────────────────────────────────────────────────────
-router.post('/trade-refund', authenticate, walletActionLimiter, async (req, res) => {
-  const { amount, idempotencyKey } = req.body;
-  if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
-  if (!idempotencyKey)             return res.status(400).json({ error: 'Idempotency key required' });
-
-  const idemLockKey = generateIdempotencyLockKey(req.user.id, idempotencyKey);
-  await query(`SELECT pg_advisory_xact_lock($1)`, [idemLockKey]);
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    // Check for existing refund with this idempotency key inside transaction
-    const { rows: existing } = await client.query(
-      `SELECT id, balance_after FROM wallet_transactions
-       WHERE user_id = $1 AND idempotency_key = $2 AND status = 'success'`,
-      [req.user.id, idempotencyKey]
-    );
-    if (existing.length) {
-      await client.query('COMMIT');
-      return res.json({ success: true, balance: existing[0].balance_after, idempotent: true });
-    }
-
-    const { rows: userRows } = await client.query(
-      'SELECT inr_balance FROM users WHERE id = $1 FOR UPDATE', [req.user.id]
-    );
-    const balanceBefore = parseFloat(userRows[0].inr_balance);
-    const balanceAfter  = await adjustLedger(req.user.id, amount, 'credit', client);
-    await client.query(
-      `INSERT INTO wallet_transactions
-         (user_id, type, method, amount, status, balance_before, balance_after, reference, idempotency_key, notes)
-       VALUES ($1, 'credit', 'system', $2, 'success', $3, $4, $5, $6, $7)`,
-      [req.user.id, amount, balanceBefore, balanceAfter,
-       idempotencyKey, idempotencyKey,
-       `Refund — MetaMask rejected: ${sanitiseText(idempotencyKey, 40)}`]
-    );
-    await client.query('COMMIT');
-
-    try {
-      await transferMerchantToNodal(amount, reference);
-      req.log.info({ userId: req.user.id, amount, reference }, 'Refund settled — merchant → nodal transfer done');
-    } catch (transferErr) {
-      req.log.error({ err: transferErr?.message, userId: req.user.id, reference },
-        'Merchant→nodal transfer failed on refund — schedule reconciliation');
-    }
-
-    try {
-      await createNotification(
-        req.user.id, 'WALLET', '↩ Trade Refunded',
-        `₹${parseFloat(amount).toLocaleString('en-IN')} refunded — MetaMask transaction rejected`,
-        '/wallet', { amount }
-      );
-    } catch {}
-    req.log.info({ userId: req.user.id, amount, reference }, 'Trade refunded');
-    res.json({ success: true, balance: balanceAfter, refunded: amount });
-  } catch (err) {
-    await client.query('ROLLBACK');
-    req.log.error({ err: err?.message, userId: req.user.id }, 'Trade refund error');
-    res.status(500).json({ error: 'Refund failed' });
-  } finally {
-    client.release();
-  }
+router.post('/trade-refund', (req, res) => {
+  res.status(410).json({
+    error: 'Deprecated. Use SettlementEngine compensation flow',
+    migration: 'https://docs.ethertrack.in/migration/settlement-engine'
+  });
 });
 
 // ── MetaMask: challenge ───────────────────────────────────────────────────────
@@ -1323,5 +1236,65 @@ router.delete('/bank-accounts/:id', authenticate, walletActionLimiter, async (re
     client.release();
   }
 });
-
+ 
+// ── ETH Payment Verification ───────────────────────────────────────────────
+// Manual or automated verification of ETH payments for trades
+router.post('/eth/verify', authenticate, async (req, res) => {
+  const { tradeId, txHash } = req.body;
+  if (!tradeId || !txHash) {
+    return res.status(400).json({ error: 'tradeId and txHash required' });
+  }
+ 
+  try {
+    const { safeQuery: query } = require('../db/pool');
+    const { ethers } = require('ethers');
+ 
+    // Verify trade exists and is in correct state
+    const { rows: tradeRows } = await query(
+      'SELECT * FROM trades WHERE id = $1 AND status = \'completed\'',
+      [tradeId]
+    );
+    if (!tradeRows.length) {
+      return res.status(404).json({ error: 'Trade not found or not completed' });
+    }
+    const trade = tradeRows[0];
+ 
+    // Verify transaction on-chain
+    const provider = new ethers.JsonRpcProvider(process.env.ALCHEMY_RPC);
+    const tx = await provider.getTransaction(txHash);
+    if (!tx) {
+      return res.status(400).json({ error: 'Transaction not found on-chain' });
+    }
+    const receipt = await provider.getTransactionReceipt(txHash);
+    if (!receipt || receipt.status !== 1) {
+      return res.status(400).json({ error: 'Transaction failed or not confirmed' });
+    }
+ 
+    // Verify it's the correct trade payment
+    const marketplaceAddr = process.env.MARKETPLACE_ADDRESS?.toLowerCase();
+    const toAddr = tx.to?.toLowerCase();
+    if (marketplaceAddr && toAddr !== marketplaceAddr) {
+      return res.status(400).json({ error: 'Transaction not sent to marketplace contract' });
+    }
+ 
+    // Update trade with chain confirmation
+    await query(
+      `UPDATE trades SET chain_status = 'confirmed', chain_tx_hash = $1, chain_block = $2, chain_logged_at = NOW(), updated_at = NOW() WHERE id = $3`,
+      [txHash, receipt.blockNumber, tradeId]
+    );
+ 
+    // Trigger settlement engine to complete the trade
+    const se = getSettlementEngine(req);
+    await se.transitionToPaymentSettled(tradeId, {
+      providerReference: txHash,
+      capturedAt: new Date()
+    });
+ 
+    res.json({ success: true, message: 'ETH payment verified and trade settled' });
+  } catch (err) {
+    console.error('[eth/verify]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+ 
 module.exports = router;

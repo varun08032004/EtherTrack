@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useNotifications } from '../context/NotificationContext';
 import { usePortfolio } from '../context/PortfolioContext';
 import { useMarket } from '../hooks/useMarket';
-import { tradesAPI, apiFetch } from '../services/api';
+import { tradesAPI, portfolioAPI, walletAPI, apiFetch } from '../services/api';
 import { v4 as uuidv4 } from 'uuid';
 
 const PLATFORM_FEE = 0.005;
@@ -22,9 +22,39 @@ const TYPE_COLORS = {
 };
 
 const fmt    = n   => `₹${Number(n).toLocaleString('en-IN')}`;
+const fmtEth = n   => `${Number(n).toFixed(4)} ETH`;
 const n0     = v   => Number(v || 0).toFixed(0);
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+const ETH_INR = 280000; // fallback rate
+
+// ── Custodial mode stubs (wallet-free) ──────────────────────────────
+const NOT_AVAILABLE = (feature) => () => {
+  throw new Error(`${feature} requires wallet-based ETH escrow and is not available in custodial mode.`);
+};
+const buyCredit       = NOT_AVAILABLE('Direct ETH purchase');
+const ammSwapETHForCredits  = NOT_AVAILABLE('AMM swaps');
+const ammSwapCreditsForETH  = NOT_AVAILABLE('AMM swaps');
+const ammPools = [];
+
+const refreshINRBalance = async () => {
+  try {
+    const data = await walletAPI.getBalance();
+    return data?.balance ?? 0;
+  } catch {
+    return 0;
+  }
+};
+
+// ── Razorpay SDK loader — module-level promise cache (deduped) ────
+const loadRazorpay = () => new Promise(resolve => {
+  if (window.Razorpay) return resolve(true);
+  const s = document.createElement('script');
+  s.src     = 'https://checkout.razorpay.com/v1/checkout.js';
+  s.async   = true;
+  s.onload  = () => resolve(true);
+  s.onerror = () => resolve(false);
+  document.head.appendChild(s);
+});
 
 // ── NEW: ChainVerifiedBadge ───────────────────────────────────────
 function ChainVerifiedBadge({ chainStatus, chainTxHash }) {
@@ -116,46 +146,27 @@ function Badge({ label, color, bg, border }) {
 }
 
 // ── ConnectPrompt — shown in trade panel for unauthed users ───────
-function ConnectPrompt({ isKYCVerified, walletAddress, navigate }) {
-  if (walletAddress && isKYCVerified) return null;
+// Custodial mode: no wallet needed, only KYC check
+function ConnectPrompt({ isKYCVerified, navigate }) {
+  if (isKYCVerified) return null;
   return (
     <div style={{
       padding: '14px', borderRadius: 8, marginBottom: 12,
-      background: '#040a06', border: '1px solid #22c55e22',
+      background: '#040a06', border: '1px solid #facc1533',
     }}>
-      {!walletAddress && (
-        <div style={{ marginBottom: 8, fontSize: 11, color: '#86efac88', lineHeight: 1.6 }}>
-          Connect MetaMask to trade. The market is open for browsing — no wallet needed.
-        </div>
-      )}
-      {walletAddress && !isKYCVerified && (
-        <div style={{ marginBottom: 8, fontSize: 11, color: '#facc1588', lineHeight: 1.6 }}>
-          Complete KYC to start trading. Market data is fully visible while you verify.
-        </div>
-      )}
-      <div style={{ display: 'flex', gap: 8 }}>
-        {!walletAddress && (
-          <div style={{
-            flex: 1, padding: '9px', borderRadius: 6, textAlign: 'center',
-            border: '1px solid #f59e0b33', background: '#1a120022',
-            fontSize: 10, color: '#f59e0b88', letterSpacing: '.08em',
-          }}>
-            METAMASK NOT CONNECTED
-          </div>
-        )}
-        {walletAddress && !isKYCVerified && (
-          <button
-            onClick={() => navigate('/kyc')}
-            style={{
-              flex: 1, padding: '9px', borderRadius: 6, border: '1px solid #22c55e33',
-              background: '#0d2e1f22', color: '#22c55e88', cursor: 'pointer',
-              fontFamily: 'DM Mono, monospace', fontSize: 10, letterSpacing: '.08em',
-            }}
-          >
-            COMPLETE KYC →
-          </button>
-        )}
+      <div style={{ marginBottom: 8, fontSize: 11, color: '#facc1588', lineHeight: 1.6 }}>
+        Complete KYC to start trading. Market data is fully visible while you verify.
       </div>
+      <button
+        onClick={() => navigate('/kyc')}
+        style={{
+          padding: '9px 16px', borderRadius: 6, border: '1px solid #22c55e33',
+          background: '#0d2e1f22', color: '#22c55e88', cursor: 'pointer',
+          fontFamily: 'DM Mono, monospace', fontSize: 10, letterSpacing: '.08em',
+        }}
+      >
+        COMPLETE KYC →
+      </button>
     </div>
   );
 }
@@ -349,7 +360,7 @@ function CreditInfoCard({ selected, currentPriceInr, priceHistories, liveETHINR 
 
 // ── OrderForm ─────────────────────────────────────────────────────
 function OrderForm({
-  isKYCVerified, walletAddress, txPending, listings, selected, setSelected,
+  isKYCVerified, txPending, listings, selected, setSelected,
   orderMode, setOrderMode, qty, setQty, limitPrice, setLimitPrice,
   bidQty, setBidQty, bidPrice, setBidPrice, bidDays, setBidDays,
   paymentMode, setPaymentMode, inrBalance, inrLoading,
@@ -367,7 +378,7 @@ function OrderForm({
       <div className="cc-panel" style={{ marginBottom: 10 }}>
         <div className="cc-panel-title">PLACE ORDER</div>
 
-        <ConnectPrompt isKYCVerified={isKYCVerified} walletAddress={walletAddress} navigate={navigate}/>
+        <ConnectPrompt isKYCVerified={isKYCVerified} navigate={navigate}/>
 
         <div style={{ display: 'flex', gap: 4, marginBottom: 12 }}>
           {[['market', 'MARKET'], ['limit', 'LIMIT'], ['bid', 'BID']].map(([m, label]) => (
@@ -480,7 +491,7 @@ function OrderForm({
                     <div style={{ fontSize: 9, color: paymentMode === 'eth' ? '#f59e0b' : '#4ade8044', fontWeight: 600, letterSpacing: '.08em' }}>METAMASK</div>
                     <div style={{ fontSize: 11, fontWeight: 700, color: '#f59e0b88', marginTop: 3 }}>ETH</div>
                     <div style={{ fontSize: 8, color: '#f59e0b44', marginTop: 2 }}>
-                      {walletAddress ? 'ON-CHAIN' : 'NOT CONNECTED'}
+                      NOT AVAILABLE
                     </div>
                   </button>
                 </div>
@@ -539,7 +550,7 @@ function OrderForm({
               className="cc-btn cc-btn-buy"
               disabled={
                 !canTrade || txPending || qtyOverMax ||
-                (paymentMode === 'eth' && !walletAddress) ||
+                (paymentMode === 'eth') ||
                 (paymentMode === 'inr' && (!inrSufficient || tradeNetInr <= 0))
               }
               onClick={handlePlaceOrder}
@@ -554,7 +565,7 @@ function OrderForm({
               }
             >
               {txPending     ? '⏳ PROCESSING...'
-               : !canTrade  ? (walletAddress ? '🔒 COMPLETE KYC TO TRADE' : '🦊 CONNECT METAMASK TO TRADE')
+               : !canTrade  ? '🔒 COMPLETE KYC TO TRADE'
                : qtyOverMax ? `⚠ MAX ${maxQty} AVAILABLE`
                : paymentMode === 'inr'
                  ? inrSufficient
@@ -562,7 +573,7 @@ function OrderForm({
                    : '⚠ INSUFFICIENT BALANCE'
                  : paymentMode === 'razorpay'
                    ? `💳 BUY ${qty || '—'} · ₹${Math.round(tradeNetInr).toLocaleString('en-IN')}`
-                   : `🦊 BUY ${qty || '—'} CREDITS`
+                   : '❌ ETH TRADING NOT AVAILABLE'
               }
             </button>
           </>
@@ -609,21 +620,21 @@ function OrderForm({
             )}
             <button
               className="cc-btn cc-btn-bid"
-              disabled={!canTrade || !walletAddress || txPending}
+              disabled={!canTrade || txPending}
               onClick={handlePlaceBid}
             >
               {txPending
                 ? '⏳ PROCESSING...'
                 : !canTrade
-                  ? (walletAddress ? '🔒 COMPLETE KYC TO BID' : '🦊 CONNECT METAMASK TO BID')
-                  : `PLACE BID · LOCK ${Number(bidEscrowEth || 0).toFixed(4)} ETH`
+                  ? '🔒 COMPLETE KYC TO BID'
+                  : '❌ BID ORDERS NOT AVAILABLE'
               }
             </button>
           </>
         )}
 
         <div style={{ marginTop: 8, fontSize: 9, color: '#86efac33', textAlign: 'center' }}>
-          1 credit = 1 tonne CO₂ · MetaMask required for on-chain signing
+          1 credit = 1 tonne CO₂ · Custodial trading · No wallet required
         </div>
       </div>
 
@@ -692,6 +703,24 @@ export default function CarbonCredits() {
   const [inrBalance,       setInrBalance]       = useState(0);
   const [inrLoading,       setInrLoading]       = useState(false);
   const [cancelBidConfirm, setCancelBidConfirm] = useState(null);
+
+  // ── Fetch INR balance on mount ────────────────────────────────────
+  useEffect(() => {
+    let mounted = true;
+    const loadBalance = async () => {
+      setInrLoading(true);
+      try {
+        const balance = await refreshINRBalance();
+        if (mounted) setInrBalance(balance);
+      } catch {
+        if (mounted) setInrBalance(0);
+      } finally {
+        if (mounted) setInrLoading(false);
+      }
+    };
+    loadBalance();
+    return () => { mounted = false; };
+  }, []);
 
   // ── CSS ────────────────────────────────────────────────────────
   const CSS = useMemo(() => `
@@ -916,22 +945,13 @@ export default function CarbonCredits() {
     ? ((analyticsHistory[analyticsHistory.length - 1] - analyticsHistory[0]) / analyticsHistory[0] * 100).toFixed(2)
     : null;
 
-  // ── fetchBatchId ──────────────────────────────────────────────
-  const fetchBatchId = async tokenId => {
-    try {
-      const data = await apiFetch(`/api/portfolio/batch-by-token/${tokenId}`);
-      return data?.batchId || null;
-    } catch { return null; }
-  };
-
   // ── recordTrade ───────────────────────────────────────────────
   const recordTrade = async ({ txHash, paymentMode, listing, qty, pricePerCreditINR }) => {
     try {
-      const data = await tradesAPI.record({
+      const data = await tradesAPI.recordEth({
         batchId:           listing.batchId || null,
         listingId:         listing.listingIdOnchain || null,
         quantity:          parseInt(qty),
-        paymentMode,
         txHash:            txHash || null,
         pricePerCreditINR: parseFloat(pricePerCreditINR || listing.pricePerUnitINR || Math.round(listing.adjPrice * liveETHINR)),
         idempotencyKey:    txHash,
@@ -949,12 +969,11 @@ export default function CarbonCredits() {
   // ── handlePlaceOrder ──────────────────────────────────────────
   const handlePlaceOrder = () => {
     if (!isKYCVerified)                              { showToast('❌ Complete KYC first', 'error'); return; }
-    if (paymentMode === 'eth' && !walletAddress)     { showToast('❌ Connect MetaMask', 'error'); return; }
+    if (paymentMode === 'eth')                       { showToast('❌ ETH trading not available in custodial mode', 'error'); return; }
     if (paymentMode === 'inr' && inrBalance < tradeNetInr) { showToast('❌ Insufficient INR balance', 'error'); return; }
     if (!qty || isNaN(qty) || +qty <= 0)             { showToast('❌ Enter valid quantity', 'error'); return; }
     if (!selected)                                   { showToast('❌ Select a credit', 'error'); return; }
     if (+qty > selected.amount)                      { showToast(`❌ Max available: ${selected.amount}`, 'error'); return; }
-    if (selected.seller?.toLowerCase() === walletAddress?.toLowerCase()) { showToast('❌ Cannot buy your own listing', 'error'); return; }
     if (orderMode === 'limit' && (!limitPrice || isNaN(limitPrice))) { showToast('❌ Enter limit price', 'error'); return; }
     setConfirmModal({ type: 'buy', listing: selected, qty: +qty, orderMode, tradePrice, tradePriceINR, tradeTotalInr, tradeFeeInr, tradeNetInr, tradeNetEth, paymentMode });
   };
@@ -966,40 +985,116 @@ export default function CarbonCredits() {
     setTxPending(true);
     const idempotencyKey = uuidv4();
     try {
-      // PATH A: INR Wallet
-      if (o.paymentMode === 'inr') {
-        showToast('⏳ Processing trade...', 'info');
-        const tradeData = await tradesAPI.record({
-          batchId:           o.listing.batchId || null,
-          listingId:         o.listing.listingIdOnchain || null,
-          quantity:          parseInt(o.qty),
-          paymentMode:       'inr',
-          txHash:            null,
-          pricePerCreditINR: parseFloat(o.tradePriceINR),
-          idempotencyKey:    idempotencyKey,
-        });
-        if (!tradeData.success) throw Object.assign(new Error(tradeData.error || 'Trade settlement failed'), { isSettlementError: true });
-        if (tradeData.buyerBalance !== undefined) setInrBalance(parseFloat(tradeData.buyerBalance));
-        else await refreshINRBalance();
-        addNotification({ type: NOTIF_TYPES.TRADE, title: 'Buy Executed ✅', message: `${o.qty} × ${o.listing.projectName} — ₹${Math.round(o.tradeNetInr).toLocaleString('en-IN')} from INR wallet` });
-        showToast(`🎉 Congratulations! ${o.qty} credit${o.qty > 1 ? 's' : ''} purchased successfully.
-Invoice sent to your email — check Trade History to download your GST invoice.`);
-        setQty(''); setLimitPrice('');
-        refetchMarket();
-        refreshTradeHistory();
+      // PATH A: Custodial INR (ledger or custodial)
+      if (o.paymentMode === 'inr' || o.paymentMode === 'ledger') {
+        showToast('⏳ Processing custodial payment...', 'info');
+        const isLedgerListing = o.listing.listingType === 'ledger';
+        const listingId = isLedgerListing ? o.listing.listingId : (o.listing.listingIdOnchain || null);
 
+        const orderData = await (isLedgerListing
+          ? portfolioAPI.ledgerCheckoutOrder({
+              ledgerListingId: listingId,
+              quantity: parseInt(o.qty),
+            })
+          : tradesAPI.checkoutOrder({
+              batchId: o.listing.batchId,
+              listingId,
+              quantity: parseInt(o.qty),
+              pricePerCreditINR: parseFloat(o.tradePriceINR),
+            })
+        );
+        if (orderData?.error?.code === 'LEDGER_BALANCE_MISMATCH') {
+          const shouldSync = window.confirm(`On-chain balance mismatch detected.\nDB: ${orderData.dbBalance}\nOn-chain: ${orderData.onChainBalance}\n\nClick OK to sync now.`);
+          if (shouldSync) {
+            try {
+              await portfolioAPI.syncLedgerBalance(o.listing.tokenId);
+              showToast('Balance synced! Please try listing again.', 'success');
+            } catch (e) {
+              showToast(`Sync failed: ${e.message}`, 'error');
+            }
+          }
+          throw new Error('Balance mismatch - please sync and retry');
+        }
+        if (orderData?.error) throw new Error(orderData.error);
+        if (!orderData?.orderId) throw new Error('Failed to create payment order');
+
+        await new Promise((resolve, reject) => {
+          const rzp = new window.Razorpay({
+            key: orderData.keyId,
+            amount: orderData.amount,
+            currency: 'INR',
+            name: 'EtherTrack',
+            description: `${o.qty} × ${o.listing.projectName}`,
+            order_id: orderData.orderId,
+            theme: { color: '#22c55e' },
+            modal: { ondismiss: () => reject(new Error('Payment cancelled')) },
+            handler: async (response) => {
+              try {
+                showToast('⏳ Verifying payment...', 'info');
+                const result = await (isLedgerListing
+                  ? portfolioAPI.ledgerCheckoutVerify({
+                      razorpay_order_id: response.razorpay_order_id,
+                      razorpay_payment_id: response.razorpay_payment_id,
+                      razorpay_signature: response.razorpay_signature,
+                      ledgerListingId: listingId,
+                      quantity: parseInt(o.qty),
+                    })
+                  : tradesAPI.checkoutVerify({
+                      razorpay_order_id: response.razorpay_order_id,
+                      razorpay_payment_id: response.razorpay_payment_id,
+                      razorpay_signature: response.razorpay_signature,
+                      idempotencyKey,
+                    })
+                );
+                if (result?.error) throw new Error(result.error);
+                if (!result?.success) throw new Error('Settlement failed');
+                addNotification({ type: NOTIF_TYPES.TRADE, title: 'Buy Executed ✅', message: `${o.qty} × ${o.listing.projectName} — ₹${Math.round(o.tradeNetInr).toLocaleString('en-INR')} via Razorpay` });
+                showToast(`🎉 Congratulations! ${o.qty} credit${o.qty > 1 ? 's' : ''} purchased successfully. Invoice sent to your email — check Trade History to download your GST invoice.`);
+                setQty(''); setLimitPrice('');
+                refetchMarket(); refreshTradeHistory();
+                resolve(result);
+              } catch (e) { reject(e); }
+            },
+          });
+          rzp.on('payment.failed', r => reject(new Error(r.error?.description || 'Payment failed')));
+          rzp.open();
+        });
+      }
       // PATH B: Razorpay Direct (NEW)
-      } else if (o.paymentMode === 'razorpay') {
+      else if (o.paymentMode === 'razorpay') {
         showToast('⏳ Opening Razorpay...', 'info');
         const loaded = await loadRazorpay();
         if (!loaded) throw new Error('Razorpay SDK failed to load. Please try again.');
 
-        const orderData = await tradesAPI.checkoutOrder({
-          batchId:           o.listing.batchId,
-          listingId:         o.listing.listingIdOnchain || null,
-          quantity:          parseInt(o.qty),
-          pricePerCreditINR: parseFloat(o.tradePriceINR),
-        });
+        const isLedgerListing = o.listing.listingType === 'ledger';
+        const listingId = isLedgerListing ? o.listing.listingId : (o.listing.listingIdOnchain || null);
+
+        const orderData = await (isLedgerListing
+          ? portfolioAPI.ledgerCheckoutOrder({
+              ledgerListingId: listingId,
+              quantity: parseInt(o.qty),
+            })
+          : tradesAPI.checkoutOrder({
+              batchId: o.listing.batchId,
+              listingId,
+              quantity: parseInt(o.qty),
+              pricePerCreditINR: parseFloat(o.tradePriceINR),
+            })
+        );
+        if (orderData?.error?.code === 'LEDGER_BALANCE_MISMATCH') {
+          // Offer to sync balance
+          const shouldSync = window.confirm(`On-chain balance mismatch detected.\nDB: ${orderData.dbBalance}\nOn-chain: ${orderData.onChainBalance}\n\nClick OK to sync now.`);
+          if (shouldSync) {
+            try {
+              await portfolioAPI.syncLedgerBalance(o.listing.tokenId);
+              showToast('Balance synced! Please try listing again.', 'success');
+            } catch (e) {
+              showToast(`Sync failed: ${e.message}`, 'error');
+            }
+          }
+          throw new Error('Balance mismatch - please sync and retry');
+        }
+        if (orderData?.error) throw new Error(orderData.error);
         if (!orderData?.orderId) throw new Error('Failed to create payment order');
 
         await new Promise((resolve, reject) => {
@@ -1015,13 +1110,23 @@ Invoice sent to your email — check Trade History to download your GST invoice.
             handler: async (response) => {
               try {
                 showToast('⏳ Verifying payment...', 'info');
-                const result = await tradesAPI.checkoutVerify({
-                  razorpay_order_id:   response.razorpay_order_id,
-                  razorpay_payment_id: response.razorpay_payment_id,
-                  razorpay_signature:  response.razorpay_signature,
-                  idempotencyKey,
-                });
-                if (!result?.success) throw new Error(result?.error || 'Settlement failed');
+                const result = await (isLedgerListing
+                  ? portfolioAPI.ledgerCheckoutVerify({
+                      razorpay_order_id:   response.razorpay_order_id,
+                      razorpay_payment_id: response.razorpay_payment_id,
+                      razorpay_signature:  response.razorpay_signature,
+                      ledgerListingId: listingId,
+                      quantity: parseInt(o.qty),
+                    })
+                  : tradesAPI.checkoutVerify({
+                      razorpay_order_id:   response.razorpay_order_id,
+                      razorpay_payment_id: response.razorpay_payment_id,
+                      razorpay_signature:  response.razorpay_signature,
+                      idempotencyKey,
+                    })
+                );
+                if (result?.error) throw new Error(result.error);
+                if (!result?.success) throw new Error('Settlement failed');
                 addNotification({ type: NOTIF_TYPES.TRADE, title: 'Buy Executed ✅', message: `${o.qty} × ${o.listing.projectName} — ₹${Math.round(o.tradeNetInr).toLocaleString('en-IN')} via Razorpay` });
                 showToast(`🎉 Congratulations! ${o.qty} credit${o.qty > 1 ? 's' : ''} purchased successfully.
 Invoice sent to your email — check Trade History to download your GST invoice.`);
@@ -1069,37 +1174,19 @@ Check your email for invoice or visit Trade History to download your GST PDF.`);
 
   const handlePlaceBid = () => {
     if (!isKYCVerified)                               { showToast('❌ Complete KYC first', 'error'); return; }
-    if (!walletAddress)                               { showToast('❌ Connect MetaMask', 'error'); return; }
-    if (selected?.seller?.toLowerCase() === walletAddress.toLowerCase()) { showToast('❌ Cannot bid on your own listing', 'error'); return; }
     if (!bidQty || isNaN(bidQty) || +bidQty <= 0)    { showToast('❌ Enter valid quantity', 'error'); return; }
     if (!bidPrice || isNaN(bidPrice))                 { showToast('❌ Enter bid price', 'error'); return; }
     if (!selected)                                    { showToast('❌ Select a credit first', 'error'); return; }
-    setConfirmModal({ type: 'bid', listing: selected, qty: +bidQty, limitPriceInr: +bidPrice, limitPriceEth: (+bidPrice / liveETHINR).toFixed(8), bidTotalEth, bidFeeEth, bidEscrowEth, durationDays: parseInt(bidDays) || 7 });
+    showToast('❌ Bid orders not available in custodial mode', 'error');
   };
 
   const handleConfirmBid = async () => {
-    const o = confirmModal; setConfirmModal(null); setTxPending(true);
-    try {
-      showToast('⏳ Locking ETH in escrow...', 'info');
-      const r = await placeBuyOrder(o.listing.tokenId, o.qty, o.limitPriceEth, o.durationDays);
-      addNotification({ type: NOTIF_TYPES.TRADE, title: 'Bid Placed ✅', message: `${o.qty} × ${o.listing.projectName} @ ${fmt(o.limitPriceInr)}` });
-      showToast('✅ Bid placed! ETH locked in escrow.');
-      setBidQty(''); setBidPrice('');
-      navigate(`/transaction-status?hash=${r.txHash}`);
-    } catch (e) {
-      if (e.code === 4001) showToast('❌ Rejected in MetaMask', 'error');
-      else showToast(`❌ ${e.reason || 'Transaction failed'}`, 'error');
-    } finally { setTxPending(false); }
+    showToast('❌ Bid orders not available in custodial mode', 'error');
   };
 
   const handleCancelBidRequest  = (orderId, ethEscrowed) => setCancelBidConfirm({ orderId, ethEscrowed });
   const handleCancelBidConfirmed = async () => {
-    const { orderId } = cancelBidConfirm; setCancelBidConfirm(null);
-    try {
-      showToast('⏳ Cancelling bid...', 'info');
-      await cancelBuyOrder(orderId);
-      showToast('✅ Bid cancelled. ETH refunded.');
-    } catch (e) { showToast(`❌ ${e.reason || 'Cancel failed'}`, 'error'); }
+    showToast('❌ Bid orders not available in custodial mode', 'error');
   };
 
   const addAlert = () => {
@@ -1138,11 +1225,6 @@ Check your email for invoice or visit Trade History to download your GST PDF.`);
                 ? <span style={{ fontSize: 9, padding: '4px 10px', borderRadius: 20, background: '#0d2e1f', border: '1px solid #22c55e33', color: '#22c55e', letterSpacing: '.1em' }}>✅ KYC VERIFIED</span>
                 : <span style={{ fontSize: 9, padding: '4px 10px', borderRadius: 20, background: '#1a0a0a', border: '1px solid #f8717133', color: '#f87171', cursor: 'pointer', letterSpacing: '.1em' }} onClick={() => navigate('/kyc')}>⚠️ COMPLETE KYC</span>
               }
-              {!walletAddress && (
-                <span style={{ fontSize: 9, padding: '4px 10px', borderRadius: 20, background: '#1a1200', border: '1px solid #f59e0b33', color: '#f59e0b88', letterSpacing: '.1em' }}>
-                  METAMASK NOT CONNECTED
-                </span>
-              )}
               <span style={{ fontSize: 9, padding: '4px 10px', borderRadius: 20, background: '#0a1628', border: '1px solid #60a5fa22', color: '#60a5fa66', letterSpacing: '.1em' }}>⛓ SEPOLIA</span>
             </div>
           </div>
@@ -1298,7 +1380,7 @@ Check your email for invoice or visit Trade History to download your GST PDF.`);
                             <span style={{ fontSize: 10, color: bidsN > 0 ? '#60a5fa88' : '#86efac33' }}>
                               {bidsN > 0 ? `📥 ${bidsN}` : '—'}
                             </span>
-                            {l.seller?.toLowerCase() === walletAddress?.toLowerCase()
+                            {false
                               ? <span style={{ fontSize: 9, color: '#86efac22', padding: '5px 4px' }}>YOUR LISTING</span>
                               : (
                                 <button
@@ -1346,7 +1428,7 @@ Check your email for invoice or visit Trade History to download your GST PDF.`);
                 </div>
               </div>
               <OrderForm
-                isKYCVerified={isKYCVerified} walletAddress={walletAddress}
+                isKYCVerified={isKYCVerified}
                 txPending={txPending} listings={listings}
                 selected={selected} setSelected={setSelected}
                 orderMode={orderMode} setOrderMode={setOrderMode}
@@ -1495,10 +1577,10 @@ Check your email for invoice or visit Trade History to download your GST PDF.`);
           {/* MY BIDS TAB */}
           {tab === 'bids' && (
             <div className="cc-panel">
-              {!walletAddress
+              {myOpenBids.length === 0
                 ? (
                   <div style={{ textAlign: 'center', padding: '48px', color: '#86efac44', fontSize: 11 }}>
-                    Connect MetaMask to see your bids.
+                    No open bids. Bid orders require ETH escrow (not available in custodial mode).
                   </div>
                 )
                 : (

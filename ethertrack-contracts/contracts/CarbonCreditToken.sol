@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import "@openzeppelin/contracts/token/ERC1155/extensions/ERC1155Supply.sol";
 import "@openzeppelin/contracts/token/ERC1155/extensions/ERC1155Burnable.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./KYCRegistry.sol";
@@ -16,7 +17,7 @@ import "./KYCRegistry.sol";
  *         Each unit of a tokenId = 1 tonne CO2 equivalent.
  *         ANY KYC-verified wallet can mint, list, and trade credits.
  */
-contract CarbonCreditToken is ERC1155, ERC1155Supply, ERC1155Burnable, Ownable, Pausable, ReentrancyGuard {
+contract CarbonCreditToken is ERC1155, ERC1155Supply, ERC1155Burnable, Ownable, AccessControl, Pausable, ReentrancyGuard {
 
     KYCRegistry public kycRegistry;
 
@@ -73,6 +74,10 @@ contract CarbonCreditToken is ERC1155, ERC1155Supply, ERC1155Burnable, Ownable, 
         uint256  registeredAt;
     }
 
+    // ── Role Constants ──────────────────────────────────────
+    bytes32 public constant RETIREMENT_ADMIN_ROLE = keccak256("RETIREMENT_ADMIN_ROLE");
+    bytes32 public constant EMERGENCY_ROLE = keccak256("EMERGENCY_ROLE");
+
     // ── State ─────────────────────────────────────────────
     uint256 private _nextTokenId;
 
@@ -81,6 +86,9 @@ contract CarbonCreditToken is ERC1155, ERC1155Supply, ERC1155Burnable, Ownable, 
     mapping(address => mapping(uint256 => uint256)) public retiredBy;
     mapping(string  => uint256)                     public serialToTokenId;
     mapping(string  => bool)                        public serialRegistered;
+
+    // Approved contracts that can receive credits without personal KYC
+    mapping(address => bool) public approvedReceivers;
 
     // ── Events ────────────────────────────────────────────
     event CreditMinted(
@@ -117,8 +125,18 @@ contract CarbonCreditToken is ERC1155, ERC1155Supply, ERC1155Burnable, Ownable, 
     constructor(
         address initialOwner,
         address kycRegistryAddress
-    ) ERC1155("") Ownable(initialOwner) {
+    ) ERC1155("") Ownable(initialOwner) AccessControl(initialOwner) {
         kycRegistry = KYCRegistry(kycRegistryAddress);
+
+        // Role setup
+        _setRoleAdmin(DEFAULT_ADMIN_ROLE, DEFAULT_ADMIN_ROLE);
+        _setRoleAdmin(RETIREMENT_ADMIN_ROLE, DEFAULT_ADMIN_ROLE);
+        _setRoleAdmin(EMERGENCY_ROLE, DEFAULT_ADMIN_ROLE);
+
+        // Grant admin role to initial owner (already done by AccessControl constructor)
+        // Grant retirement admin to initial owner
+        grantRole(RETIREMENT_ADMIN_ROLE, initialOwner);
+        grantRole(EMERGENCY_ROLE, initialOwner);
     }
 
     // ── Mint ──────────────────────────────────────────────
@@ -204,22 +222,22 @@ contract CarbonCreditToken is ERC1155, ERC1155Supply, ERC1155Burnable, Ownable, 
     }
 
     /**
-     * @notice [NEW] Operator-executed retirement — lets the backend retire
-     *         credits on a user's behalf (e.g. a user who paid via INR/UPI
-     *         and never personally holds a MetaMask session open) WITHOUT
-     *         requiring their signature. This does NOT let the operator
-     *         retire credits arbitrarily — `beneficiary` must already
-     *         genuinely hold `amount` of `tokenId` on-chain (checked below,
-     *         same as the self-service retireCredit above), and the burn is
-     *         attributed to `beneficiary`, not the operator, so GHG
-     *         Protocol / BRSR retirement records remain correctly credited
-     *         to whoever actually retired the credit.
+     * @notice [NEW] Retirement Admin-executed retirement — lets authorized
+     *         retirement admins retire credits on a user's behalf (e.g. a user
+     *         who paid via INR/UPI and never personally holds a MetaMask session
+     *         open) WITHOUT requiring their signature. This does NOT let the
+     *         retirement admin retire credits arbitrarily — `beneficiary` must
+     *         already genuinely hold `amount` of `tokenId` on-chain (checked
+     *         below, same as the self-service retireCredit above), and the burn
+     *         is attributed to `beneficiary`, not the retirement admin, so GHG
+     *         Protocol / BRSR retirement records remain correctly credited to
+     *         whoever actually retired the credit.
      */
     function retireCreditFor(
         address beneficiary,
         uint256 tokenId,
         uint256 amount
-    ) external onlyOperator whenNotPaused nonReentrant onlyKYCVerified(beneficiary) {
+    ) external onlyRole(RETIREMENT_ADMIN_ROLE) whenNotPaused nonReentrant onlyKYCVerified(beneficiary) {
         require(amount > 0,                                  "Amount must be > 0");
         require(balanceOf(beneficiary, tokenId) >= amount,   "Insufficient credits");
 
@@ -243,20 +261,25 @@ contract CarbonCreditToken is ERC1155, ERC1155Supply, ERC1155Burnable, Ownable, 
         uint256 amount,
         bytes memory data
     ) public override whenNotPaused {
-        // Allow marketplace contract transfers without KYC check
-        // (marketplace is already KYC-gated at entry)
+        // ALL external addresses must be KYC verified
         if (from != address(0) && !kycRegistry.isKYCVerified(from)) {
-            // Allow if it's a contract (marketplace escrow transfers)
-            uint256 size;
-            assembly { size := extcodesize(from) }
-            if (size == 0) revert("Sender not KYC verified");
+            revert("Sender not KYC verified");
         }
         if (to != address(0) && !kycRegistry.isKYCVerified(to)) {
-            uint256 size;
-            assembly { size := extcodesize(to) }
-            if (size == 0) revert("Receiver not KYC verified");
+            // Allow approved contracts (e.g., Marketplace, CustodyWallet) to receive
+            require(approvedReceivers[to], "Receiver not KYC verified");
         }
         super.safeTransferFrom(from, to, id, amount, data);
+    }
+
+    // ── Approved Receivers ──────────────────────────────
+    /// @notice Contracts that are allowed to receive credits without personal KYC
+    ///         (e.g., Marketplace escrow, CustodyWallet). Set by owner only.
+    mapping(address => bool) public approvedReceivers;
+
+    /// @notice Owner-only. Approve a contract to receive credits without KYC.
+    function setApprovedReceiver(address receiver, bool approved) external onlyOwner {
+        approvedReceivers[receiver] = approved;
     }
 
     // ── View Functions ────────────────────────────────────

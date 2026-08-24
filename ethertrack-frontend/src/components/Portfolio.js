@@ -1346,18 +1346,29 @@ useEffect(() => {
 const handleDelist = async (credit, qty) => {
   if (!can('portfolio:list')) { showToast('No permission', 'error'); return; }
 
+  const listingId = credit.listingId || credit.ledgerListingId;
+  if (!listingId) {
+    showToast('No listing ID found for this credit', 'error');
+    return;
+  }
+
   try {
     setTxPending('Cancelling listing…');
-    await delistCredit(credit.listingId);
+    await delistCredit(listingId);
+    showToast('All credits removed from marketplace.');
+
+    await loadMyCredits();
 
     if (qty && qty < credit.listedCredits) {
-      const remainingQty = credit.listedCredits - qty;
-      await listCredit(credit.tokenId, credit.batchId, remainingQty, credit.pricePerCredit, 30);
-      showToast(`${qty} credits delisted. ${remainingQty} still listed.`);
-    } else {
-      showToast('All credits removed from marketplace.');
+      try {
+        const remainingQty = credit.listedCredits - qty;
+        await listCredit(credit.tokenId, credit.batchId, remainingQty, credit.pricePerCredit, 30);
+        showToast(`${qty} credits delisted. ${remainingQty} still listed.`);
+      } catch (e) {
+        console.error('[partial relist]', e);
+        showToast('Delisted but partial relist failed', 'error');
+      }
     }
-    await loadMyCredits();
   } catch (e) {
     showToast(e.message || 'Delisting failed', 'error');
   } finally {

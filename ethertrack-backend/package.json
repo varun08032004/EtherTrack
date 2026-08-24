@@ -4,10 +4,12 @@
   "description": "EtherTrack Carbon Credit Registry — Backend API",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "ts-node --transpile-only server.js",
     "dev": "nodemon server.js",
     "db:migrate": "node db/migrate.js",
-    "db:seed": "node db/seed.js"
+    "db:seed": "node db/seed.js",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest --config=jest.config.test.js",
+    "test:watch": "node --experimental-vm-modules node_modules/.bin/jest --config=jest.config.test.js --watch"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.1",
@@ -75,6 +77,8 @@
     "@types/supertest": "^7.2.1",
     "jest": "^30.4.2",
     "nodemon": "^3.0.2",
-    "supertest": "^7.2.2"
+    "supertest": "^7.2.2",
+    "ts-jest": "^29.4.12",
+    "ts-node": "^10.9.2"
   }
 }

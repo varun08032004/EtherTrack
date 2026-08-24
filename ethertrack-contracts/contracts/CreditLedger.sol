@@ -44,7 +44,7 @@ import "@openzeppelin/contracts/utils/Pausable.sol";
 contract CreditLedger is Ownable, Pausable {
 
     // ── Action Types ───────────────────────────────────────
-    enum ActionType { MINT, LIST, DELIST, BUY, SELL, RETIRE, WITHDRAW_TO_WALLET }
+    enum ActionType { MINT, LIST, DELIST, BUY, SELL, RETIRE, WITHDRAW_TO_WALLET, RESERVE, RELEASE_RESERVE }
 
     // ── Structs ───────────────────────────────────────────
     struct OwnershipLog {
@@ -66,6 +66,8 @@ contract CreditLedger is Ownable, Pausable {
     mapping(bytes32 => uint256[]) public userLogs;
     // userId => tokenId => running balance (credits currently held)
     mapping(bytes32 => mapping(uint256 => uint256)) public userTokenBalance;
+    // userId => tokenId => reserved credits (for active listings)
+    mapping(bytes32 => mapping(uint256 => uint256)) public userTokenReserved;
     // userId => tokenId => total ever retired
     mapping(bytes32 => mapping(uint256 => uint256)) public userTokenRetired;
     // tokenId => total held across all ledger users (should reconcile with
@@ -121,18 +123,17 @@ contract CreditLedger is Ownable, Pausable {
 
     /**
      * @notice Log a change in a user's credit ownership — mint, list,
-     *         delist, buy, or sell. Does NOT move any real tokens; the
+     *         delist, buy, sell, reserve, release_reserve. Does NOT move any real tokens; the
      *         actual CarbonCreditToken balance stays in pooled custody
      *         throughout. This is purely the tamper-evident record of what
      *         the platform's database claims happened.
      * @param userId       keccak256 of the platform user's internal UUID
      * @param tokenId      CarbonCreditToken tokenId this log concerns
      * @param amountDelta  positive = user gained credits, negative = user
-     *                     gave up credits (list/sell) — reverts if a
-     *                     negative delta would take the user's running
-     *                     balance below zero, preventing an inconsistent
-     *                     ledger from ever being written
-     * @param actionType   MINT / LIST / DELIST / BUY / SELL / WITHDRAW_TO_WALLET
+     *                     gave up credits — reverts if a negative delta would
+     *                     take the user's available balance below zero,
+     *                     preventing an inconsistent ledger from ever being written
+     * @param actionType   MINT / LIST / DELIST / BUY / SELL / RESERVE / RELEASE_RESERVE / WITHDRAW_TO_WALLET
      *                     (use logRetirement() below for RETIRE, which has
      *                     its own dedicated event + running totals for
      *                     GHG Protocol / BRSR certificate purposes)
@@ -155,16 +156,46 @@ contract CreditLedger is Ownable, Pausable {
         require(actionType != ActionType.RETIRE, "CreditLedger: use logRetirement() for retirement");
 
         uint256 currentBalance = userTokenBalance[userId][tokenId];
+        uint256 currentReserved = userTokenReserved[userId][tokenId];
+        uint256 available = currentBalance - currentReserved;
 
-        if (amountDelta < 0) {
-            uint256 debit = uint256(-amountDelta);
-            require(currentBalance >= debit, "CreditLedger: insufficient ledger balance");
-            userTokenBalance[userId][tokenId] = currentBalance - debit;
-            totalLedgerBalance[tokenId]       -= debit;
+        if (actionType == ActionType.LIST || actionType == ActionType.RESERVE) {
+            // Reserve credits: move from available to reserved
+            uint256 reserveAmount = uint256(amountDelta);
+            require(available >= reserveAmount, "CreditLedger: insufficient available balance to reserve");
+            userTokenReserved[userId][tokenId] = currentReserved + reserveAmount;
+            // totalLedgerBalance unchanged (total owned credits same)
+        } else if (actionType == ActionType.DELIST || actionType == ActionType.RELEASE_RESERVE) {
+            // Release reservation: move from reserved back to available
+            uint256 releaseAmount = uint256(-amountDelta); // amountDelta is negative for release
+            require(currentReserved >= releaseAmount, "CreditLedger: insufficient reserved balance to release");
+            userTokenReserved[userId][tokenId] = currentReserved - releaseAmount;
+            // totalLedgerBalance unchanged
+        } else if (actionType == ActionType.SELL) {
+            // Sell from reserved balance (credits move from seller's reserved to buyer)
+            uint256 sellAmount = uint256(-amountDelta);
+            require(currentReserved >= sellAmount, "CreditLedger: insufficient reserved balance to sell");
+            userTokenReserved[userId][tokenId] = currentReserved - sellAmount;
+            userTokenBalance[userId][tokenId] = currentBalance - sellAmount;
+            totalLedgerBalance[tokenId] -= sellAmount;
+        } else if (actionType == ActionType.BUY) {
+            // Buy: credit to available balance
+            uint256 buyAmount = uint256(amountDelta);
+            userTokenBalance[userId][tokenId] = currentBalance + buyAmount;
+            totalLedgerBalance[tokenId] += buyAmount;
+        } else if (actionType == ActionType.MINT) {
+            // Mint: credit to available balance
+            uint256 mintAmount = uint256(amountDelta);
+            userTokenBalance[userId][tokenId] = currentBalance + mintAmount;
+            totalLedgerBalance[tokenId] += mintAmount;
+        } else if (actionType == ActionType.WITHDRAW_TO_WALLET) {
+            // Withdraw to wallet: debit from available (user takes self-custody)
+            uint256 withdrawAmount = uint256(-amountDelta);
+            require(available >= withdrawAmount, "CreditLedger: insufficient available balance to withdraw");
+            userTokenBalance[userId][tokenId] = currentBalance - withdrawAmount;
+            totalLedgerBalance[tokenId] -= withdrawAmount;
         } else {
-            uint256 credit = uint256(amountDelta);
-            userTokenBalance[userId][tokenId] = currentBalance + credit;
-            totalLedgerBalance[tokenId]       += credit;
+            revert("CreditLedger: unsupported actionType");
         }
 
         logId = _logs.length;
@@ -239,6 +270,16 @@ contract CreditLedger is Ownable, Pausable {
 
     function getUserRetired(bytes32 userId, uint256 tokenId) external view returns (uint256) {
         return userTokenRetired[userId][tokenId];
+    }
+
+    function getUserReserved(bytes32 userId, uint256 tokenId) external view returns (uint256) {
+        return userTokenReserved[userId][tokenId];
+    }
+
+    function getUserAvailable(bytes32 userId, uint256 tokenId) external view returns (uint256) {
+        uint256 balance = userTokenBalance[userId][tokenId];
+        uint256 reserved = userTokenReserved[userId][tokenId];
+        return balance - reserved;
     }
 
     function totalLogs() external view returns (uint256) {

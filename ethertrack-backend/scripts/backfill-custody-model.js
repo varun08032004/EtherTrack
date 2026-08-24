@@ -28,10 +28,11 @@ async function backfillCustodyModel() {
 
     for (const batch of batches) {
       const custodyModel = batch.wallet_address ? 'self' : 'pooled';
+      const status = batch.token_id != null && custodyModel === 'pooled' ? 'tokenised' : batch.status;
       
       await query(
-        `UPDATE carbon_batches SET custody_model = $1 WHERE id = $2`,
-        [custodyModel, batch.id]
+        `UPDATE carbon_batches SET custody_model = $1, status = $2 WHERE id = $3`,
+        [custodyModel, status, batch.id]
       );
 
       if (custodyModel === 'pooled') pooled++;

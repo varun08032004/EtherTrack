@@ -199,11 +199,13 @@ cron.schedule('0 * * * *', async () => {
           WHERE id = $1
         `, [user.id]);
 
-        const { rows: listings } = await query(`
-          SELECT listing_id, project_name, available_credits, batch_id
-          FROM market_listings
-          WHERE seller_id = $1 AND available_credits > 0
-        `, [user.id]).catch(() => ({ rows: [] }));
+        // LEGACY: market_listings table removed in Phase 6
+        // const { rows: listings } = await query(`
+        //   SELECT listing_id, project_name, available_credits, batch_id
+        //   FROM market_listings
+        //   WHERE seller_id = $1 AND available_credits > 0
+        // `, [user.id]).catch(() => ({ rows: [] }));
+        const listings = []; // LEGACY: market_listings table removed
 
         // [FIX-3] Each listing cleanup is atomic
         for (const listing of listings) {
@@ -315,17 +317,19 @@ cron.schedule('30 * * * *', async () => {
 
   console.log('📋 [CRON] Running listing expiry cleanup...');
   try {
-    const { rows: expiredListings } = await query(`
-      SELECT ml.listing_id, ml.batch_id, ml.seller_id,
-             ml.available_credits, ml.project_name,
-             ml.seller_email, ml.seller_name,
-             ml.expires_at
-      FROM market_listings ml
-      WHERE ml.expires_at IS NOT NULL
-        AND ml.expires_at < NOW()
-        AND ml.available_credits > 0
-      LIMIT 50
-    `).catch(() => ({ rows: [] }));
+// LEGACY: market_listings table removed in Phase 6
+        // const { rows: expiredListings } = await query(`
+        //   SELECT ml.listing_id, ml.batch_id, ml.seller_id,
+        //          ml.available_credits, ml.project_name,
+        //          ml.seller_email, ml.seller_name,
+        //          ml.expires_at
+        //   FROM market_listings ml
+        //   WHERE ml.expires_at IS NOT NULL
+        //     AND ml.expires_at < NOW()
+        //     AND ml.available_credits > 0
+        //   LIMIT 50
+        // `).catch(() => ({ rows: [] }));
+        const expiredListings = []; // LEGACY: market_listings table removed
 
     if (!expiredListings.length) {
       console.log('📋 [CRON] No expired listings found');
@@ -560,33 +564,37 @@ console.log('   ⛓ On-chain KYC sync self-heal — every 30 minutes');
 // later via a support ticket. This periodically compares DB vs on-chain
 // for every user with a ledger balance and logs any mismatch loudly.
 // ══════════════════════════════════════════════════════════════════
-cron.schedule('15 * * * *', async () => {
-  const LOCK_KEY = 'cron:ledger-reconcile:lock';
-  const LOCK_TTL = 50 * 60;
+// LEGACY: ledger_listings table removed in Phase 6
+// cron.schedule('15 * * * *', async () => {
+//   const LOCK_KEY = 'cron:ledger-reconcile:lock';
+//   const LOCK_TTL = 50 * 60;
 
-  const locked = await acquireLock(LOCK_KEY, LOCK_TTL);
-  if (!locked) {
-    console.log('📒 [CRON] Ledger reconciliation — lock held by another instance, skipping');
-    return;
-  }
+//   const locked = await acquireLock(LOCK_KEY, LOCK_TTL);
+//   if (!locked) {
+//     console.log('📒 [CRON] Ledger reconciliation — lock held by another instance, skipping');
+//     return;
+//   }
 
-  console.log('📒 [CRON] Running credit ledger reconciliation...');
-  try {
-    const { verifyLedgerBalance } = require('../services/creditLedger');
+//   console.log('📒 [CRON] Running credit ledger reconciliation...');
+//   try {
+//     const { verifyLedgerBalance } = require('../services/creditLedger');
 
-    const { rows: balances } = await query(`
-      SELECT user_id, token_id FROM credit_ledger_balances
-      WHERE balance > 0 OR total_retired > 0
-    `).catch(() => ({ rows: [] }));
+//     const { rows: balances } = await query(`
+//       SELECT user_id, token_id FROM credit_ledger_balances
+//       WHERE balance > 0 OR total_retired > 0
+//     `).catch(() => ({ rows: [] }));
 
-    if (!balances.length) {
-      console.log('📒 [CRON] No ledger balances to reconcile.');
-      return;
-    }
+//     if (!balances.length) {
+//       console.log('📒 [CRON] No ledger balances to reconcile.');
+//       return;
+//     }
 
-    let matched = 0, mismatched = 0, errored = 0;
+//     let matched = 0, mismatched = 0, errored = 0;
 
-    for (const b of balances) {
+//     for (const b of balances) {
+//   });
+
+// }
       try {
         const result = await verifyLedgerBalance(b.user_id, b.token_id);
         if (result.matches) {

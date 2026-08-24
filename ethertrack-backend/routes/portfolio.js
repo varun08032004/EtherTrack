@@ -17,6 +17,16 @@ const { encodeCursor, decodeCursor, buildPaginatedResponse } = require('../lib/p
 const { getMarketListings, getMarketStats } = require('../services/cacheStrategy');
 const Joi = require('joi');
 
+const auditLog = async (userId, action, targetUserId, details) => {
+  try {
+    await query(
+      `INSERT INTO admin_audit_log (admin_id, action, target_user_id, details)
+       VALUES ($1,$2,$3,$4)`,
+      [userId, action, targetUserId || null, details || null]
+    );
+  } catch (e) { console.warn('[auditLog] failed:', e.message); }
+};
+
 // ── Constants & validation maps ──────────────────────────────────
 const PROJECT_TYPE_MAP = {
   'Renewable Energy (BEE)'                : 'Renewable',
@@ -416,6 +426,195 @@ router.post('/confirm-delisting', authenticate, assetActionLimiter, async (req, 
   }
 });
 
+// ════════════════════════════════════════════════════════════════════
+// POST /api/portfolio/list-credit-ledger
+// Wallet-free listing — no escrow step needed, credits are already in
+// pooled custody. Just creates a DB-visible listing against the seller's
+// ledger balance. The actual on-chain SELL/BUY log entries happen at
+// purchase time (see checkout-verify's ledger-to-ledger branch).
+// ═══════════════════════════════════════════════════════════════════
+router.post('/list-credit-ledger', authenticate, requireKYC, assetActionLimiter, async (req, res) => {
+  const { tokenId, batchId, amount, priceInINR, durationDays = 30 } = req.body;
+
+  if (tokenId == null || !amount || amount <= 0) {
+    return res.status(400).json({ error: 'tokenId and a positive amount are required' });
+  }
+  if (!priceInINR || priceInINR <= 0) {
+    return res.status(400).json({ error: 'priceInINR must be greater than zero' });
+  }
+
+  try {
+    // Check if this token is in pooled custody for this user
+    const { rows: batchRows } = await query(
+      `SELECT custody_model FROM carbon_batches WHERE token_id = $1 AND user_id = $2 LIMIT 1`,
+      [tokenId, req.user.id]
+    );
+    if (!batchRows.length || batchRows[0].custody_model !== 'pooled') {
+      return res.status(400).json({ error: 'This credit is not in pooled custody — use the wallet-based flow.' });
+    }
+
+    const { getLedgerBalance, verifyLedgerBalance } = require('../services/creditLedger');
+    const current = await getLedgerBalance(req.user.id, tokenId);
+
+    // Verify on-chain balance matches DB
+    const verified = await verifyLedgerBalance(req.user.id, tokenId);
+    if (!verified.matches) {
+      return res.status(400).json({
+        error: `On-chain balance mismatch. DB: ${verified.db}, On-chain: ${verified.onChain}. Contact support to sync.`,
+        code: 'LEDGER_BALANCE_MISMATCH',
+        dbBalance: verified.db,
+        onChainBalance: verified.onChain,
+      });
+    }
+
+    const { rows: activeListings } = await query(
+      `SELECT COALESCE(SUM(amount_remaining), 0) as listed
+       FROM ledger_listings WHERE seller_id = $1 AND token_id = $2 AND active = TRUE`,
+      [req.user.id, tokenId]
+    );
+    const alreadyListed = Number(activeListings[0].listed);
+    const available = Number(current.balance) - alreadyListed;
+
+    if (available < amount) {
+      return res.status(400).json({
+        error: `You only have ${available} available to list (${current.balance} held, ${alreadyListed} already listed).`,
+      });
+    }
+
+    const { rows } = await query(
+      `INSERT INTO ledger_listings
+         (seller_id, token_id, batch_id, amount, amount_remaining, price_per_credit_inr, expires_at)
+       VALUES ($1,$2,$3,$4,$4,$5, NOW() + ($6 || ' days')::INTERVAL)
+       RETURNING id`,
+      [req.user.id, tokenId, batchId || null, amount, priceInINR, durationDays]
+    );
+
+    await auditLog(req.user.id, 'CREDIT_LISTED_LEDGER', req.user.id,
+      `tokenId=${tokenId} amount=${amount} listingId=${rows[0].id}`);
+
+    const { incrementPortfolioVersion, invalidateEntity } = require('../services/cacheStrategy');
+
+    await incrementPortfolioVersion(req.user.id);
+    await invalidateEntity('market', 'listings');
+
+    return res.json({ message: 'Credit listed successfully', listingId: rows[0].id });
+  } catch (e) {
+    if (e.code === '23505' && e.constraint === 'idx_ledger_listings_unique_active') {
+      return res.status(409).json({ error: 'An active listing already exists for this credit. Please delist first.' });
+    }
+    req.log.error('[list-credit-ledger]', e.message);
+    return res.status(500).json({ error: 'Listing failed. Please try again.' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════
+// POST /api/portfolio/delist-credit-ledger
+// Wallet-free delisting — just deactivates the DB listing row. Nothing to
+// move on-chain since nothing was ever escrowed out of pooled custody.
+// ═══════════════════════════════════════════════════════════════════
+router.post('/delist-credit-ledger', authenticate, assetActionLimiter, async (req, res) => {
+  const { listingId } = req.body;
+  if (!listingId) return res.status(400).json({ error: 'listingId is required' });
+
+  try {
+    const { rows } = await query(
+      `UPDATE ledger_listings SET active = FALSE, updated_at = NOW()
+       WHERE id = $1 AND seller_id = $2 AND active = TRUE
+       RETURNING id`,
+      [listingId, req.user.id]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ error: 'Listing not found or already inactive.' });
+    }
+
+    await auditLog(req.user.id, 'CREDIT_DELISTED_LEDGER', req.user.id, `listingId=${listingId}`);
+
+    const { incrementPortfolioVersion, invalidateEntity } = require('../services/cacheStrategy');
+
+    await incrementPortfolioVersion(req.user.id);
+    await invalidateEntity('market', 'listings');
+
+    return res.json({ success: true, message: 'Listing cancelled successfully', txHash: null });
+  } catch (e) {
+    req.log.error('[delist-credit-ledger]', e.message);
+    return res.status(500).json({ error: 'Delisting failed. Please try again.' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════
+// POST /api/portfolio/retire-credit-ledger
+// Wallet-free retirement — for users with no linked wallet. Their credits
+// live in pooled custody and are tracked via CreditLedger.sol; this
+// permanently reduces their ledger balance and writes a dedicated
+// retirement log entry. No MetaMask involved.
+// ═══════════════════════════════════════════════════════════════════
+router.post('/retire-credit-ledger', authenticate, requireKYC, assetActionLimiter, async (req, res) => {
+  const { tokenId, amount } = req.body;
+
+  if (tokenId == null || !amount || amount <= 0) {
+    return res.status(400).json({ error: 'tokenId and a positive amount are required' });
+  }
+
+  try {
+    // Check if this token is in pooled custody for this user
+    const { rows: batchRows } = await query(
+      `SELECT custody_model FROM carbon_batches WHERE token_id = $1 AND user_id = $2 LIMIT 1`,
+      [tokenId, req.user.id]
+    );
+    if (!batchRows.length || batchRows[0].custody_model !== 'pooled') {
+      return res.status(400).json({ error: 'This credit is not in pooled custody — use the wallet-based flow.' });
+    }
+
+    const { getLedgerBalance, logRetirementOnChain } = require('../services/creditLedger');
+
+    const current = await getLedgerBalance(req.user.id, tokenId);
+    if (Number(current.balance) < amount) {
+      return res.status(400).json({
+        error: `You only hold ${current.balance} of this credit — cannot retire ${amount}.`,
+      });
+    }
+
+    const result = await logRetirementOnChain({
+      userId  : req.user.id,
+      tokenId,
+      amount,
+      refTable: 'credit_ledger_entries',
+      refId   : null,
+    });
+
+    await auditLog(req.user.id, 'CREDIT_RETIRED_LEDGER', req.user.id,
+      `tokenId=${tokenId} amount=${amount} TX: ${result.txHash}`);
+
+    // [CERT-RETIREMENT] Issue Certificate of Retirement for this ledger-based
+    // (wallet-free) retirement — mirrors the wallet-based retirement flow's
+    // cert_id generation in routes/retirementApproval.js.
+    let certId = null;
+    try {
+      const { issueRetirementCertificate } = require('../services/certificates');
+      certId = await issueRetirementCertificate({
+        userId: req.user.id,
+        tokenId,
+        quantity: amount,
+        txHash: result.txHash,
+        blockNumber: result.blockNumber,
+        custodyModel: 'pooled',
+      });
+    } catch (certErr) {
+      req.log.error('[retire-credit-ledger] certificate issuance failed (retirement unaffected):', certErr.message);
+    }
+
+    return res.json({
+      message: 'Credit retired successfully',
+      txHash: result.txHash,
+      blockNumber: result.blockNumber,
+      certId,
+    });
+  } catch (e) {
+    req.log.error('[retire-credit-ledger]', e.message);
+    return res.status(500).json({ error: 'Retirement failed. Please try again.' });
+  }
+});
+
 // ─────────────────────────────────────────────────────────────────
 // GET /api/portfolio/my-submissions
 // ─────────────────────────────────────────────────────────────────
@@ -476,7 +675,10 @@ router.get('/my-credits', authenticate, async (req, res) => {
       }
     }
     
-    const cacheKey = require('../services/cacheStrategy').KEYS.portfolioCredits(req.user.id, limit, cursor);
+    const { getPortfolioVersion } = require('../services/cacheStrategy');
+    
+    const version = await getPortfolioVersion(req.user.id);
+    const cacheKey = require('../services/cacheStrategy').KEYS.portfolioCredits(req.user.id, limit, cursor) + `v${version}`;
     
     const credits = await require('../services/cacheStrategy').getOrSet(
       cacheKey,
@@ -487,24 +689,41 @@ router.get('/my-credits', authenticate, async (req, res) => {
         }
         params.push(200); // LIMIT 200
         
+// For custodial (pooled) credits, listed_quantity is in ledger_listings, not carbon_batches
         const query = `
-          SELECT cb.id, cb.project_name, cb.project_location, cb.country,
-                 cb.standard, cb.project_type, cb.developer,
-                 cb.quantity, cb.total_credits, cb.available_credits, cb.retired_credits,
-                 cb.listed_quantity,
-                 cb.vintage_year, cb.expiry_date, cb.registry_serial,
-                 cb.doc_ipfs_hash, cb.admin_status, cb.admin_notes,
-                 cb.status, cb.token_id, cb.tx_hash_mint,
-                 cb.listing_id_onchain,
-                 cb.created_at, cb.updated_at,
-                 cb.credit_type, cb.cbam_eligible,
-                 cb.acva_name, cb.acva_date, cb.acva_status,
-                 cb.icm_registry_id, cb.banking_status,
-                 cb.corresponding_adjustment, cb.sdg_tags,
-                 cb.icvcm_ccp_eligible, cb.icvcm_ccp_label, cb.icvcm_ccp_date,
-                 cb.registry_link, cb.methodology_id,
-                 cb.additionality_type, cb.permanence_rating, cb.co_benefits_verified,
-                 p.project_code AS project_id
+          SELECT 
+            cb.id, cb.project_name, cb.project_location, cb.country,
+            cb.standard, cb.project_type, cb.developer,
+            cb.quantity, cb.total_credits, cb.available_credits, cb.retired_credits,
+            COALESCE(
+              (SELECT SUM(ll.amount_remaining) 
+               FROM ledger_listings ll 
+               WHERE ll.seller_id = cb.user_id 
+                 AND ll.token_id = cb.token_id 
+                 AND ll.active = TRUE), 0
+            ) AS listed_quantity,
+            COALESCE(
+              (SELECT ll.id 
+               FROM ledger_listings ll 
+               WHERE ll.seller_id = cb.user_id 
+                 AND ll.token_id = cb.token_id 
+                 AND ll.active = TRUE 
+               LIMIT 1), NULL
+            ) AS ledger_listing_id,
+            cb.vintage_year, cb.expiry_date, cb.registry_serial,
+            cb.doc_ipfs_hash, cb.admin_status, cb.admin_notes,
+            cb.status, cb.token_id, cb.tx_hash_mint,
+            cb.listing_id_onchain,
+            cb.created_at, cb.updated_at,
+            cb.credit_type, cb.cbam_eligible,
+            cb.acva_name, cb.acva_date, cb.acva_status,
+            cb.icm_registry_id, cb.banking_status,
+            cb.corresponding_adjustment, cb.sdg_tags,
+            cb.icvcm_ccp_eligible, cb.icvcm_ccp_label, cb.icvcm_ccp_date,
+            cb.registry_link, cb.methodology_id,
+            cb.additionality_type, cb.permanence_rating, cb.co_benefits_verified,
+            p.project_code AS project_id,
+            cb.custody_model
           FROM carbon_batches cb
           LEFT JOIN projects p ON p.id = cb.project_id
           WHERE cb.user_id = $1
@@ -632,6 +851,66 @@ router.get('/my-bought-credits', authenticate, async (req, res) => {
   } catch (e) {
     console.error('[my-bought-credits]', e.message);
     res.status(500).json({ error: 'Failed to fetch bought credits.' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// GET /api/portfolio/my-ledger-credits
+// Returns the authenticated user's wallet-free (pooled custody) holdings,
+// shaped to match myCredits/myBoughtCredits so the frontend can merge them
+// into one unified credit list.
+// ════════════════════════════════════════════════════════════════════════
+router.get('/my-ledger-credits', authenticate, async (req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT clb.token_id, clb.balance, clb.total_retired,
+              cb.project_name, cb.standard, cb.project_type, cb.developer,
+              cb.vintage_year, cb.country, cb.project_location, cb.registry_serial,
+              cb.credit_type, cb.cbam_eligible, cb.expiry_date,
+              (SELECT c.cert_id FROM certificates c
+                WHERE c.user_id = clb.user_id AND c.token_id = clb.token_id
+                  AND c.cert_type = 'OWNERSHIP'
+                ORDER BY c.created_at DESC LIMIT 1) AS cert_id,
+              ll.id AS ledger_listing_id, ll.amount_remaining AS listed_amount
+         FROM credit_ledger_balances clb
+         LEFT JOIN carbon_batches cb ON cb.token_id = clb.token_id
+         LEFT JOIN ledger_listings ll ON ll.seller_id = clb.user_id
+               AND ll.token_id = clb.token_id AND ll.active = TRUE
+         WHERE clb.user_id = $1 AND clb.balance > 0`,
+      [req.user.id]
+    );
+
+    const credits = rows.map(r => ({
+      id: `ledger-${r.token_id}`,
+      tokenId: r.token_id,
+      projectName: r.project_name || '—',
+      standard: r.standard || 'VCS',
+      projectType: r.project_type || '—',
+      developer: r.developer || '—',
+      vintageYear: r.vintage_year,
+      country: r.country || '—',
+      location: r.project_location || '—',
+      serialNumber: r.registry_serial || '—',
+      creditType: r.credit_type || 'voluntary',
+      cbamEligible: r.cbam_eligible || false,
+      expiryDate: r.expiry_date,
+      heldCredits: Number(r.balance),
+      credits: Number(r.balance),
+      listedCredits: Number(r.listed_amount || 0),
+      ledgerListingId: r.ledger_listing_id || null,
+      totalRetired: Number(r.total_retired),
+      certId: r.cert_id || null,
+      custodyModel: 'pooled',
+      status: 'HELD',
+      isLedger: true,
+      isOnChain: true,
+      admin_status: 'approved',
+    }));
+
+    return res.json({ credits });
+  } catch (e) {
+    req.log.error('[my-ledger-credits]', e.message);
+    return res.status(500).json({ error: 'Failed to load ledger credits.' });
   }
 });
 
@@ -1088,6 +1367,7 @@ function mapCreditRow(r) {
       : null,
     expiryDate      : r.expiry_date,
     listingIdOnchain: r.listing_id_onchain ?? null,
+    ledgerListingId : r.ledger_listing_id ?? null,
     status,
     isOnChain       : r.status === 'tokenised' && r.token_id != null,
     sdg_tags        : parseSdgTags(r.sdg_tags),

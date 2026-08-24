@@ -218,16 +218,16 @@ router.post('/retire-credit-ledger', authenticate, requireKYC, assetActionLimite
     return res.status(400).json({ error: 'tokenId and a positive amount are required' });
   }
 
-  // Check if this token is in pooled custody for this user
-  const { rows: batchRows } = await query(
-    `SELECT custody_model FROM carbon_batches WHERE token_id = $1 AND user_id = $2 LIMIT 1`,
-    [tokenId, req.user.id]
-  );
-  if (!batchRows.length || batchRows[0].custody_model !== 'pooled') {
-    return res.status(400).json({ error: 'This credit is not in pooled custody — use the wallet-based flow.' });
-  }
-
   try {
+    // Check if this token is in pooled custody for this user
+    const { rows: batchRows } = await query(
+      `SELECT custody_model FROM carbon_batches WHERE token_id = $1 AND user_id = $2 LIMIT 1`,
+      [tokenId, req.user.id]
+    );
+    if (!batchRows.length || batchRows[0].custody_model !== 'pooled') {
+      return res.status(400).json({ error: 'This credit is not in pooled custody — use the wallet-based flow.' });
+    }
+
     const { getLedgerBalance, logRetirementOnChain } = require('../services/creditLedger');
 
     const current = await getLedgerBalance(req.user.id, tokenId);
@@ -295,18 +295,29 @@ router.post('/list-credit-ledger', authenticate, requireKYC, assetActionLimiter,
     return res.status(400).json({ error: 'priceInINR must be greater than zero' });
   }
 
-  // Check if this token is in pooled custody for this user
-  const { rows: batchRows } = await query(
-    `SELECT custody_model FROM carbon_batches WHERE token_id = $1 AND user_id = $2 LIMIT 1`,
-    [tokenId, req.user.id]
-  );
-  if (!batchRows.length || batchRows[0].custody_model !== 'pooled') {
-    return res.status(400).json({ error: 'This credit is not in pooled custody — use the wallet-based flow.' });
-  }
-
   try {
-    const { getLedgerBalance } = require('../services/creditLedger');
+    // Check if this token is in pooled custody for this user
+    const { rows: batchRows } = await query(
+      `SELECT custody_model FROM carbon_batches WHERE token_id = $1 AND user_id = $2 LIMIT 1`,
+      [tokenId, req.user.id]
+    );
+    if (!batchRows.length || batchRows[0].custody_model !== 'pooled') {
+      return res.status(400).json({ error: 'This credit is not in pooled custody — use the wallet-based flow.' });
+    }
+
+    const { getLedgerBalance, verifyLedgerBalance } = require('../services/creditLedger');
     const current = await getLedgerBalance(req.user.id, tokenId);
+
+    // Verify on-chain balance matches DB
+    const verified = await verifyLedgerBalance(req.user.id, tokenId);
+    if (!verified.matches) {
+      return res.status(400).json({
+        error: `On-chain balance mismatch. DB: ${verified.db}, On-chain: ${verified.onChain}. Contact support to sync.`,
+        code: 'LEDGER_BALANCE_MISMATCH',
+        dbBalance: verified.db,
+        onChainBalance: verified.onChain,
+      });
+    }
 
     const { rows: activeListings } = await query(
       `SELECT COALESCE(SUM(amount_remaining), 0) as listed
@@ -333,11 +344,15 @@ const { rows } = await query(
     await auditLog(req.user.id, 'CREDIT_LISTED_LEDGER', req.user.id,
       `tokenId=${tokenId} amount=${amount} listingId=${rows[0].id}`);
 
-    // Invalidate portfolio cache for the seller
-    require('../services/cacheStrategy').invalidate(require('../services/cacheStrategy').KEYS.portfolioCredits(req.user.id));
+    const { incrementPortfolioVersion } = require('../services/cacheStrategy');
+
+    await incrementPortfolioVersion(req.user.id);
 
     return res.json({ message: 'Credit listed successfully', listingId: rows[0].id });
   } catch (e) {
+    if (e.code === '23505' && e.constraint === 'idx_ledger_listings_unique_active') {
+      return res.status(409).json({ error: 'An active listing already exists for this credit. Please delist first.' });
+    }
     req.log.error('[list-credit-ledger]', e.message);
     return res.status(500).json({ error: 'Listing failed. Please try again.' });
   }
@@ -365,10 +380,9 @@ router.post('/delist-credit-ledger', authenticate, assetActionLimiter, async (re
 
     await auditLog(req.user.id, 'CREDIT_DELISTED_LEDGER', req.user.id, `listingId=${listingId}`);
 
-    // Invalidate portfolio cache for the seller
-    require('../services/cacheStrategy').invalidate(require('../services/cacheStrategy').KEYS.portfolioCredits(req.user.id));
+    await incrementPortfolioVersion(req.user.id);
 
-    return res.json({ message: 'Listing cancelled successfully' });
+    return res.json({ success: true, message: 'Listing cancelled successfully', txHash: null });
   } catch (e) {
     req.log.error('[delist-credit-ledger]', e.message);
     return res.status(500).json({ error: 'Delisting failed. Please try again.' });
@@ -452,6 +466,11 @@ router.post('/ledger-checkout-order', authenticate, requireKYC, assetActionLimit
 
     const subtotalINR = parseFloat((listing.price_per_credit_inr * quantity).toFixed(2));
     const fees = calcLedgerFees(subtotalINR);
+
+    // Razorpay requires minimum ₹100
+    if (fees.buyerPaysINR < 100) {
+      return res.status(400).json({ error: `Minimum order amount is ₹100. Current: ₹${fees.buyerPaysINR.toFixed(2)}` });
+    }
 
     const transfers = [];
     if (listing.razorpay_fund_account_id) {
@@ -540,15 +559,42 @@ router.post('/ledger-checkout-verify', authenticate, requireKYC, assetActionLimi
       return res.status(400).json({ error: 'Listing no longer has enough remaining quantity.' });
     }
 
-    // Insert the trade row first (mirrors trades.js's pattern)
+// Insert the trade row first (mirrors trades.js's pattern)
+    const subtotalINR = parseFloat((listing.price_per_credit_inr * quantity).toFixed(2));
+    const fees = calcLedgerFees(subtotalINR);
+    const ethRate = 280000; // fallback
+    const pricePerCreditEth = listing.price_per_credit_inr / ethRate;
+    const totalEth = subtotalINR / ethRate;
+    const feeEth = fees.totalFeeINR / ethRate;
     const { rows: tradeRows } = await query(
-      `INSERT INTO trades
-         (buyer_id, seller_id, batch_id, token_id, quantity, status,
-          price_per_credit_inr, buyer_pays_inr, payment_mode, chain_status, created_at)
-       VALUES ($1,$2,$3,$4,$5,'completed',$6,$7,'razorpay','pending',NOW())
-       RETURNING id`,
-      [req.user.id, listing.seller_id, listing.batch_id, listing.token_id, quantity,
-       listing.price_per_credit_inr, order.buyer_pays_inr]
+      `INSERT INTO trades (
+        buyer_id, seller_id, buyer_wallet, seller_wallet,
+        batch_id, token_id, listing_id_onchain, quantity,
+        price_per_credit_inr, subtotal_inr,
+        buyer_fee_inr, seller_fee_inr, total_fee_inr, gst_inr,
+        buyer_pays_inr, seller_receives_inr, platform_net_inr,
+        price_per_credit_eth, total_eth, eth_inr_rate, fee_eth,
+        payment_mode, status, tx_hash,
+        buyer_inr_deducted, seller_inr_credited,
+        inr_settlement_at, completed_at, idempotency_key,
+        chain_status
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+        $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,
+        $22,'completed',$23,$24,$25,$26,NOW(),$27,$28
+      ) RETURNING id`,
+      [
+        req.user.id, listing.seller_id, null, null,
+        listing.batch_id, listing.token_id, null, quantity,
+        listing.price_per_credit_inr, subtotalINR,
+        fees.buyerFeeINR, fees.sellerFeeINR, fees.totalFeeINR, fees.gstINR,
+        fees.buyerPaysINR, fees.sellerGetsINR, fees.sellerGetsINR,
+        pricePerCreditEth, totalEth, ethRate, feeEth,
+        'razorpay', null,
+        true, true,
+        new Date(), null,
+        'pending'
+      ]
     );
     const tradeId = tradeRows[0].id;
 
@@ -618,8 +664,8 @@ router.post('/ledger-checkout-verify', authenticate, requireKYC, assetActionLimi
 
     return res.json({ message: 'Purchase completed', tradeId, ownershipCertId });
   } catch (e) {
-    req.log.error('[ledger-checkout-verify]', e.message);
-    return res.status(500).json({ error: 'Purchase verification failed. Please contact support.' });
+    req.log.error({ err: e.message, stack: e.stack, userId: req.user.id }, '[ledger-checkout-verify]');
+    return res.status(500).json({ error: e.message || 'Purchase verification failed. Please contact support.' });
   }
 });
 
@@ -686,6 +732,25 @@ router.get('/ledger-certificate/:entryId', authenticate, async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════════
+// POST /api/portfolio/sync-ledger-balance
+// Backfills CreditLedger on-chain balance for a user's token from DB cache.
+// Use when DB balance > on-chain balance (e.g., mint logged to DB but not to CreditLedger).
+// ══════════════════════════════════════════════════════════════════
+router.post('/sync-ledger-balance', authenticate, assetActionLimiter, async (req, res) => {
+  const { tokenId } = req.body;
+  if (!tokenId) return res.status(400).json({ error: 'tokenId required' });
+
+  try {
+    const { syncLedgerBalanceToChain } = require('../services/creditLedger');
+    const result = await syncLedgerBalanceToChain({ userId: req.user.id, tokenId });
+    return res.json(result);
+  } catch (e) {
+    req.log.error('[sync-ledger-balance]', e.message);
+    return res.status(500).json({ error: e.message || 'Sync failed' });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════
 // GET /api/portfolio/my-ledger-credits
 // Returns the authenticated user's wallet-free (pooled custody) holdings,
 // shaped to match myCredits/myBoughtCredits so the frontend can merge them
@@ -704,7 +769,7 @@ router.get('/my-ledger-credits', authenticate, async (req, res) => {
                 ORDER BY c.created_at DESC LIMIT 1) AS cert_id,
               ll.id AS ledger_listing_id, ll.amount_remaining AS listed_amount
        FROM credit_ledger_balances clb
-       LEFT JOIN carbon_batches cb ON cb.token_id = clb.token_id
+       LEFT JOIN carbon_batches cb ON cb.token_id = clb.token_id AND cb.user_id = clb.user_id
        LEFT JOIN ledger_listings ll ON ll.seller_id = clb.user_id
               AND ll.token_id = clb.token_id AND ll.active = TRUE
        WHERE clb.user_id = $1 AND clb.balance > 0`,

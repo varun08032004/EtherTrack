@@ -9,120 +9,71 @@ const logger = require('./logger');
 // TTL Configuration (in seconds)
 // ─────────────────────────────────────────────────────────────────────────────
 const TTL = {
-  // User data - changes infrequently, cache for 5 min
   USER_PROFILE: 300,
   USER_KYC_STATUS: 60,
   USER_WALLET: 300,
-  
-  // Market data - changes frequently, cache for 15-30 sec
   MARKET_LISTINGS: 15,
   MARKET_STATS: 30,
   PRICE_FEED: 15,
   ETH_INR_RATE: 60,
-  
-  // Market data - slower changing
   MARKET_PRICE_HISTORY: 300,
   MARKET_VOLUME_24H: 60,
-  
-  // Carbon data - changes on trades/listings
   CARBON_BATCHES: 30,
   CARBON_PROJECTS: 300,
   CARBON_LISTINGS: 30,
   CARBON_STATS: 60,
-  
-  // Financial - careful caching
-  WALLET_BALANCE: 10,        // Very short - real-time accuracy needed
-  WALLET_TRANSACTIONS: 30,   // List views can be slightly stale
-  SUBSCRIPTION_STATUS: 60,   // Changes on payment
-  SUBSCRIPTION_PRICES: 300,  // Changes via ERP
-  
-  // Trading
+  WALLET_BALANCE: 10,
+  WALLET_TRANSACTIONS: 30,
+  SUBSCRIPTION_STATUS: 60,
+  SUBSCRIPTION_PRICES: 300,
   MARKET_LISTINGS: 15,
   MARKET_STATS: 30,
   TRADE_HISTORY: 30,
   BUY_ORDERS: 15,
-  
-  // Emissions
   EMISSION_SUMMARY: 60,
   EMISSION_ACTIVITIES: 30,
-  
-  // BRSR
   BRSR_DATA: 300,
   BRSR_SECTION: 300,
-  
-  // KYC
   KYC_STATUS: 60,
   KYC_SUBMISSION: 30,
-  
-  // Admin / Stats
   ADMIN_STATS: 60,
   ADMIN_DASHBOARD: 30,
-  
-  // ERP
   ERP_SYNC_STATUS: 300,
   ERP_DATA: 600,
-  
-  // Price feeds
   ETH_INR_RATE: 60,
   TOKEN_PRICES: 30,
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Cache Key Builders
-// ─────────────────────────────────────────────────────────────────────────────
 const KEYS = {
   userProfile: (userId) => `user:profile:${userId}`,
   userKyc: (userId) => `user:kyc:${userId}`,
   userWallet: (userId) => `user:wallet:${userId}`,
-  
-  marketListings: (filters) => `market:listings:${JSON.stringify(filters)}`,
-  marketStats: () => 'market:stats',
   marketListings: (params) => `market:listings:${JSON.stringify(params)}`,
-  
+  marketStats: () => 'market:stats',
   priceEthInr: () => 'price:eth:inr',
   priceToken: (tokenId) => `price:token:${tokenId}`,
-  
   carbonBatches: (userId) => `carbon:batches:${userId}`,
   carbonListings: (params) => `carbon:listings:${JSON.stringify(params)}`,
   carbonStats: () => 'carbon:stats',
-  
   walletBalance: (userId) => `wallet:balance:${userId}`,
   walletTransactions: (userId, params) => `wallet:tx:${userId}:${JSON.stringify(params)}`,
-  
   subscriptionStatus: (userId) => `sub:status:${userId}`,
   subscriptionPrices: () => 'sub:prices',
-  
-  marketListings: (params) => `market:listings:${JSON.stringify(params)}`,
-  marketStats: () => 'market:stats',
   buyOrders: (params) => `market:buyorders:${JSON.stringify(params)}`,
-  
   emissionsSummary: (userId, year) => `emissions:summary:${userId}:${year}`,
   emissionActivities: (userId, params) => `emissions:activities:${userId}:${JSON.stringify(params)}`,
-  
   portfolioCredits: (userId, limit, cursor) => `portfolio:credits:${userId}:${limit}:${cursor || 'first'}`,
+  portfolioCreditsPrefix: (userId) => `portfolio:credits:${userId}:`,
   portfolioBought: (userId) => `portfolio:bought:${userId}`,
-  
   brsrData: (userId, year) => `brsr:${userId}:${year}`,
   brsrSection: (userId, year, section) => `brsr:${userId}:${year}:${section}`,
-  
   kycStatus: (userId) => `kyc:status:${userId}`,
-  
   adminStats: () => 'admin:stats',
   adminDashboard: () => 'admin:dashboard',
-  
   erpSyncStatus: (orgId, erpId) => `erp:sync:${orgId}:${erpId}`,
   erpData: (orgId, erpId) => `erp:data:${orgId}:${erpId}`,
-  
-  marketStats: () => 'market:stats',
-  marketListings: (params) => `market:listings:${JSON.stringify(params)}`,
-  buyOrders: (params) => `market:buyorders:${JSON.stringify(params)}`,
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Cache Operations
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Metrics
 const metrics = {
   hits: 0,
   misses: 0,
@@ -131,11 +82,6 @@ const metrics = {
   evictions: 0,
 };
 
-/**
- * Get value from cache
- * @param {string} key - Cache key
- * @returns {Promise<any>} Cached value or null
- */
 async function get(key) {
   try {
     const redis = getRedis();
@@ -153,13 +99,6 @@ async function get(key) {
   }
 }
 
-/**
- * Set value in cache with TTL
- * @param {string} key - Cache key
- * @param {any} value - Value to cache (will be JSON stringified)
- * @param {number} ttl - TTL in seconds
- * @returns {Promise<boolean>}
- */
 async function set(key, value, ttl) {
   try {
     const redis = getRedis();
@@ -178,11 +117,6 @@ async function set(key, value, ttl) {
   }
 }
 
-/**
- * Delete key from cache
- * @param {string} key - Cache key
- * @returns {Promise<boolean>}
- */
 async function del(key) {
   try {
     const redis = getRedis();
@@ -195,16 +129,9 @@ async function del(key) {
   }
 }
 
-/**
- * Delete multiple keys by pattern
- * @param {string} pattern - Key pattern (supports * wildcard)
- * @returns {Promise<number>} Number of keys deleted
- */
 async function delPattern(pattern) {
   try {
     const redis = getRedis();
-    // Upstash doesn't support KEYS/SCAN directly, so we track keys to delete manually
-    // For production, maintain a key registry or use Redis SCAN if available
     logger.warn({ pattern }, 'Pattern delete not fully supported on Upstash');
     return 0;
   } catch (e) {
@@ -214,34 +141,40 @@ async function delPattern(pattern) {
   }
 }
 
-/**
- * Invalidate cache by prefix
- * @param {string} prefix - Key prefix to invalidate
- * @returns {Promise<number>}
- */
 async function invalidatePrefix(prefix) {
-  // For Upstash, we'd need to track keys or use a separate index
-  // This is a placeholder for when we implement key tracking
   logger.info({ prefix }, 'Cache invalidation requested');
   return 0;
 }
 
-/**
- * Invalidate a specific cache key
- * @param {string} key - Cache key to delete
- * @returns {Promise<boolean>}
- */
 async function invalidate(key) {
   return del(key);
 }
 
-/**
- * Get or set pattern - fetch from cache, or compute and cache
- * @param {string} key - Cache key
- * @param {Function} fn - Async function to compute value if not cached
- * @param {number} ttl - TTL in seconds
- * @returns {Promise<any>}
- */
+async function incrementPortfolioVersion(userId) {
+  const key = `portfolio:version:${userId}`;
+  try {
+    const redis = getRedis();
+    const newVersion = await redis.incr(key);
+    return newVersion;
+  } catch (e) {
+    metrics.errors++;
+    logger.warn({ err: e.message, userId }, 'Failed to increment portfolio version');
+    return 1;
+  }
+}
+
+async function getPortfolioVersion(userId) {
+  const key = `portfolio:version:${userId}`;
+  try {
+    const redis = getRedis();
+    const version = await redis.get(key);
+    return version ? parseInt(version, 10) : 1;
+  } catch (e) {
+    metrics.errors++;
+    return 1;
+  }
+}
+
 async function getOrSet(key, fn, ttl) {
   const cached = await get(key);
   if (cached !== null) return cached;
@@ -253,15 +186,8 @@ async function getOrSet(key, fn, ttl) {
   return value;
 }
 
-/**
- * Invalidate related cache keys for an entity
- * @param {string} entityType - Type of entity (user, batch, trade, etc.)
- * @param {string|number} entityId - Entity ID
- * @returns {Promise<void>}
- */
 async function invalidateEntity(entityType, entityId) {
   const patterns = [];
-  
   switch (entityType) {
     case 'user':
       patterns.push(`user:profile:${entityId}`);
@@ -299,14 +225,9 @@ async function invalidateEntity(entityType, entityId) {
       patterns.push('market:stats');
       break;
   }
-  
-// Note: Actual deletion requires key tracking - placeholder for now
   logger.info({ entityType, entityId, patterns }, 'Cache invalidation requested');
 }
 
-/**
- * Get user profile with caching
- */
 async function getUserProfile(userId) {
   const key = `user:profile:${userId}`;
   return getOrSet(key, async () => {
@@ -322,18 +243,13 @@ async function getUserProfile(userId) {
   }, TTL.USER_PROFILE);
 }
 
-/**
- * Get market listings with caching
- */
 async function getMarketListings(params = {}) {
   const key = KEYS.marketListings(params);
   return getOrSet(key, async () => {
     const { safeQuery: query } = require('../db/pool');
     const { standard, projectType, sortBy } = params;
-    
     const sqlParams = [];
     let whereExtra = '';
-    
     if (params.standard && params.standard !== 'ALL') {
       sqlParams.push(params.standard);
       whereExtra += ` AND cb.standard = $${sqlParams.length}`;
@@ -342,49 +258,57 @@ async function getMarketListings(params = {}) {
       sqlParams.push(params.projectType);
       whereExtra += ` AND cb.project_type = $${sqlParams.length}`;
     }
-    
     const sortMap = {
-      priceAsc: 'cb.price_per_credit_inr ASC',
-      priceDesc: 'cb.price_per_credit_inr DESC',
-      amount: 'LEAST(cb.available_credits, cb.listed_quantity) DESC',
+      priceAsc: 'll.price_per_credit_inr ASC',
+      priceDesc: 'll.price_per_credit_inr DESC',
+      amount: 'll.amount_remaining DESC',
       vintage: 'cb.vintage_year DESC',
       name: 'cb.project_name ASC',
-      recent: 'cb.updated_at DESC',
+      recent: 'll.created_at DESC',
     };
-    const orderClause = sortMap[params.sortBy] || 'cb.price_per_credit_inr ASC';
-    
+    const orderClause = sortMap[params.sortBy] || 'll.price_per_credit_inr ASC';
+    // Ledger-based (pooled custody) listings only
     const { rows } = await query(
-      `SELECT cb.id, cb.project_name, cb.project_location, cb.country, cb.standard,
-              cb.project_type, cb.developer, cb.vintage_year, cb.registry_serial,
-              LEAST(cb.available_credits, cb.listed_quantity) AS amount,
-              cb.price_per_credit_inr, cb.last_traded_price_inr, cb.token_id,
-              COALESCE(cb.vintage_discount, 0) AS vintageDiscount,
-              COALESCE(cb.total_retired, 0) AS totalRetired,
-              EXTRACT(EPOCH FROM cb.expires_at)::bigint AS expiresAt,
-              u.wallet_address AS seller, cb.updated_at
-           FROM carbon_batches cb
-           JOIN users u ON u.id = cb.user_id
-           WHERE cb.admin_status = 'approved'
-             AND cb.available_credits > 0
-             AND cb.listed_quantity > 0
-             AND cb.listing_id_onchain IS NOT NULL
-             AND cb.deleted_at IS NULL
-             AND (cb.expires_at IS NULL OR cb.expires_at > NOW())
-             ${whereExtra}
-           ORDER BY ${orderClause}
-           LIMIT 200`,
+      `SELECT ll.id AS listing_id,
+              cb.project_name AS "projectName",
+              cb.project_location AS "projectLocation",
+              cb.country,
+              cb.standard,
+              cb.project_type AS "projectType",
+              cb.developer,
+              cb.vintage_year AS "vintageYear",
+              cb.registry_serial AS "serialNumber",
+              ll.amount_remaining AS amount,
+              ll.price_per_credit_inr AS "pricePerUnitINR",
+              NULL AS "lastTradedPriceINR",
+              cb.token_id AS "tokenId",
+              0 AS "vintageDiscount",
+              0 AS "totalRetired",
+              EXTRACT(EPOCH FROM ll.expires_at)::bigint AS "expiresAt",
+              u.wallet_address AS seller,
+              ll.created_at AS "updatedAt",
+              'ledger' AS "listingType",
+              ll.id AS "listingId"
+       FROM ledger_listings ll
+       JOIN carbon_batches cb ON cb.token_id = ll.token_id
+       JOIN users u ON u.id = ll.seller_id
+       WHERE ll.active = TRUE
+         AND cb.admin_status = 'approved'
+         AND ll.amount_remaining > 0
+         AND (ll.expires_at IS NULL OR ll.expires_at > NOW())
+         ${whereExtra}
+       ORDER BY ${orderClause}
+       LIMIT 200`,
       sqlParams
     );
-    
+
     return rows.map(r => ({
       ...r,
-      adjPrice: r.price_per_credit_inr ? r.price_per_credit_inr / 280000 : 0,
+      adjPrice: r.pricePerUnitINR ? r.pricePerUnitINR / 280000 : 0,
     }));
   }, TTL.MARKET_LISTINGS);
+}
 
-/**
- * Get market stats with caching
- */
 async function getMarketStats() {
   const key = KEYS.marketStats();
   return getOrSet(key, async () => {
@@ -392,10 +316,9 @@ async function getMarketStats() {
     const [volume, count, listings, retired] = await Promise.all([
       query(`SELECT COALESCE(SUM(subtotal_inr), 0) AS total FROM trades WHERE status = 'completed'`),
       query(`SELECT COUNT(*) FROM trades WHERE status = 'completed'`),
-      query(`SELECT COUNT(*) FROM carbon_batches WHERE admin_status = 'approved' AND available_credits > 0 AND listed_quantity > 0 AND listing_id_onchain IS NOT NULL AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())`),
+      query(`SELECT COUNT(*) FROM ledger_listings WHERE active = TRUE AND amount_remaining > 0 AND (expires_at IS NULL OR expires_at > NOW())`),
       query(`SELECT COALESCE(SUM(retired_credits), 0) AS total FROM carbon_batches`),
     ]);
-    
     return {
       totalVolumeINR: parseFloat(volume.rows[0].total),
       totalTrades: parseInt(count.rows[0].count, 10),
@@ -405,9 +328,6 @@ async function getMarketStats() {
   }, TTL.MARKET_STATS);
 }
 
-/**
- * Get user wallet balance with caching
- */
 async function getWalletBalance(userId) {
   const key = KEYS.walletBalance(userId);
   return getOrSet(key, async () => {
@@ -420,14 +340,10 @@ async function getWalletBalance(userId) {
   }, TTL.WALLET_BALANCE);
 }
 
-/**
- * Get emissions summary with caching
- */
 async function getEmissionsSummary(req, year, scope) {
   const cacheKey = `emissions:summary:${scope.value}:${year}`;
   return getOrSet(cacheKey, async () => {
     const { safeQuery: query } = require('../db/pool');
-    
     const [scopeRows, monthRows, catRows, prevYearRow, s2DetailRows] = await Promise.all([
       query(`SELECT scope, COALESCE(SUM(co2e),0) AS total_co2e, COUNT(*) AS records
              FROM emission_activities WHERE ${scope.clause} AND EXTRACT(YEAR FROM date)=$2
@@ -447,7 +363,6 @@ async function getEmissionsSummary(req, year, scope) {
               FROM emission_activities WHERE ${scope.clause} AND EXTRACT(YEAR FROM date)=$2 AND scope=2`,
              [scope.value, year]),
     ]);
-
     const s    = (sc) => parseFloat(scopeRows.rows.find(r => r.scope === sc)?.total_co2e || 0);
     const scope1 = s(1), scope2 = s(2), scope3 = s(3);
     const total  = scope1 + scope2 + scope3;
@@ -455,7 +370,6 @@ async function getEmissionsSummary(req, year, scope) {
     const yoyChange  = prevTotal > 0 ? ((total - prevTotal) / prevTotal) * 100 : null;
     const scope2Location = parseFloat(s2DetailRows.rows[0]?.scope2_location || 0);
     const scope2Market   = parseFloat(s2DetailRows.rows[0]?.scope2_market   || 0);
-
     return {
       year, scope1, scope2, scope3, total,
       scope2Location: scope2Location || scope2, scope2Market,
@@ -472,22 +386,16 @@ async function getEmissionsSummary(req, year, scope) {
   }, TTL.EMISSIONS_SUMMARY || 60);
 }
 
-/**
- * Get user profile with caching
- */
-async function getUserProfile(userId) {
-  const key = `user:profile:${userId}`;
-  return getOrSet(key, async () => {
-    const { safeQuery: query } = require('../db/pool');
-    const { rows } = await query(
-      `SELECT id, email, full_name, role, wallet_address, kyc_status, kyc_verified,
-              inr_balance, inr_balance_locked, subscription_plan, subscription_cycle,
-              subscription_renewal_date, subscription_activated_at, is_active, frozen,
-              company_name, company_gstin, company_pan, company_cin, corporate_managed
-       FROM users WHERE id = $1`, [userId]
-    );
-    return rows[0] || null;
-  }, TTL.USER_PROFILE);
+function getMetrics() {
+  return { ...metrics };
+}
+
+function resetMetrics() {
+  metrics.hits = 0;
+  metrics.misses = 0;
+  metrics.sets = 0;
+  metrics.errors = 0;
+  metrics.evictions = 0;
 }
 
 module.exports = {
@@ -503,13 +411,11 @@ module.exports = {
   invalidateEntity,
   getMetrics,
   resetMetrics,
-  // High-level helpers
   getUserProfile,
   getMarketStats,
   getMarketListings,
   getWalletBalance,
   getEmissionsSummary,
-  KEYS,
-  TTL,
+  incrementPortfolioVersion,
+  getPortfolioVersion,
 };
-}

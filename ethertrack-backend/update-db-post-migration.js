@@ -40,11 +40,11 @@ async function main() {
     for (const batch of batches) {
       await client.query(
         `UPDATE carbon_batches 
-         SET custody_model = 'pooled', updated_at = NOW() 
+         SET custody_model = 'pooled', status = 'tokenised', updated_at = NOW() 
          WHERE id = $1`,
         [batch.id]
       );
-      console.log(`  ✅ Updated batch ${batch.id} custody_model -> 'pooled'`);
+      console.log(`  ✅ Updated batch ${batch.id} custody_model -> 'pooled', status -> 'tokenised'`);
     }
     
     // Get user IDs for credit ledger updates

@@ -64,6 +64,8 @@ if (process.env.REACT_APP_SENTRY_DSN) {
 const Profile             = lazy(() => import('./components/Profile'));
 const EditProfile         = lazy(() => import('./components/EditProfile'));
 const EmissionTracking    = lazy(() => import('./components/EmissionTracking'));
+const EmissionWizard      = lazy(() => import('./components/EmissionWizard'));
+const MRVDashboard        = lazy(() => import('./components/MRVDashboard'));
 const CarbonCredits       = lazy(() => import('./components/CarbonCredits'));
 const TradingHistory      = lazy(() => import('./components/TradingHistory'));
 const Portfolio           = lazy(() => import('./components/Portfolio'));
@@ -584,6 +586,22 @@ function AppInner() {
             <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
               <PlanGate requiredPlan="growth">
                 <KYCGate><Lazy><EmissionTracking /></Lazy></KYCGate>
+              </PlanGate>
+            </UserGuard>
+          } />
+
+          <Route path="/emission-wizard" element={
+            <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
+              <PlanGate requiredPlan="growth">
+                <KYCGate><Lazy><EmissionWizard /></Lazy></KYCGate>
+              </PlanGate>
+            </UserGuard>
+          } />
+
+          <Route path="/mrv" element={
+            <UserGuard isAuthenticated={isAuthenticated} sessionChecked={sessionChecked}>
+              <PlanGate requiredPlan="growth">
+                <KYCGate><Lazy><MRVDashboard /></Lazy></KYCGate>
               </PlanGate>
             </UserGuard>
           } />

@@ -1496,6 +1496,83 @@ router.get('/health/onchain', isAdmin, async (req, res) => {
   res.json(results);
 });
 
+// ── Ledger Integrity Check ──────────────────────────────────────────
+// Finds tokenised batches missing credit_ledger_balances entries
+router.get('/ledger-integrity', isAdmin, async (req, res) => {
+  try {
+    const { rows } = await query(`
+      SELECT cb.id, cb.project_name, cb.token_id, cb.custody_model, cb.status, cb.user_id,
+             cb.quantity, cb.total_credits, cb.available_credits,
+             clb.balance AS ledger_balance,
+             CASE WHEN clb.balance IS NULL THEN 'MISSING' ELSE 'OK' END AS ledger_status
+      FROM carbon_batches cb
+      LEFT JOIN credit_ledger_balances clb 
+        ON clb.user_id = cb.user_id AND clb.token_id = cb.token_id
+      WHERE cb.token_id IS NOT NULL
+        AND cb.custody_model = 'pooled'
+      ORDER BY cb.tokenised_at DESC NULLS LAST
+    `);
+    
+    const issues = rows.filter(r => r.ledger_status === 'MISSING' || Number(r.ledger_balance) === 0);
+    
+    res.json({
+      totalChecked: rows.length,
+      issuesFound: issues.length,
+      details: rows,
+      issues: issues,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Auto-fix missing ledger entries for pooled custody batches
+router.post('/ledger-integrity/fix', isAdmin, async (req, res) => {
+  try {
+    const { rows } = await query(`
+      SELECT cb.id, cb.project_name, cb.token_id, cb.user_id,
+             COALESCE(cb.quantity, cb.total_credits, cb.available_credits, 0) AS amount
+      FROM carbon_batches cb
+      LEFT JOIN credit_ledger_balances clb 
+        ON clb.user_id = cb.user_id AND clb.token_id = cb.token_id
+      WHERE cb.token_id IS NOT NULL
+        AND cb.custody_model = 'pooled'
+        AND (clb.balance IS NULL OR clb.balance = 0)
+    `);
+    
+    const { ethers } = require('ethers');
+    let fixed = 0;
+    
+    for (const batch of rows) {
+      await query(
+        `INSERT INTO credit_ledger_balances (user_id, token_id, balance, total_retired)
+         VALUES ($1, $2, $3, 0)
+         ON CONFLICT (user_id, token_id) DO UPDATE SET balance = EXCLUDED.balance, updated_at = NOW()`,
+        [batch.user_id, batch.token_id, batch.amount]
+      );
+      
+      const userIdHash = ethers.keccak256(ethers.toUtf8Bytes(batch.user_id));
+      const refHash = ethers.keccak256(ethers.toUtf8Bytes(
+        `${userIdHash}:${batch.token_id}:${batch.amount}:MINT:carbon_batches:${batch.id}`
+      ));
+      
+      await query(
+        `INSERT INTO credit_ledger_entries 
+         (user_id, user_id_hash, token_id, amount_delta, action_type, ref_hash, ref_table, ref_id, note, chain_status)
+         VALUES ($1, $2, $3, $4, 'MINT', $5, 'carbon_batches', $6, 'Auto-fixed by admin', 'confirmed')
+         ON CONFLICT (ref_hash) DO NOTHING`,
+        [batch.user_id, userIdHash, batch.token_id, batch.amount, refHash, batch.id]
+      );
+      
+      fixed++;
+    }
+    
+    res.json({ success: true, fixed, message: `Fixed ${fixed} ledger entries` });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── Blacklist ─────────────────────────────────────────────────────
 router.get('/serials/blacklist', isAdmin, async (req, res) => {
   try {

@@ -11,7 +11,7 @@ const { ethers } = require('ethers');
 const { safeQuery: query } = require('../db/pool');
 
 const RPC_URL                  = process.env.ALCHEMY_RPC;
-const CUSTODY_KEY              = process.env.ETHERTRACK_CUSTODY_PRIVATE_KEY;
+const CUSTODY_KEY              = process.env.MINTER_PRIVATE_KEY;
 const CREDIT_LEDGER_ADDRESS    = process.env.CREDIT_LEDGER_ADDRESS;
 
 const LEDGER_ABI = [
@@ -274,6 +274,43 @@ const reconcileAllBalances = async () => {
   return mismatches;
 };
 
+/** Syncs DB balance to on-chain WITHOUT modifying DB balance (DB is source of truth). */
+const syncLedgerBalanceToChain = async ({ userId, tokenId }) => {
+  const userIdHash = await getOrCreateUserIdHash(userId);
+  const ledger = getLedgerContract();
+  
+  const onChainBalance = await ledger.getUserBalance(userIdHash, tokenId);
+  const dbBalance = await getLedgerBalance(userId, tokenId);
+  
+  if (Number(onChainBalance) >= Number(dbBalance.balance)) {
+    return { message: 'Already in sync or on-chain >= DB', onChain: Number(onChainBalance), db: Number(dbBalance.balance) };
+  }
+  
+  const missing = Number(dbBalance.balance) - Number(onChainBalance);
+  const refHash = computeRefHash(userIdHash, tokenId, missing, 'MINT', 'credit_ledger_balances', null);
+  
+  console.log(`🔄 Syncing ${missing} credits for user ${userId} token ${tokenId}...`);
+  
+  const tx = await ledger.logOwnershipChange(
+    userIdHash, tokenId, missing, ACTION_TYPE.MINT, refHash, `Backfill sync: ${missing} credits`
+  );
+  const receipt = await tx.wait();
+  if (receipt.status !== 1) throw new Error(`Sync MINT reverted — tx: ${tx.hash}`);
+  
+  // Only log the entry, do NOT update credit_ledger_balances again (DB is source of truth)
+  await query(
+    `INSERT INTO credit_ledger_entries
+       (onchain_log_id, user_id, user_id_hash, token_id, amount_delta, action_type,
+        ref_hash, ref_table, ref_id, note, tx_hash, block_number, chain_status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'confirmed')`,
+    [null, userId, userIdHash, tokenId, missing, 'MINT',
+     refHash, 'credit_ledger_balances', null, `Backfill sync: ${missing} credits`, tx.hash, receipt.blockNumber]
+  );
+  
+  console.log(`   ✅ Synced on-chain — block ${receipt.blockNumber}, tx: ${tx.hash}`);
+  return { synced: missing, onChain: Number(dbBalance.balance), db: Number(dbBalance.balance) };
+};
+
 module.exports = {
   computeUserIdHash,
   getOrCreateUserIdHash,
@@ -283,5 +320,6 @@ module.exports = {
   getLedgerBalance,
   verifyLedgerBalance,
   reconcileAllBalances,
+  syncLedgerBalanceToChain,
   ACTION_TYPE,
 };

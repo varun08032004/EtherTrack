@@ -471,13 +471,14 @@ export const txAPI = {
 // TRADES
 // ══════════════════════════════════════════════════════════════════════════════
 export const tradesAPI = {
-  record  : (payload) => apiFetch('/api/trades/record',  { method: 'POST', body: JSON.stringify(payload) }),
   history : (p = {})  => apiFetch(`/api/trades/history${qs(p)}`),
   stats   : ()        => apiFetch('/api/trades/stats'),
   myFees  : (p = {})  => apiFetch(`/api/trades/my-fees${qs(p)}`),
   ethRate : ()        => apiFetch('/api/trades/eth-rate'),
   checkoutOrder  : (payload) => apiFetch('/api/trades/checkout-order',  { method: 'POST', body: JSON.stringify(payload) }),
   checkoutVerify : (payload) => apiFetch('/api/trades/checkout-verify', { method: 'POST', body: JSON.stringify(payload) }),
+  walletCheckout : (payload) => apiFetch('/api/trades/wallet-checkout', { method: 'POST', body: JSON.stringify(payload) }),
+  recordEth : (payload) => apiFetch('/api/trades/record-eth', { method: 'POST', body: JSON.stringify(payload) }),
   verifyOnChain  : (tradeId) => apiFetch(`/api/trades/${tradeId}/verify`),
   getInvoice: (tradeId) => {
     window.open(`${BASE}/api/trades/${tradeId}/invoice`, '_blank', 'noopener,noreferrer');
@@ -497,7 +498,7 @@ export const marketAPI = {
 
 // ══════════════════════════════════════════════════════════════════════════════
 // EMISSIONS
-// ══════════════════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════════════════════
 export const emissionsAPI = {
   getMy          : ()        => apiFetch('/api/emissions/my'),
   getActivities  : (p = {})  => apiFetch(`/api/emissions/activities${qs(p)}`),
@@ -525,6 +526,84 @@ export const emissionsAPI = {
   // Source-to-number lineage
   getLineage    : (id) => apiFetch(`/api/emissions/activities/${id}/lineage`),
   getEFVersions : ()   => apiFetch('/api/emissions/ef-versions'),
+
+  // ── Emission Calculation Engine (Phase 1) ──
+  calculate        : (payload) => apiFetch('/api/emissions/calculate', { method: 'POST', body: JSON.stringify(payload) }),
+  calculateBulk    : (payload) => apiFetch('/api/emissions/calculate/bulk', { method: 'POST', body: JSON.stringify(payload) }),
+  getCalculationHistory : (params = {}) => apiFetch(`/api/emissions/calculate/history${qs(params)}`),
+  recalculate      : (payload) => apiFetch('/api/emissions/calculate/recalculate', { method: 'POST', body: JSON.stringify(payload) }),
+  getFactors       : (params = {}) => apiFetch(`/api/emissions/factors${qs(params)}`),
+  getMethodology   : (templateCode) => apiFetch(`/api/emissions/methodologies/${templateCode}`),
+  validateActivity : (payload) => apiFetch('/api/emissions/validate', { method: 'POST', body: JSON.stringify(payload) })
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════
+// MRV WORKFLOW (Phase 1)
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════
+export const mrvAPI = {
+  // Plans
+  listPlans        : (params = {}) => apiFetch(`/api/mrv/plans${qs(params)}`),
+  createPlan       : (payload) => apiFetch('/api/mrv/plans', { method: 'POST', body: JSON.stringify(payload) }),
+  submitPlan       : (planId) => apiFetch(`/api/mrv/plans/${planId}/submit`, { method: 'POST' }),
+  
+  // Evidence
+  uploadEvidence   : (planId, payload) => apiFetch(`/api/mrv/plans/${planId}/evidence`, { method: 'POST', body: payload }),
+  getEvidence      : (planId) => apiFetch(`/api/mrv/plans/${planId}/evidence`),
+  anchorEvidence   : (evidenceId) => apiFetch(`/api/mrv/evidence/${evidenceId}/anchor`, { method: 'POST' }),
+  verifyEvidence   : (evidenceId, payload) => apiFetch(`/api/mrv/evidence/${evidenceId}/verify`, { method: 'POST', body: JSON.stringify(payload) }),
+  
+  // Findings
+  addFinding       : (planId, payload) => apiFetch(`/api/mrv/plans/${planId}/findings`, { method: 'POST', body: JSON.stringify(payload) }),
+  getFindings      : (planId) => apiFetch(`/api/mrv/plans/${planId}/findings`),
+  resolveFinding   : (findingId, payload) => apiFetch(`/api/mrv/findings/${findingId}/resolve`, { method: 'POST', body: JSON.stringify(payload) }),
+  
+  // Verifiers
+  getVerifiers     : (planId) => apiFetch(`/api/mrv/verifiers${qs({ planId })}`),
+  assignVerifier   : (planId, payload) => apiFetch(`/api/mrv/plans/${planId}/assign-verifier`, { method: 'POST', body: JSON.stringify(payload) }),
+  
+  // Verification
+  completeVerification : (planId, payload) => apiFetch(`/api/mrv/plans/${planId}/complete-verification`, { method: 'POST', body: JSON.stringify(payload) }),
+  approvePlan       : (planId) => apiFetch(`/api/mrv/plans/${planId}/approve`, { method: 'POST' })
+};
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════
+// INSTITUTIONAL API (Phase 2)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════
+export const institutionalAPI = {
+  // API Keys
+  createAPIKey     : (payload) => apiFetch('/api/institutional/api-keys', { method: 'POST', body: JSON.stringify(payload) }),
+  listAPIKeys      : () => apiFetch('/api/institutional/api-keys'),
+  revokeAPIKey     : (keyId) => apiFetch(`/api/institutional/api-keys/${keyId}`, { method: 'DELETE' }),
+  listAPIKeys      : () => apiFetch('/api/institutional/api-keys'),
+
+  // Webhooks
+  registerWebhook  : (payload) => apiFetch('/api/institutional/webhooks', { method: 'POST', body: JSON.stringify(payload) }),
+  listWebhooks     : () => apiFetch('/api/institutional/webhooks'),
+  deleteWebhook    : (endpointId) => apiFetch(`/api/institutional/webhooks/${endpointId}`, { method: 'DELETE' }),
+  getWebhookLogs   : (endpointId, params = {}) => apiFetch(`/api/institutional/webhooks/${endpointId}/logs${qs(params)}`),
+
+  // Market Data
+  getMarketData    : (params = {}) => apiFetch(`/api/institutional/market/data${qs(params)}`),
+  getPriceIndices  : (params = {}) => apiFetch(`/api/institutional/market/indices${qs(params)}`),
+  getMarketStats   : () => apiFetch('/api/institutional/market/stats'),
+
+  // Compliance
+  getCompliancePosition : (entityId) => apiFetch(`/api/institutional/compliance/position/${entityId}`),
+  getProcurementPlan   : (entityId) => apiFetch(`/api/institutional/compliance/procurement-plan/${entityId}`),
+
+  // Webhooks
+  registerWebhook   : (payload) => apiFetch('/api/institutional/webhooks', { method: 'POST', body: JSON.stringify(payload) }),
+  listWebhooks      : () => apiFetch('/api/institutional/webhooks'),
+  deleteWebhook     : (endpointId) => apiFetch(`/api/institutional/webhooks/${endpointId}`, { method: 'DELETE' }),
+  getWebhookLogs     : (endpointId, params = {}) => apiFetch(`/api/institutional/webhooks/${endpointId}/logs${qs(params)}`),
+
+  // Usage Analytics
+  getUsageStats      : (keyId, days = 30) => apiFetch(`/api/institutional/usage/stats/${keyId}${qs({ days })}`),
+  getRateLimitStatus : (keyId) => apiFetch(`/api/institutional/usage/rate-limit/${keyId}`),
+
+  // Procurement
+  getProcurementQuote : (payload) => apiFetch('/api/institutional/procurement/quote', { method: 'POST', body: JSON.stringify(payload) }),
+  executeProcurementOrder : (payload) => apiFetch('/api/institutional/procurement/order', { method: 'POST', body: JSON.stringify(payload) })
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -542,6 +621,9 @@ export const portfolioAPI = {
   getWatchlist             : ()       => apiFetch('/api/portfolio/watchlist'),
   addToWatchlist           : (lid)    => apiFetch('/api/portfolio/watchlist',         { method: 'POST',   body: JSON.stringify({ listingId: lid }) }),
   removeFromWatchlist      : (lid)    => apiFetch(`/api/portfolio/watchlist/${lid}`,  { method: 'DELETE' }),
+  ledgerCheckoutOrder  : (payload) => apiFetch('/api/portfolio/ledger-checkout-order',  { method: 'POST', body: JSON.stringify(payload) }),
+  ledgerCheckoutVerify : (payload) => apiFetch('/api/portfolio/ledger-checkout-verify', { method: 'POST', body: JSON.stringify(payload) }),
+  syncLedgerBalance  : (tokenId) => apiFetch('/api/portfolio/sync-ledger-balance', { method: 'POST', body: JSON.stringify({ tokenId }) }),
 };
 
 // ══════════════════════════════════════════════════════════════════════════════

@@ -1,20 +1,8 @@
 // src/hooks/useMarket.js — EtherTrack (PRODUCTION-HARDENED)
-// ─────────────────────────────────────────────────────────────────────────────
-// FIXES APPLIED:
-//
-// [FIX-1]  INR price calculation fixed — was multiplying by 87.4 (MATIC price).
-//          EtherTrack runs on Ethereum Sepolia, not Polygon. fetchListings()
-//          now fetches the live ETH/INR rate from /api/rates/eth-inr before
-//          computing pricePerUnitINR. Falls back to 280000 if rate fetch fails.
-//
-// [FIX-2]  marketStats now fetched from /api/market/stats in fetchPublicListings.
-//          CarbonCredits.jsx uses marketStats?.activeListings and
-//          marketStats?.totalRetired as fallback values in the stats bar.
-//          Previously these were always undefined — stats bar showed '—'.
-//
-// Public REST fetch fires on mount with no wallet needed -- market visible to everyone.
-// On-chain methods activate once wallet connects, and re-read the latest wallet state
-// at call time (not cached at mount) so connecting MetaMask after page load works too.
+ // ─────────────────────────────────────────────────────────────────────────────
+ // CUSTODIAL-ONLY MODE: All listings served via REST API (/api/market/listings)
+ // which combines wallet-based + ledger-based (pooled custody) listings.
+ // No on-chain marketplace reads — MetaMask wallet not required.
 
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { ethers } from 'ethers';
@@ -24,26 +12,26 @@ import { STANDARD_FROM_ENUM, ORDER_SIDE } from '../config/contracts.config';
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 const POLL_MS = 30_000;
 
-// ── [FIX-2] Public REST fetch — now includes /api/market/stats ────────────────
+// ── Public REST fetch — includes /api/market/stats ────────────────
 async function fetchPublicListings() {
   const [listRes, orderRes, histRes, statsRes] = await Promise.all([
     fetch(`${API_URL}/api/market/listings`),
     fetch(`${API_URL}/api/market/buy-orders`),
     fetch(`${API_URL}/api/market/trade-history`),
-    fetch(`${API_URL}/api/market/stats`),        // [FIX-2] added
+    fetch(`${API_URL}/api/market/stats`),
   ]);
 
   const [listData, orderData, histData, statsData] = await Promise.all([
     listRes.ok   ? listRes.json()   : { listings: [] },
     orderRes.ok  ? orderRes.json()  : { orders: []   },
     histRes.ok   ? histRes.json()   : { trades: []   },
-    statsRes.ok  ? statsRes.json()  : {},               // [FIX-2] added
+    statsRes.ok  ? statsRes.json()  : {},
   ]);
 
   return {
     listings:    listData.listings  || [],
     buyOrders:   orderData.orders   || [],
-    marketStats: statsData          || {},              // [FIX-2] added
+    marketStats: statsData          || {},
     trades: (histData.trades || []).map(t => ({
       ...t,
       time:   t.time ? new Date(t.time).toLocaleString() : '--',
@@ -80,19 +68,17 @@ export function useMarket() {
 
   const mountedRef  = useRef(true);
   const pollRef     = useRef(null);
-  const chainLoaded = useRef(false);
 
   // 1. Public fetch — fires on mount, no wallet dependency
+  // CUSTODIAL-ONLY: Always use REST data (includes ledger + wallet listings)
   const fetchPublic = useCallback(async () => {
     try {
       const data = await fetchPublicListings();
       if (!mountedRef.current) return;
-      if (!chainLoaded.current) {
-        setListings(data.listings);
-        setBuyOrders(data.buyOrders);
-      }
+      setListings(data.listings);
+      setBuyOrders(data.buyOrders);
       setTradeHistory(data.trades);
-      setMarketStats(data.marketStats);  // [FIX-2] set stats
+      setMarketStats(data.marketStats);
       setError('');
     } catch (e) {
       if (mountedRef.current) setError(e.message);
@@ -100,71 +86,6 @@ export function useMarket() {
       if (mountedRef.current) setLoading(false);
     }
   }, []);
-
-  // 2. On-chain listings — call this when wallet connects
-  const fetchListings = useCallback(async () => {
-    const contracts = await getContracts();
-    if (!contracts) return; // no wallet — REST data already showing
-    setLoading(true);
-    setError('');
-    try {
-      const { marketplaceRead, creditTokenRead } = contracts;
-      const rawListings = await marketplaceRead.getActiveListings();
-
-      // [FIX-1] Fetch live ETH/INR rate from backend — not hardcoded MATIC rate
-      let ethINR = 280000; // fallback
-      try {
-        const rateRes  = await fetch(`${API_URL}/api/rates/eth-inr`);
-        const rateData = await rateRes.json();
-        if (rateData?.inr > 0) ethINR = rateData.inr;
-      } catch {
-        console.warn('[useMarket] ETH/INR rate fetch failed — using fallback 280000');
-      }
-
-      const enriched = await Promise.all(
-        rawListings.map(async (l) => {
-          const tokenId = Number(l.tokenId);
-          let meta = null;
-          try { meta = await creditTokenRead.getCreditMetadata(tokenId); } catch {}
-
-          // [FIX-1] Use live ETH/INR rate — was incorrectly using 87.4 (MATIC rate)
-          const pricePerUnitINR = Number(ethers.formatEther(l.pricePerUnit)) * ethINR;
-
-          return {
-            listingId:       Number(l.listingId),
-            seller:          l.seller,
-            tokenId,
-            amount:          Number(l.amount),
-            amountRemaining: Number(l.amountRemaining),
-            pricePerUnit:    l.pricePerUnit,
-            priceFormatted:  ethers.formatEther(l.pricePerUnit),
-            pricePerUnitINR,
-            adjPrice:        Number(ethers.formatEther(l.pricePerUnit)),
-            listedAt:        new Date(Number(l.listedAt) * 1000),
-            expiresAt:       Number(l.expiresAt),
-            projectName:     meta?.projectName  || `Token #${tokenId}`,
-            location:        meta?.location     || '--',
-            standard:        STANDARD_FROM_ENUM[meta?.standard] || 'VCS',
-            projectType:     meta?.projectType  || '--',
-            developer:       meta?.developer    || '--',
-            vintageYear:     Number(meta?.vintageYear || 0),
-            serialNumber:    meta?.serialNumber || '--',
-            vintageDiscount: 0,
-            totalRetired:    0,
-          };
-        })
-      );
-
-      if (!mountedRef.current) return;
-      setListings(enriched);
-      chainLoaded.current = true; // stop REST poll from overwriting richer data
-      setError('');
-    } catch (err) {
-      if (mountedRef.current) setError(err.message);
-    } finally {
-      if (mountedRef.current) setLoading(false);
-    }
-  }, [getContracts]);
 
   // 3. My orders
   const fetchMyOrders = useCallback(async (walletAddress) => {
@@ -230,7 +151,7 @@ export function useMarket() {
     }
   }, [getContracts]);
 
-  // 5. Buy credit
+  // 5. Buy credit (custodial mode - uses INR wallet, not ETH)
   const buyCredit = useCallback(async (walletAddress, listingId, amount, pricePerUnit) => {
     const contracts = await getContracts();
     if (!contracts) return { success: false, error: 'Wallet not connected' };
@@ -245,7 +166,7 @@ export function useMarket() {
       const tx       = await marketplace.buyCredit(listingId, amount, { value: totalWei });
       const receipt  = await tx.wait();
       if (mountedRef.current) setTxHash(receipt.hash);
-      await Promise.all([fetchListings(), fetchMyTrades(walletAddress), fetchPublic()]);
+      await Promise.all([fetchMyTrades(walletAddress), fetchPublic()]);
       return { success: true, txHash: receipt.hash };
     } catch (err) {
       const msg = err.reason || err.message;
@@ -254,7 +175,7 @@ export function useMarket() {
     } finally {
       if (mountedRef.current) setTxPending(false);
     }
-  }, [getContracts, fetchListings, fetchMyTrades, fetchPublic]);
+  }, [getContracts, fetchMyTrades, fetchPublic]);
 
   // 6. Place limit order
   const placeLimitOrder = useCallback(async (walletAddress, tokenId, amount, limitPriceETH, side, durationDays = 7) => {
@@ -341,12 +262,11 @@ export function useMarket() {
     myOrders,
     myTrades,
     tradeHistory,
-    marketStats,     // [FIX-2] now returned — used by CarbonCredits.jsx stats bar
+    marketStats,
     loading,
     txPending,
     txHash,
     error,
-    fetchListings,
     fetchMyOrders,
     fetchMyTrades,
     buyCredit,

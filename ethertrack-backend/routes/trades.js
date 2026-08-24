@@ -22,6 +22,12 @@ const { pdfQueue } = require('../services/pdfQueue');
 const { sendCreditsSoldEmail } = require('../services/email');
 const { issueOwnershipCertificate } = require('../services/certificates');
 const { generateIdempotencyLockKey, acquireAdvisoryLockInt } = require('../lib/advisoryLock');
+const { SettlementEngine } = require('../src/services/settlement/SettlementEngine');
+const { TradeService } = require('../src/services/trade/TradeService');
+const { ListingService } = require('../src/services/listing/ListingService');
+
+const settlementEngine = new SettlementEngine();
+const tradeService = new TradeService(settlementEngine, new ListingService());
 
 const logger = require('../services/logger');
 
@@ -185,386 +191,11 @@ router.get('/eth-rate', readLimiter, async (req, res) => {
   }
 });
 
-router.post('/record', authenticate, requireKYC, tradeLimiter, async (req, res) => {
-  const {
-    listingId, batchId, quantity, paymentMode, txHash,
-    pricePerCreditINR, idempotencyKey, clientEthRate,
-    buyerGstin, buyerPan,
-  } = req.body;
-
-  if (!batchId || !quantity || !paymentMode || !pricePerCreditINR)
-    return res.status(400).json({ error: 'batchId, quantity, paymentMode, pricePerCreditINR required' });
-  if (!['inr', 'eth'].includes(paymentMode))
-    return res.status(400).json({ error: 'paymentMode must be "inr" or "eth"' });
-
-  const qty          = parseInt(quantity);
-  const pricePerCredit = parseFloat(pricePerCreditINR);
-  if (!qty || qty <= 0)               return res.status(400).json({ error: 'Invalid quantity' });
-  if (!pricePerCredit || pricePerCredit <= 0) return res.status(400).json({ error: 'Invalid pricePerCreditINR' });
-
-  const ethRate = await getLiveETHRate();
-
-  if (paymentMode === 'eth' && clientEthRate) {
-    const drift = Math.abs(ethRate - parseFloat(clientEthRate)) / parseFloat(clientEthRate);
-    if (drift > MAX_SLIPPAGE)
-      return res.status(400).json({
-        error: 'ETH/INR rate changed significantly. Please refresh and retry.',
-        serverRate: ethRate, clientRate: clientEthRate,
-      });
-  }
-
-  if (paymentMode === 'eth' && txHash) {
-    const { rows: dup } = await query(`SELECT id FROM trades WHERE tx_hash = $1 LIMIT 1`, [txHash]);
-    if (dup.length) return res.json({ success: true, tradeId: dup[0].id, idempotent: true });
-  }
-
-  // Use advisory lock on idempotency key to prevent concurrent duplicate trades
-  if (idempotencyKey) {
-    const idemLockKey = generateIdempotencyLockKey(req.user.id, idempotencyKey);
-    await query(`SELECT pg_advisory_xact_lock($1)`, [idemLockKey]);
-  }
-
-  // Use advisory lock to prevent concurrent trades on the same batch
-  const batchLockKey = parseInt(batchId.replace(/-/g, ''), 16) % 2147483647;
-  await query(`SELECT pg_advisory_xact_lock($1)`, [batchLockKey]);
-
-  try {
-    const { rows: batches } = await query(
-      `SELECT cb.*, u.id AS seller_id, u.wallet_address AS seller_wallet,
-              u.email AS seller_email, u.full_name AS seller_name,
-              u.inr_balance AS seller_inr_balance, u.razorpay_contact_id
-       FROM carbon_batches cb JOIN users u ON u.id = cb.user_id
-       WHERE cb.id = $1`, [batchId]
-    );
-    if (!batches.length) return res.status(404).json({ error: 'Batch not found' });
-    const batch    = batches[0];
-    const sellerId = batch.seller_id;
-
-    if (sellerId === req.user.id)
-      return res.status(400).json({ error: 'Cannot buy your own listing' });
-    if (batch.available_credits < qty)
-      return res.status(400).json({ error: `Only ${batch.available_credits} credits available` });
-
-    if (listingId) {
-      const { rows: lr } = await query(
-        `SELECT price_per_credit_inr FROM market_listings WHERE listing_id = $1`, [listingId]
-      );
-      if (lr.length) {
-        const canonical = parseFloat(lr[0].price_per_credit_inr);
-        if (Math.abs(pricePerCredit - canonical) / canonical > 0.01)
-          return res.status(400).json({
-            error: 'Price mismatch. Listing price changed. Please refresh.',
-            code: 'PRICE_MISMATCH', expectedPrice: canonical,
-          });
-      }
-    }
-
-    const subtotalINR = parseFloat((pricePerCredit * qty).toFixed(2));
-    const fees        = calcFees(subtotalINR);
-    const totalETH    = subtotalINR / ethRate;
-const feeETH      = fees.totalFeeINR / ethRate;
-
-  let tradeId;
-
-  // Use advisory lock to prevent concurrent trades on the same batch
-const batchLockKey = parseInt(batchId.replace(/-/g, ''), 16) % 2147483647;
-  await query(`SELECT pg_advisory_xact_lock($1)`, [batchLockKey]);
-
-  await withTransaction(async (client) => {
-      // Lock the batch row FIRST -- eliminates race window between SELECT and FOR UPDATE
-      const { rows: batchLocked } = await client.query(
-        `SELECT cb.*, u.id AS seller_id, u.wallet_address AS seller_wallet,
-                u.email AS seller_email, u.full_name AS seller_name,
-                u.inr_balance AS seller_inr_balance, u.razorpay_contact_id
-         FROM carbon_batches cb JOIN users u ON u.id = cb.user_id
-         WHERE cb.id = $1 FOR UPDATE`, [batchId]
-      );
-      if (!batchLocked.length) throw Object.assign(new Error('Batch not found'), { statusCode: 404 });
-      const batch    = batchLocked[0];
-      const sellerId = batch.seller_id;
-
-      if (sellerId === req.user.id)
-        throw Object.assign(new Error('Cannot buy your own listing'), { statusCode: 400 });
-      if (batch.available_credits < qty)
-        throw Object.assign(new Error(`Only ${batch.available_credits} credits available`), { statusCode: 400 });
-
-      if (listingId) {
-        const { rows: lr } = await client.query(
-          `SELECT price_per_credit_inr FROM market_listings WHERE listing_id = $1`, [listingId]
-        );
-        if (lr.length) {
-          const canonical = parseFloat(lr[0].price_per_credit_inr);
-          if (Math.abs(pricePerCredit - canonical) / canonical > 0.01)
-            throw Object.assign(new Error('Price mismatch. Listing price changed. Please refresh.'), {
-              statusCode: 400, code: 'PRICE_MISMATCH', expectedPrice: canonical,
-            });
-        }
-      }
-
-      if (paymentMode === 'inr') {
-        const { rows: buyerRows } = await client.query(
-          'SELECT inr_balance FROM users WHERE id = $1 FOR UPDATE', [req.user.id]
-        );
-        const buyerBalance = parseFloat(buyerRows[0]?.inr_balance || 0);
-        if (buyerBalance < fees.buyerPaysINR)
-          throw Object.assign(new Error('Insufficient INR balance'), {
-            statusCode: 400, required: fees.buyerPaysINR, available: buyerBalance,
-          });
-
-        await client.query(
-          `UPDATE users SET inr_balance = inr_balance - $1, updated_at = NOW() WHERE id = $2`,
-          [fees.buyerPaysINR, req.user.id]
-        );
-        await client.query(
-          `INSERT INTO wallet_transactions (user_id, type, method, amount, status, notes, trade_type)
-           VALUES ($1, 'debit', 'inr', $2, 'success', $3, 'buy_credit')`,
-          [req.user.id, fees.buyerPaysINR,
-           `Purchase ${qty} x ${batch.project_name} @ Rs.${pricePerCredit} (incl. 0.5% fee + GST)`]
-        );
-
-        // Lock seller row before crediting
-        await client.query('SELECT inr_balance FROM users WHERE id = $1 FOR UPDATE', [sellerId]);
-        await client.query(
-          `UPDATE users SET inr_balance = inr_balance + $1, updated_at = NOW() WHERE id = $2`,
-          [fees.sellerGetsINR, sellerId]
-        );
-        await client.query(
-          `INSERT INTO wallet_transactions (user_id, type, method, amount, status, notes, trade_type)
-           VALUES ($1, 'credit', 'inr', $2, 'success', $3, 'sell_credit')`,
-          [sellerId, fees.sellerGetsINR,
-           `Sale ${qty} x ${batch.project_name} @ Rs.${pricePerCredit} (after 0.5% fee + GST)`]
-        );
-
-        if (COMPANY_USER_ID) {
-          await client.query(
-            `UPDATE users SET inr_balance = inr_balance + $1, updated_at = NOW() WHERE id = $2`,
-            [fees.totalFeeINR, COMPANY_USER_ID]
-          );
-          await client.query(
-            `INSERT INTO wallet_transactions (user_id, type, method, amount, status, notes, trade_type)
-             VALUES ($1, 'credit', 'system', $2, 'success', $3, 'platform_fee')`,
-            [COMPANY_USER_ID, fees.totalFeeINR,
-             `Platform fee: trade ${batchId} qty ${qty}`]
-          );
-        }
-      }
-
-      // Check idempotency inside transaction (advisory lock already held)
-      if (idempotencyKey) {
-        const existing = await checkIdempotency(req.user.id, idempotencyKey, client);
-        if (existing) {
-          // Return existing trade info instead of throwing
-          throw Object.assign(new Error('Idempotent replay'), {
-            statusCode: 200,
-            idempotent: true,
-            tradeId: existing.id,
-            buyerBalance: req.user.inr_balance
-          });
-        }
-      }
-
-      const { rows: tradeRows } = await client.query(
-        `INSERT INTO trades (
-          buyer_id, seller_id, buyer_wallet, seller_wallet,
-          batch_id, token_id, listing_id_onchain, quantity,
-          price_per_credit_inr, subtotal_inr,
-          buyer_fee_inr, seller_fee_inr, total_fee_inr, gst_inr,
-          buyer_pays_inr, seller_receives_inr, platform_net_inr,
-          price_per_credit_eth, total_eth, eth_inr_rate, fee_eth,
-          payment_mode, status, tx_hash,
-          buyer_inr_deducted, seller_inr_credited,
-          inr_settlement_at, completed_at, idempotency_key,
-          chain_status
-        ) VALUES (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-          $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,
-          $22,'completed',$23,$24,$25,$26,NOW(),$27,$28
-        ) RETURNING id`,
-        [
-          req.user.id, sellerId, req.user.wallet_address || null, batch.seller_wallet,
-          batchId, batch.token_id, listingId || null, qty,
-          pricePerCredit, subtotalINR,
-          fees.buyerFeeINR, fees.sellerFeeINR, fees.totalFeeINR, fees.gstINR,
-          fees.buyerPaysINR, fees.sellerGetsINR, fees.platformNetINR,
-          pricePerCredit / ethRate, totalETH, ethRate, feeETH,
-          paymentMode, txHash || null,
-          paymentMode === 'inr', paymentMode === 'inr',
-          paymentMode === 'inr' ? new Date() : null,
-          idempotencyKey || null,
-          paymentMode === 'eth' ? 'on_chain' : 'pending',
-        ]
-      );
-      tradeId = tradeRows[0].id;
-
-      const gstType = getGSTType(buyerGstin, undefined);
-      const isIgst  = gstType === 'igst';
-      const cgstInr = isIgst ? 0 : fees.gstINR / 2;
-      const sgstInr = isIgst ? 0 : fees.gstINR / 2;
-      const igstInr = isIgst ? fees.gstINR : 0;
-
-      await client.query(
-        `INSERT INTO platform_fees
-           (trade_id, buyer_fee_inr, seller_fee_inr, total_fee_inr, gst_inr,
-            platform_net_inr, fee_eth, eth_rate, payment_mode, status,
-            gst_type, cgst_inr, sgst_inr, igst_inr)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'collected',$10,$11,$12,$13)
-         ON CONFLICT DO NOTHING`,
-        [tradeId, fees.buyerFeeINR, fees.sellerFeeINR, fees.totalFeeINR,
-         fees.gstINR, fees.platformNetINR, feeETH, ethRate, paymentMode,
-         gstType, cgstInr, sgstInr, igstInr]
-      ).catch(() => {});
-
-      if (paymentMode === 'eth') {
-        await client.query(
-          `INSERT INTO pending_seller_credits (trade_id, seller_id, amount_inr, eth_rate, tx_hash)
-           VALUES ($1,$2,$3,$4,$5) ON CONFLICT (trade_id) DO NOTHING`,
-          [tradeId, sellerId, fees.sellerGetsINR, ethRate, txHash]
-        ).catch(() => {});
-      }
-
-      await client.query(
-        `UPDATE carbon_batches
-         SET available_credits = GREATEST(0, available_credits - $1),
-             listed_quantity   = GREATEST(0, listed_quantity - $1),
-             last_traded_price_inr = $2, updated_at = NOW()
-         WHERE id = $3`,
-        [qty, pricePerCredit, batchId]
-      );
-
-      await client.query(
-        `INSERT INTO registry_transactions
-           (type, token_id, batch_id, listing_id, trade_id,
-            from_wallet, to_wallet, from_user_id, to_user_id,
-            amount, price_eth, price_inr, fee_eth, fee_inr,
-            buyer_fee_inr, seller_fee_inr, total_price_inr,
-            payment_mode, tx_hash, project_name, standard)
-         VALUES ('TRADE',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
-        [
-          batch.token_id, batchId, listingId || null, tradeId,
-          batch.seller_wallet, req.user.wallet_address || null,
-          sellerId, req.user.id,
-          qty, pricePerCredit / ethRate, pricePerCredit,
-          feeETH, fees.totalFeeINR, fees.buyerFeeINR, fees.sellerFeeINR,
-          subtotalINR, paymentMode, txHash || null,
-          batch.project_name, batch.standard,
-        ]
-      );
-
-      await client.query(
-        `INSERT INTO audit_log (user_id, action, entity, entity_id, new_value, ip_address)
-         VALUES ($1,'TRADE_EXECUTED','trade',$2,$3,$4)`,
-        [req.user.id, String(tradeId),
-         JSON.stringify({ qty, pricePerCredit, paymentMode, batchId, sellerId, gstINR: fees.gstINR }),
-         req.ip]
-      ).catch(() => {});
-    });
-
-    // [CERT-OWNERSHIP] Issue a Certificate of Ownership for this purchase.
-    let ownershipCertId = null;
-    try {
-      ownershipCertId = await issueOwnershipCertificate({
-        userId: req.user.id,
-        tokenId: batches[0].token_id,
-        quantity: qty,
-        tradeId,
-        txHash: txHash || null,
-        custodyModel: 'wallet',
-      });
-    } catch (certErr) {
-      req.log.error('[trades/record] certificate issuance failed (trade unaffected):', certErr.message);
-    }
-
-    if (paymentMode === 'inr') {
-      chainLogger.logTrade({
-        dbTradeId:         tradeId,
-        tokenId:           batches[0].token_id,
-        quantity:          qty,
-        pricePerCreditINR: pricePerCredit,
-        paymentMode:       'inr',
-        buyerWallet:       req.user.wallet_address || null,
-        sellerWallet:      batches[0].seller_wallet,
-        settledAt:         new Date(),
-      }).catch(err => req.log.error('[trades/record] chain log error:', err.message));
-
-      fireTradeInvoice({
-        tradeId,
-        buyerId:     req.user.id,
-        projectName: batches[0].project_name,
-        standard:       batches[0].standard,
-        registrySerial: batches[0].registry_serial,
-        qty,
-        subtotalINR,
-        fees,
-        paymentMode: 'inr',
-      });
-    } else if (paymentMode === 'eth') {
-      fireTradeBill({
-        tradeId,
-        buyerId:     req.user.id,
-        projectName: batches[0].project_name,
-        standard:       batches[0].standard,
-        registrySerial: batches[0].registry_serial,
-        qty,
-        subtotalINR,
-        fees,
-        txHash: txHash || null,
-        ethRate,
-        totalETH,
-      });
-    }
-
-    await Promise.all([
-      createNotification(req.user.id, 'TRADE', 'Purchase Complete',
-        `${qty} x ${batch.project_name} -- Rs.${fees.buyerPaysINR.toLocaleString('en-IN')} paid`,
-        '/portfolio', { tradeId, quantity: qty }).catch(() => {}),
-      createNotification(sellerId, 'TRADE',
-        paymentMode === 'inr' ? 'Credits Sold' : 'Credits Sold (ETH pending)',
-        `${qty} x ${batch.project_name} -- Rs.${fees.sellerGetsINR.toLocaleString('en-IN')} ${paymentMode === 'inr' ? 'credited' : 'pending'}`,
-        '/wallet', { tradeId, quantity: qty }).catch(() => {}),
-    ]);
-
-    if (batch.seller_email) {
-      sendCreditsSoldEmail(batch.seller_email, {
-        name: batch.seller_name, projectName: batch.project_name, quantity: qty,
-        amountINR: fees.sellerGetsINR.toLocaleString('en-IN'), pending: paymentMode !== 'inr',
-        walletUrl: `${process.env.FRONTEND_URL}/wallet`,
-      }).catch(e => req.log.warn('[trades/record] seller email failed:', e.message));
-    }
-
-    const { rows: updatedBuyer }  = await query('SELECT inr_balance FROM users WHERE id = $1', [req.user.id]);
-    const { rows: updatedSeller } = await query('SELECT inr_balance FROM users WHERE id = $1', [sellerId]);
-
-    return res.json({
-      success: true, tradeId, quantity: qty, pricePerCredit,
-      subtotalINR, ...fees, ethRate, txHash,
-      buyerBalance:  updatedBuyer[0]?.inr_balance?.toString(),
-      sellerBalance: updatedSeller[0]?.inr_balance?.toString(),
-      chainLogging:  paymentMode === 'inr' ? 'queued' : 'on_chain',
-      invoiceQueued: true,
-      ownershipCertId,
-      message: `Trade completed -- ${qty} credits purchased`,
-    });
-
-  } catch (e) {
-    // Handle idempotent replay
-    if (e.idempotent) {
-      const { rows: b } = await query('SELECT inr_balance FROM users WHERE id = $1', [req.user.id]);
-      return res.json({ success: true, tradeId: e.tradeId, idempotent: true,
-        buyerBalance: b[0]?.inr_balance?.toString() });
-    }
-    req.log.error('[trades/record]', e.message);
-    if (e.statusCode !== 400 && txHash) {
-      query(
-        `INSERT INTO failed_trade_records (tx_hash, buyer_id, batch_id, quantity, error)
-         VALUES ($1,$2,$3,$4,$5) ON CONFLICT (tx_hash) DO NOTHING`,
-        [txHash, req.user.id, batchId, qty, e.message.slice(0, 500)]
-      ).catch(() => {});
-    }
-    return res.status(e.statusCode || 500).json({
-      error: e.message || 'Trade settlement failed',
-      required: e.required, available: e.available,
-    });
-  }
+router.post('/record', (req, res) => {
+  res.status(410).json({
+    error: 'Deprecated. Use /api/trades/checkout-order + /api/trades/checkout-verify',
+    migration: 'https://docs.ethertrack.in/migration/settlement-engine'
+  });
 });
 
 router.post('/checkout-order', authenticate, requireKYC, tradeLimiter, async (req, res) => {
@@ -893,8 +524,174 @@ req.log.info(`[checkout-verify] Trade ${tradeId} logged on-chain (ledger, no wal
       invoiceQueued:     true,
       ownershipCertId,
       message: `Trade completed -- ${qty} credits purchased via Razorpay`,
+});
+});
+
+router.post('/wallet-checkout', authenticate, requireKYC, tradeLimiter, async (req, res) => {
+  const { listingId, quantity, pricePerCreditINR, idempotencyKey } = req.body;
+
+  if (!listingId || !quantity || !pricePerCreditINR)
+    return res.status(400).json({ error: 'listingId, quantity, pricePerCreditINR required' });
+
+  const qty = parseInt(quantity);
+  const pricePerCredit = parseFloat(pricePerCreditINR);
+  if (!qty || qty <= 0) return res.status(400).json({ error: 'Invalid quantity' });
+  if (!pricePerCredit || pricePerCredit <= 0) return res.status(400).json({ error: 'Invalid pricePerCreditINR' });
+
+  // Generate idempotency key if not provided
+  const idemKey = idempotencyKey || `wallet:${req.user.id}:${listingId}:${qty}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+
+  // Check for existing trade with same idempotency key
+  const existing = await checkIdempotency(req.user.id, idemKey);
+  if (existing) {
+    return res.json({ success: true, tradeId: existing.id, idempotent: true });
+  }
+
+  try {
+    // Generate quote
+    const quote = await settlementEngine.generateQuote(listingId, qty, req.user.id, 'inr_wallet');
+    
+    // Create trade from quote
+    const trade = await tradeService.createTrade(quote, req.user.id, { paymentMode: 'inr_wallet', idempotencyKey: idemKey });
+    
+    // Execute full settlement synchronously for INR wallet
+    await settlementEngine.transitionToFundsReserved(trade.tradeId);
+    await settlementEngine.transitionToCreditsReserved(trade.tradeId);
+    await settlementEngine.transitionToSettlementPending(trade.tradeId);
+    
+    // For INR wallet, payment is already reserved in transitionToFundsReserved
+    await settlementEngine.transitionToPaymentSettled(trade.tradeId, { 
+      providerReference: `wallet_${trade.paymentId}`, 
+      capturedAt: new Date() 
     });
+    
+    await settlementEngine.transitionToFeesCollected(trade.tradeId);
+    await settlementEngine.transitionToSellerPaid(trade.tradeId);
+    await settlementEngine.transitionToBuyerCredited(trade.tradeId);
+    await settlementEngine.transitionToSettled(trade.tradeId);
+
+    // Fetch updated trade
+    const updatedTrade = await tradeService.getTrade(trade.tradeId);
+    
+    // Update user's INR balance
+    const { rows: buyerRows } = await query('SELECT inr_balance FROM users WHERE id = $1', [req.user.id]);
+    
+    return res.json({
+      success: true,
+      tradeId: trade.tradeId,
+      quantity: qty,
+      pricePerCredit,
+      ...updatedTrade,
+      buyerBalance: buyerRows[0]?.inr_balance?.toString(),
+      message: `Trade completed -- ${qty} credits purchased from INR wallet`,
+    });
+  } catch (e) {
+    req.log.error('[trades/wallet-checkout]', e.message);
+    return res.status(e.statusCode || 500).json({ error: e.message || 'Trade settlement failed' });
+  }
+});
+
+router.post('/record-eth', authenticate, requireKYC, tradeLimiter, async (req, res) => {
+  const { batchId, listingId, quantity, txHash, pricePerCreditINR, idempotencyKey } = req.body;
+
+  if (!batchId || !quantity || !txHash || !pricePerCreditINR)
+    return res.status(400).json({ error: 'batchId, quantity, txHash, pricePerCreditINR required' });
+
+  const qty = parseInt(quantity);
+  const pricePerCredit = parseFloat(pricePerCreditINR);
+  if (!qty || qty <= 0) return res.status(400).json({ error: 'Invalid quantity' });
+  if (!pricePerCredit || pricePerCredit <= 0) return res.status(400).json({ error: 'Invalid pricePerCreditINR' });
+
+  const idemKey = idempotencyKey || `eth:${req.user.id}:${batchId}:${qty}:${txHash}`;
+
+  // Check for existing trade with same idempotency key
+  const existing = await checkIdempotency(req.user.id, idemKey);
+  if (existing) {
+    return res.json({ success: true, tradeId: existing.id, idempotent: true });
+  }
+
+  // Verify the on-chain transaction first
+  const verification = await chainLogger.verifyTradeOnChain({
+    dbTradeId: null,
+    tokenId: 0, // Will be fetched from batch
+    quantity: qty,
+    pricePerCreditINR: pricePerCredit,
+    paymentMode: 'eth',
+    buyerWallet: req.user.wallet_address,
+    sellerWallet: null, // Will be fetched from batch
+    settledAt: new Date(),
   });
+
+  if (!verification.valid) {
+    return res.status(400).json({ error: `On-chain verification failed: ${verification.error}` });
+  }
+
+  try {
+    const { rows: batches } = await query(
+      `SELECT cb.*, u.id AS seller_id, u.wallet_address AS seller_wallet
+       FROM carbon_batches cb JOIN users u ON u.id = cb.user_id
+       WHERE cb.id = $1`, [batchId]
+    );
+    if (!batches.length) return res.status(404).json({ error: 'Batch not found' });
+    const batch = batches[0];
+
+    if (batch.seller_id === req.user.id)
+      return res.status(400).json({ error: 'Cannot buy your own listing' });
+    if (batch.available_credits < qty)
+      return res.status(400).json({ error: `Only ${batch.available_credits} credits available` });
+
+    const ethRate = await getLiveETHRate();
+    const subtotalINR = parseFloat((pricePerCredit * qty).toFixed(2));
+    const fees = calcFees(subtotalINR);
+
+    // Generate quote and create trade via SettlementEngine
+    const quote = await settlementEngine.generateQuote(listingId, qty, req.user.id, 'eth');
+    const trade = await tradeService.createTrade(quote, req.user.id, { 
+      paymentMode: 'eth', 
+      ethTxHash: txHash, 
+      idempotencyKey: idemKey 
+    });
+
+    // Execute settlement (chain already confirmed)
+    await settlementEngine.transitionToFundsReserved(trade.tradeId);
+    await settlementEngine.transitionToCreditsReserved(trade.tradeId);
+    await settlementEngine.transitionToSettlementPending(trade.tradeId);
+    await settlementEngine.transitionToCreditTransferSubmitted(trade.tradeId, []);
+    await settlementEngine.transitionToCreditTransferConfirmed(trade.tradeId);
+    await settlementEngine.transitionToPaymentSettled(trade.tradeId, { 
+      providerReference: txHash, 
+      capturedAt: new Date() 
+    });
+    await settlementEngine.transitionToFeesCollected(trade.tradeId);
+    await settlementEngine.transitionToSellerPaid(trade.tradeId);
+    await settlementEngine.transitionToBuyerCredited(trade.tradeId);
+    await settlementEngine.transitionToSettled(trade.tradeId);
+
+    // Update chain status
+    await query(
+      `UPDATE trades SET chain_status = 'confirmed', chain_tx_hash = $1, chain_block = $2 WHERE id = $3`,
+      [verification.loggedAtBlock || 0, verification.loggedAtBlock || 0, trade.tradeId]
+    );
+
+    const { rows: buyerRows } = await query('SELECT inr_balance FROM users WHERE id = $1', [req.user.id]);
+
+    return res.json({
+      success: true,
+      tradeId: trade.tradeId,
+      quantity: qty,
+      pricePerCredit,
+      subtotalINR,
+      ...fees,
+      ethRate,
+      txHash,
+      chainLogging: 'verified',
+      message: `Trade completed -- ${qty} credits purchased via ETH`,
+    });
+  } catch (e) {
+    req.log.error('[trades/record-eth]', e.message);
+    return res.status(e.statusCode || 500).json({ error: e.message || 'Trade settlement failed' });
+  }
+});
 
 router.get('/:id/verify', readLimiter, async (req, res) => {
   try {
